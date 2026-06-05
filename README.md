@@ -69,7 +69,75 @@ sequenceDiagram
 * **Workspace AST Indexer:** Uses **Tree-Sitter** to parse JavaScript, TypeScript, Python, and Go codebases, generating a semantic repository map for precise context insertion.
 * **Free Multi-Provider Routing:** Connects to your FreeLLMAPI server to query models like Llama 3.3, Qwen 3, and Gemini 2.5/3.1 without incurring high API costs.
 * **Smart Cooldown & Failover:** The CLI automatically tracks rate-limited providers (429/402/404) and switches to working alternatives in the fallback chain mid-request.
+* **Resilience Stack:** Stream recovery, provider cooldown, context-budget enforcement, and a local telemetry sink work together so the agent stays productive on flaky networks and large codebases. See [Resilience](#-resilience) below.
 * **Built-in Workspace Guard:** Safely manages workspace locks, preventing concurrent file writes and ensuring git safety.
+
+---
+
+## 🛡 Resilience
+
+Fixo CLI is built for hostile environments: free-tier rate limits, dropped SSE streams, providers that 502 mid-response, and codebases larger than any single context window. The resilience stack is organised into four independent pillars, each of which can be tuned or disabled individually via `~/.fixocli/config.json`.
+
+| Pillar | Module | What it does | Default |
+| :--- | :--- | :--- | :--- |
+| **Stream Recovery** | `src/agent/stream-glue.ts` | Detects mid-stream SSE cuts *after* at least one chunk has been yielded, rebuilds the message list with the partial response, and re-issues the request transparently. | `auto` (up to 3 attempts) |
+| **Provider Cooldown** | `src/agent/provider-cooldown.ts` | Tracks per-provider success/failure rates. On 429/5xx, applies an exponential cooldown (30/60/120/240/300s for rate limits, 10/20/40/80/120s for server errors) and steers subsequent requests to healthier providers. | always on |
+| **Context Budgeting** | `src/agent/context-budget.ts` | Counts real BPE tokens (via `gpt-tokenizer`, cl100k / o200k) before every LLM call. When the next request would overflow, runs a tiered trim (prune tool outputs → drop oldest turn-pairs → truncate tool args) and, if still over, marks the conversation for LLM-based compaction. | `auto` at 80% of model window |
+| **Telemetry** | `src/agent/telemetry.ts` | Append-only NDJSON sink at `~/.fixocli/telemetry.jsonl` (rotated at 1 MiB). Emits structured events for retries, cooldowns, stream resumes, context compactions, tool failures, and provider errors. `diagnoseFailures()` reads the recent window and surfaces remediation hints. | `local: on, remote: off` |
+
+### ResilienceConfig schema
+
+All four pillars are controlled by the `preferences.resilience` block in your config. Every field has a safe default, so you can omit the entire block if you want the shipped behaviour.
+
+```jsonc
+{
+  "preferences": {
+    "telemetry": true,            // Master switch for *all* telemetry
+    "telemetryLocal": true,       // Append events to ~/.fixocli/telemetry.jsonl
+    "telemetryRemote": false,     // POST events to the FreeLLMAPI server (anonymous)
+    "resilience": {
+      "streamResume":       "auto",    // "auto" | "never"  (kill-switch for stream recovery)
+      "maxResumeAttempts":  3,         // additional attempts after a mid-stream cut
+      "useWithRetry":       true,      // use the withRetry engine for non-streaming calls
+      "contextBudget":      "auto",    // "auto" | "truncate" | "never"  (kill-switch for budget enforcement)
+      "contextBudgetRatio": 0.8        // fraction of model window used as the hard cap
+    }
+  }
+}
+```
+
+| Field | Type | Default | Behaviour |
+| :--- | :--- | :--- | :--- |
+| `streamResume` | `"auto" \| "never"` | `"auto"` | When `never`, `chatStream` is called directly and cuts bubble up to the caller as `StreamResumeExhaustedError`. |
+| `maxResumeAttempts` | `number` | `3` | How many additional attempts the resume engine makes after a mid-stream cut. 0 disables resume. |
+| `useWithRetry` | `boolean` | `true` | Toggle the exponential-backoff `withRetry` engine for non-streaming calls. |
+| `contextBudget` | `"auto" \| "truncate" \| "never"` | `"auto"` | `auto` = enforce + LLM-compact; `truncate` = enforce only (no LLM fallback); `never` = skip the enforcer entirely. |
+| `contextBudgetRatio` | `number` (0–1) | `0.8` | Fraction of the model's input window used as the hard cap. 0.8 leaves 20% headroom for the response. |
+| `telemetryLocal` | `boolean` | `true` | Disable to skip the local NDJSON sink while keeping the remote one (if enabled). |
+| `telemetryRemote` | `boolean` | `false` | Opt in to the legacy HTTP poster for anonymous usage stats. |
+
+### Diagnosing a bad session
+
+After a session that didn't go well, run the diagnostic from the CLI:
+
+```bash
+fixo --diagnose
+```
+
+Or read the log directly:
+
+```bash
+tail -50 ~/.fixocli/telemetry.jsonl | jq .
+```
+
+`diagnoseFailures()` looks at the last hour by default and reports patterns such as:
+- 3+ retries in the window → likely flaky network or rate-limit
+- provider cooldown → at least one provider is rate-limiting; others are being preferred automatically
+- stream-resume exhaustion → raise `maxResumeAttempts` or check your network
+- repeated tool failures → the same tool has failed 3+ times; check its inputs
+- 5+ provider errors → likely a provider outage
+
+See [`docs/RESILIENCE.md`](docs/RESILIENCE.md) for the pillar-by-pillar design notes.
 
 ---
 
