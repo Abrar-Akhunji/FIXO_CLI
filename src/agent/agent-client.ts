@@ -13,6 +13,7 @@ import type {
 } from '../shared/types.js';
 import { colors } from '../ui/colors.js';
 import { ProvidersManager } from './providers-manager.js';
+import { providerCooldown } from './provider-cooldown.js';
 import { DEFAULT_API_URL } from '../config.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
@@ -266,6 +267,18 @@ export class AgentClient {
     return null;
   }
 
+  /**
+   * Maps a model id to the provider that will actually serve the
+   * request — used as the key for `providerCooldown` tracking. The
+   * `freellmapi` sentinel covers the proxy path; everything else
+   * routes through a direct provider.
+   */
+  private getProviderId(model: string): string {
+    const direct = this.resolveDirectConfig(model);
+    if (direct) return direct.providerName;
+    return 'freellmapi';
+  }
+
   /* ─── Non-streaming chat ─── */
 
   async chat(
@@ -273,6 +286,9 @@ export class AgentClient {
     model: string,
     options: ChatOptions = {},
   ): Promise<ChatResult> {
+    const providerId = this.getProviderId(model);
+    providerCooldown.assertAvailable(providerId);
+
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = direct && direct.providerName === 'anthropic';
 
@@ -361,6 +377,7 @@ export class AgentClient {
 
         // Retryable errors
         if (RETRYABLE_STATUS_CODES.has(response.status)) {
+          providerCooldown.recordFailure(providerId, response.status, `HTTP ${response.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             console.log(
@@ -380,6 +397,7 @@ export class AgentClient {
         const data = isAnthropicDirect ? translateAnthropicToOpenAI(rawData) : rawData as ChatCompletionResponse;
         const choice = data.choices[0];
 
+        providerCooldown.recordSuccess(providerId);
         return {
           content: choice?.message?.content ?? null,
           tool_calls: choice?.message?.tool_calls ?? null,
@@ -434,6 +452,7 @@ export class AgentClient {
         }
 
         if (isNetworkError && attempt < MAX_RETRIES) {
+          providerCooldown.recordFailure(providerId, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           console.log(
             `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
@@ -740,6 +759,9 @@ export class AgentClient {
     model: string,
     options: ChatOptions = {},
   ): AsyncGenerator<StreamChunk> {
+    const providerId = this.getProviderId(model);
+    providerCooldown.assertAvailable(providerId);
+
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = !!(direct && direct.providerName === 'anthropic');
 
@@ -822,6 +844,7 @@ export class AgentClient {
           hasYielded = true;
           yield chunk;
         }
+        providerCooldown.recordSuccess(providerId);
         return; // Success — don't retry
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
@@ -873,6 +896,7 @@ export class AgentClient {
         }
 
         if (lastError instanceof HttpError && RETRYABLE_STATUS_CODES.has(lastError.status)) {
+          providerCooldown.recordFailure(providerId, lastError.status, `HTTP ${lastError.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             console.log(
@@ -884,6 +908,7 @@ export class AgentClient {
         }
 
         if (isNetworkError && attempt < MAX_RETRIES) {
+          providerCooldown.recordFailure(providerId, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           console.log(
             `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
@@ -901,6 +926,9 @@ export class AgentClient {
   }
 
   async getEmbedding(text: string, model = 'text-embedding-3-small'): Promise<number[]> {
+    const providerId = this.getProviderId(model);
+    providerCooldown.assertAvailable(providerId);
+
     const direct = this.resolveDirectConfig(model);
     let requestUrl = `${this.baseUrl}/embeddings`;
     let headers: Record<string, string> = {
@@ -930,6 +958,7 @@ export class AgentClient {
         });
 
         if (RETRYABLE_STATUS_CODES.has(response.status)) {
+          providerCooldown.recordFailure(providerId, response.status, `HTTP ${response.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             if (this.verbose) {
@@ -949,11 +978,21 @@ export class AgentClient {
 
         const data = await response.json() as { data: Array<{ embedding: number[] }> };
         if (data.data && data.data[0] && data.data[0].embedding) {
+          providerCooldown.recordSuccess(providerId);
           return data.data[0].embedding;
         }
         throw new Error('Malformed embedding response structure');
       } catch (error) {
         if (attempt >= MAX_RETRIES) throw error;
+        const isNetworkError = error instanceof Error && (
+          error.name === 'TimeoutError' ||
+          error.message.includes('ECONNREFUSED') ||
+          error.message.includes('fetch failed') ||
+          error.message.includes('ETIMEDOUT')
+        );
+        if (isNetworkError) {
+          providerCooldown.recordFailure(providerId, 0, error.message.slice(0, 200));
+        }
         const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
         await sleep(delayMs);
       }
