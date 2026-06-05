@@ -30,7 +30,7 @@
     "gemini",
     "claude-code-alternative"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@clack/prompts": "^0.9.0",
     "cheerio": "^1.2.0",

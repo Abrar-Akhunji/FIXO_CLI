@@ -2,7 +2,7 @@
 > **Autonomous, Free, Multi-Provider LLM Coding Agent CLI**
 
 [![Language](https://img.shields.io/badge/Language-TypeScript-blue.svg)](https://www.typescriptlang.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Engine](https://img.shields.io/badge/Engine-Tree--Sitter-orange.svg)](https://tree-sitter.github.io/tree-sitter/)
 [![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen.svg)]()
 
