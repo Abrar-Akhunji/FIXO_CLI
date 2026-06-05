@@ -1,0 +1,278 @@
+/**
+ * FixO CLI Provider Connector Manager.
+ * Manages user-supplied API keys for direct provider access,
+ * stored securely at ~/.fixocli/providers.json (mode 0600).
+ *
+ * When a direct key exists for a provider, FixO bypasses the
+ * FreeLLMAPI SaaS proxy and calls the provider's API natively.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+/* ──────────────────────── Provider Registry ──────────────────────── */
+
+export interface ProviderDefinition {
+  /** Short ID used as the key in providers.json */
+  name: string;
+  /** Human-readable display name */
+  displayName: string;
+  /** Base URL for the provider's API (OpenAI-compatible unless noted) */
+  baseUrl: string;
+  /** Whether this provider uses the standard OpenAI /chat/completions format */
+  openAICompat: boolean;
+  /** Example model IDs for the picker */
+  models: string[];
+  /** Whether an API key is required (some providers allow anonymous use) */
+  requiresKey: boolean;
+  /** Docs / sign-up URL for the provider */
+  docsUrl: string;
+}
+
+export const PROVIDER_REGISTRY: ProviderDefinition[] = [
+  {
+    name: 'openai',
+    displayName: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    openAICompat: true,
+    models: ['gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini', 'gpt-4.1'],
+    requiresKey: true,
+    docsUrl: 'https://platform.openai.com/api-keys',
+  },
+  {
+    name: 'anthropic',
+    displayName: 'Anthropic (Claude)',
+    baseUrl: 'https://api.anthropic.com/v1',
+    openAICompat: false,
+    models: ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-3-5'],
+    requiresKey: true,
+    docsUrl: 'https://console.anthropic.com/settings/keys',
+  },
+  {
+    name: 'google',
+    displayName: 'Google (Gemini)',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    openAICompat: true,
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
+    requiresKey: true,
+    docsUrl: 'https://aistudio.google.com/app/apikey',
+  },
+  {
+    name: 'groq',
+    displayName: 'Groq',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    openAICompat: true,
+    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
+    requiresKey: true,
+    docsUrl: 'https://console.groq.com/keys',
+  },
+  {
+    name: 'mistral',
+    displayName: 'Mistral AI',
+    baseUrl: 'https://api.mistral.ai/v1',
+    openAICompat: true,
+    models: ['mistral-large-latest', 'mistral-small-latest', 'codestral-latest'],
+    requiresKey: true,
+    docsUrl: 'https://console.mistral.ai/api-keys/',
+  },
+  {
+    name: 'cohere',
+    displayName: 'Cohere',
+    baseUrl: 'https://api.cohere.ai/compatibility/v1',
+    openAICompat: true,
+    models: ['command-r-plus', 'command-r', 'command-a-03-2025'],
+    requiresKey: true,
+    docsUrl: 'https://dashboard.cohere.com/api-keys',
+  },
+  {
+    name: 'openrouter',
+    displayName: 'OpenRouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    openAICompat: true,
+    models: ['anthropic/claude-opus-4-5', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'meta-llama/llama-4-maverick'],
+    requiresKey: true,
+    docsUrl: 'https://openrouter.ai/keys',
+  },
+  {
+    name: 'nvidia',
+    displayName: 'NVIDIA NIM',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+    openAICompat: true,
+    models: ['nvidia/llama-3.1-nemotron-ultra-253b-v1', 'meta/llama-3.1-405b-instruct'],
+    requiresKey: true,
+    docsUrl: 'https://build.nvidia.com/explore/discover',
+  },
+  {
+    name: 'cerebras',
+    displayName: 'Cerebras',
+    baseUrl: 'https://api.cerebras.ai/v1',
+    openAICompat: true,
+    models: ['llama3.3-70b', 'llama-4-scout-17b-16e-instruct', 'qwen-3-32b'],
+    requiresKey: true,
+    docsUrl: 'https://cloud.cerebras.ai/',
+  },
+  {
+    name: 'sambanova',
+    displayName: 'SambaNova',
+    baseUrl: 'https://api.sambanova.ai/v1',
+    openAICompat: true,
+    models: ['Meta-Llama-3.3-70B-Instruct', 'DeepSeek-R1-671B', 'Llama-4-Maverick-17B-128E-Instruct'],
+    requiresKey: true,
+    docsUrl: 'https://cloud.sambanova.ai/',
+  },
+  {
+    name: 'github',
+    displayName: 'GitHub Models',
+    baseUrl: 'https://models.github.ai/inference',
+    openAICompat: true,
+    models: ['openai/gpt-4o', 'microsoft/phi-4', 'meta/llama-3.3-70b-instruct'],
+    requiresKey: true,
+    docsUrl: 'https://github.com/settings/tokens',
+  },
+  {
+    name: 'xai',
+    displayName: 'xAI (Grok)',
+    baseUrl: 'https://api.x.ai/v1',
+    openAICompat: true,
+    models: ['grok-3', 'grok-3-mini', 'grok-2-1212'],
+    requiresKey: true,
+    docsUrl: 'https://console.x.ai/',
+  },
+  {
+    name: 'zen',
+    displayName: 'Zen (OpenCode)',
+    baseUrl: 'https://opencode.ai/zen/v1',
+    openAICompat: true,
+    models: [
+      'kimi-k2.6',
+      'mimo-v2.5-free',
+      'minimax-m2.7',
+      'minimax-m3-free',
+      'nemotron-3-super-free',
+      'qwen3.5-plus',
+      'qwen3.6-plus',
+      'stepfun/step-3.5-flash-free',
+      'z-ai/glm-4.7-flash-free',
+      'deepseek/deepseek-chat',
+    ],
+    requiresKey: true,
+    docsUrl: 'https://opencode.ai/zen',
+  },
+];
+
+/* ──────────────────────── Storage Schema ──────────────────────── */
+
+interface ProviderEntry {
+  apiKey: string;
+  addedAt: string;
+  note?: string;
+}
+
+type ProvidersStore = Record<string, ProviderEntry>;
+
+/* ──────────────────────── ProvidersManager ──────────────────────── */
+
+function getProvidersFilePath(): string {
+  return path.join(os.homedir(), '.fixocli', 'providers.json');
+}
+
+function loadStore(): ProvidersStore {
+  const filePath = getProvidersFilePath();
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(raw) as ProvidersStore;
+  } catch {
+    return {};
+  }
+}
+
+function saveStore(store: ProvidersStore): void {
+  const dir = path.join(os.homedir(), '.fixocli');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const filePath = getProvidersFilePath();
+  fs.writeFileSync(filePath, JSON.stringify(store, null, 2) + '\n', {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  try { fs.chmodSync(filePath, 0o600); } catch { /* ignore */ }
+}
+
+function maskKey(key: string): string {
+  if (key.length <= 8) return '••••••••';
+  return key.slice(0, 6) + '••••••' + key.slice(-4);
+}
+
+export const ProvidersManager = {
+  /** List all connected providers with masked keys. */
+  list(): Array<{ name: string; displayName: string; maskedKey: string; addedAt: string }> {
+    const store = loadStore();
+    return Object.entries(store).map(([name, entry]) => {
+      const def = PROVIDER_REGISTRY.find(p => p.name === name);
+      return {
+        name,
+        displayName: def?.displayName ?? name,
+        maskedKey: maskKey(entry.apiKey),
+        addedAt: entry.addedAt,
+      };
+    });
+  },
+
+  /** Add or update a provider API key. */
+  add(name: string, apiKey: string, note?: string): void {
+    const store = loadStore();
+    store[name] = {
+      apiKey: apiKey.trim(),
+      addedAt: new Date().toISOString(),
+      ...(note ? { note } : {}),
+    };
+    saveStore(store);
+  },
+
+  /** Remove a provider key. Returns true if removed, false if not found. */
+  remove(name: string): boolean {
+    const store = loadStore();
+    if (!store[name]) return false;
+    delete store[name];
+    saveStore(store);
+    return true;
+  },
+
+  /** Get the raw API key for a provider, or null if not configured. */
+  getKey(name: string): string | null {
+    const store = loadStore();
+    return store[name]?.apiKey ?? null;
+  },
+
+  /** Get the base URL and key for a provider — for direct bypass. */
+  getDirectConfig(name: string): { apiKey: string; baseUrl: string; displayName: string } | null {
+    const store = loadStore();
+    const entry = store[name];
+    if (!entry) return null;
+    const def = PROVIDER_REGISTRY.find(p => p.name === name);
+    if (!def) return null;
+    return {
+      apiKey: entry.apiKey,
+      baseUrl: def.baseUrl,
+      displayName: def.displayName,
+    };
+  },
+
+  /** Check if a provider key is configured. */
+  has(name: string): boolean {
+    const store = loadStore();
+    return !!store[name];
+  },
+
+  /** Get provider definition by name. */
+  getDefinition(name: string): ProviderDefinition | undefined {
+    return PROVIDER_REGISTRY.find(p => p.name === name);
+  },
+
+  /** Get all registered provider definitions. */
+  getAllDefinitions(): ProviderDefinition[] {
+    return PROVIDER_REGISTRY;
+  },
+};
