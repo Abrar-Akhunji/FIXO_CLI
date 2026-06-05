@@ -11,6 +11,8 @@
 
 import type { ChatMessage } from '../shared/types.js';
 import type { AgentClient } from './agent-client.js';
+import { countMessagesTokens, countTokens } from './tokenizer.js';
+import { ContextBudgetEnforcer } from './context-budget.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -155,11 +157,13 @@ export class ConversationManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Approximate token count for a piece of text.
-   * Uses the common ~4-characters-per-token heuristic.
+   * Real BPE token count for a piece of text. Uses the OpenAI cl100k
+   * encoding by default (good proxy for llama-3, mistral, qwen,
+   * deepseek, gemini etc. that the FreeLLMAPI proxy fronts). Pass the
+   * model name for an encoder-tuned count.
    */
-  private estimateTokens(text: string): number {
-    return Math.ceil(text.length / 4);
+  private estimateTokens(text: string, model?: string | null): number {
+    return countTokens(text, model);
   }
 
   /**
@@ -167,11 +171,7 @@ export class ConversationManager {
    * `content` and any attached `tool_calls`.
    */
   private estimateMessageTokens(message: ChatMessage): number {
-    const contentTokens = this.estimateTokens(message.content ?? '');
-    const toolCallTokens = this.estimateTokens(
-      JSON.stringify(message.tool_calls ?? []),
-    );
-    return contentTokens + toolCallTokens;
+    return countMessagesTokens([message]);
   }
 
   /**
@@ -194,6 +194,52 @@ export class ConversationManager {
     const userTokens = this.estimateTokens(userMessage);
     const summaryTokens = this.summary ? this.estimateTokens(this.summary) : 0;
     return systemTokens + summaryTokens + historyTokens + userTokens;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Budget enforcement (Pillar 4)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Proactively trim the conversation to fit a token budget, using the
+   * tiered {@link ContextBudgetEnforcer} strategy. The `model` argument
+   * is forwarded to the BPE encoder so the counts are tuned to the
+   * downstream provider.
+   *
+   * If the enforcer cannot fit the budget even after pruning tool
+   * outputs, dropping old turns, and truncating tool arguments, it
+   * sets `report.markForCompaction = true`; the caller should then
+   * invoke {@link ConversationManager.compact} to summarise the
+   * oldest turns via an LLM.
+   *
+   * Returns a report describing the actions taken and the new total
+   * token count.
+   */
+  enforceBudget(maxTokens: number, model?: string | null): {
+    trimmed: boolean;
+    report: {
+      tokensBefore: number;
+      tokensAfter: number;
+      actions: ReadonlyArray<string>;
+      markForCompaction: boolean;
+      withinBudget: boolean;
+    };
+  } {
+    const enforcer = new ContextBudgetEnforcer(model);
+    const { messages, report } = enforcer.enforce(this.history, { maxTokens, model });
+    if (report.actions[0] !== 'none') {
+      this.history = messages;
+    }
+    return {
+      trimmed: report.actions[0] !== 'none',
+      report: {
+        tokensBefore: report.tokensBefore,
+        tokensAfter: report.tokensAfter,
+        actions: report.actions,
+        markForCompaction: report.markForCompaction,
+        withinBudget: report.withinBudget,
+      },
+    };
   }
 
   // ---------------------------------------------------------------------------

@@ -180,6 +180,8 @@ export class SingleAgent {
 
       // Auto-compact if context is getting large
       await this.autoCompactIfNeeded(conversation, trivialSystem, context.task, context.model);
+      // Pillar 4 — proactive budget enforcement
+      await this.enforceContextBudget(conversation, trivialSystem, context.task, context.model);
 
       const messages: ChatMessage[] = [
         { role: 'system', content: trivialSystem },
@@ -213,6 +215,8 @@ export class SingleAgent {
 
     // Auto-compact before building messages if context is near limit
     await this.autoCompactIfNeeded(conversation, systemPrompt, context.task, context.model);
+    // Pillar 4 — proactive budget enforcement
+    await this.enforceContextBudget(conversation, systemPrompt, context.task, context.model);
 
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -500,6 +504,8 @@ export class SingleAgent {
 
     // Auto-compact before chat if context is near limit
     await this.autoCompactIfNeeded(conversation, systemPrompt, task, context.model);
+    // Pillar 4 — proactive budget enforcement
+    await this.enforceContextBudget(conversation, systemPrompt, task, context.model);
 
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -551,6 +557,61 @@ export class SingleAgent {
     } else {
       console.log(`${colors.dim}[Context] Could not compact further. Proceeding with current context.${colors.reset}`);
     }
+  }
+
+  /**
+   * Pillar 4 — proactive context-budget enforcement.
+   *
+   * Runs the {@link ContextBudgetEnforcer} against the conversation
+   * history right before the LLM call. Honours the kill-switch in
+   * `preferences.resilience.contextBudget`:
+   *
+   *   - `never`    — no-op, returns immediately.
+   *   - `truncate` — runs the enforcer; if it asks for compaction,
+   *                  we skip the LLM call (the next request will
+   *                  likely 413) and let the caller see a smaller
+   *                  prompt.
+   *   - `auto`     — runs the enforcer; if it asks for compaction,
+   *                  we additionally call `ConversationManager.compact`
+   *                  to summarise the oldest turns via the LLM.
+   *
+   * Returns a short report so callers can log what happened.
+   */
+  async enforceContextBudget(
+    conversation: ConversationManager,
+    systemPrompt: string,
+    userMessage: string,
+    model: string,
+  ): Promise<{ trimmed: boolean; compacted: boolean; tokensAfter: number }> {
+    const config = loadConfig();
+    const policy = config.preferences.resilience?.contextBudget ?? 'auto';
+    if (policy === 'never') {
+      return { trimmed: false, compacted: false, tokensAfter: 0 };
+    }
+
+    const limit = conversation.getContextLimit();
+    const ratio = config.preferences.resilience?.contextBudgetRatio ?? 0.8;
+    const maxTokens = Math.max(1, Math.floor(limit * ratio));
+
+    const { trimmed, report } = conversation.enforceBudget(maxTokens, model);
+    if (!trimmed) {
+      return { trimmed: false, compacted: false, tokensAfter: report.tokensAfter };
+    }
+
+    console.log(
+      `${colors.dim}[ContextBudget] ${report.tokensAfter} tokens after ` +
+      `${report.actions.join(' → ')} (was ${report.tokensBefore}).${colors.reset}`
+    );
+
+    if (report.markForCompaction && policy === 'auto') {
+      // Defer to the existing auto-compaction path which produces a
+      // structured LLM-generated summary.
+      await this.autoCompactIfNeeded(conversation, systemPrompt, userMessage, model);
+      const reEstimated = conversation.estimateNextRequestTokens(systemPrompt, userMessage);
+      return { trimmed: true, compacted: true, tokensAfter: reEstimated };
+    }
+
+    return { trimmed: true, compacted: false, tokensAfter: report.tokensAfter };
   }
 
   /** Proxy health check passthrough. */

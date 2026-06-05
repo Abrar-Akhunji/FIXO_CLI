@@ -8,6 +8,20 @@ export const DEFAULT_API_URL = 'https://api.freellmapi.com/v1';
 /** Stream-resume policy. */
 export type StreamResumePolicy = 'auto' | 'never';
 
+/**
+ * Context-budget policy.
+ *  - `auto`     — proactive enforcement is enabled and, if the enforcer
+ *                 asks for compaction, the agent summarises the oldest
+ *                 turns via an LLM call. (default)
+ *  - `truncate` — proactive enforcement runs but the agent will NOT
+ *                 trigger LLM-based compaction. If even the enforcer
+ *                 cannot fit the budget, the request is sent anyway
+ *                 (and may 413).
+ *  - `never`    — kill-switch. No enforcement, no compaction. Useful
+ *                 when a user wants exact 1:1 historical behaviour.
+ */
+export type ContextBudgetPolicy = 'auto' | 'truncate' | 'never';
+
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
 export interface ResilienceConfig {
   /** When 'auto', mid-stream cuts are resumed transparently (default). */
@@ -16,6 +30,19 @@ export interface ResilienceConfig {
   maxResumeAttempts: number;
   /** When true, the new withRetry engine is used for non-streaming calls. */
   useWithRetry: boolean;
+  /**
+   * Context-budget policy. When 'auto' or 'truncate', the
+   * {@link ContextBudgetEnforcer} runs before every LLM call and
+   * trims the conversation to fit the model's input window. When
+   * 'auto', the agent may also call `compact()` to summarise the
+   * oldest turns.
+   */
+  contextBudget: ContextBudgetPolicy;
+  /**
+   * Fraction of the model context window to use as the hard cap when
+   * enforcing the budget. 0.8 leaves 20% headroom for the response.
+   */
+  contextBudgetRatio: number;
 }
 
 /**
@@ -76,6 +103,8 @@ export function getDefaultConfig(): FreeLLMConfig {
         streamResume: 'auto',
         maxResumeAttempts: 3,
         useWithRetry: true,
+        contextBudget: 'auto',
+        contextBudgetRatio: 0.8,
       },
     },
     _firstRunComplete: false,
@@ -96,12 +125,21 @@ export function loadConfig(): FreeLLMConfig {
     const defaults = getDefaultConfig();
 
     // Merge top-level keys while keeping nested `preferences` safe.
+    // `resilience` is deep-merged so old configs that predate a new
+    // resilience field still pick up the new default.
+    const parsedPreferences = parsed.preferences ?? {};
+    const parsedResilience =
+      (parsedPreferences as { resilience?: Partial<ResilienceConfig> }).resilience ?? {};
     return {
       ...defaults,
       ...parsed,
       preferences: {
         ...defaults.preferences,
-        ...(parsed.preferences ?? {}),
+        ...parsedPreferences,
+        resilience: {
+          ...defaults.preferences.resilience,
+          ...parsedResilience,
+        },
       },
     };
   } catch {
