@@ -60,6 +60,20 @@ export interface FreeLLMConfig {
     maxRetries: number;
     policy: PolicyProfile;
     telemetry: boolean;
+    /**
+     * Local NDJSON sink. Defaults to true. When false, no events are
+     * written to `~/.fixocli/telemetry.jsonl` — useful for users who
+     * want to keep their disk private but still want to send events
+     * to the remote sink.
+     */
+    telemetryLocal: boolean;
+    /**
+     * Remote HTTP sink (legacy). Defaults to false. When true, the
+     * legacy `logTelemetry` HTTP poster is re-enabled alongside the
+     * local sink. The free FixO API server collects anonymous usage
+     * stats so we can prioritise provider fixes.
+     */
+    telemetryRemote: boolean;
     resilience: ResilienceConfig;
   };
   _firstRunComplete: boolean;
@@ -99,6 +113,8 @@ export function getDefaultConfig(): FreeLLMConfig {
       maxRetries: 3,
       policy: 'shell-confirm',
       telemetry: true,
+      telemetryLocal: true,
+      telemetryRemote: false,
       resilience: {
         streamResume: 'auto',
         maxResumeAttempts: 3,

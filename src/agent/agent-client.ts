@@ -20,6 +20,7 @@ import {
   StreamResumeExhaustedError,
 } from './stream-glue.js';
 import { DEFAULT_API_URL } from '../config.js';
+import { recordTelemetry, telemetry } from './telemetry.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -27,6 +28,31 @@ const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 1500;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503]);
 const BASE_URL = process.env.FIXO_API_URL || DEFAULT_API_URL;
+
+/** Wrapper around `providerCooldown.recordFailure` that also emits a
+ *  telemetry event. Keeps the 6 callsites terse. */
+function trackProviderError(
+  providerId: string,
+  status: number,
+  message: string,
+): number {
+  const cooldownMs = providerCooldown.recordFailure(providerId, status, message);
+  if (cooldownMs > 0) {
+    recordTelemetry(
+      telemetry.cooldown({
+        providerId,
+        status,
+        cooldownMs,
+        reason: message.slice(0, 200),
+      }),
+    );
+  } else if (status >= 400) {
+    recordTelemetry(
+      telemetry.providerError({ providerId, status, message: message.slice(0, 200) }),
+    );
+  }
+  return cooldownMs;
+}
 
 /* ──────────────────────── Interfaces ──────────────────────── */
 
@@ -382,7 +408,7 @@ export class AgentClient {
 
         // Retryable errors
         if (RETRYABLE_STATUS_CODES.has(response.status)) {
-          providerCooldown.recordFailure(providerId, response.status, `HTTP ${response.status}`);
+          trackProviderError(providerId, response.status, `HTTP ${response.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             console.log(
@@ -457,7 +483,7 @@ export class AgentClient {
         }
 
         if (isNetworkError && attempt < MAX_RETRIES) {
-          providerCooldown.recordFailure(providerId, 0, lastError.message.slice(0, 200));
+          trackProviderError(providerId, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           console.log(
             `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
@@ -901,7 +927,7 @@ export class AgentClient {
         }
 
         if (lastError instanceof HttpError && RETRYABLE_STATUS_CODES.has(lastError.status)) {
-          providerCooldown.recordFailure(providerId, lastError.status, `HTTP ${lastError.status}`);
+          trackProviderError(providerId, lastError.status, `HTTP ${lastError.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             console.log(
@@ -913,7 +939,7 @@ export class AgentClient {
         }
 
         if (isNetworkError && attempt < MAX_RETRIES) {
-          providerCooldown.recordFailure(providerId, 0, lastError.message.slice(0, 200));
+          trackProviderError(providerId, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           console.log(
             `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
@@ -989,6 +1015,14 @@ export class AgentClient {
 
         // Errors that are explicitly not candidates for a resume.
         if (!isMidStreamResumable(err) || cutDuringToolCall) {
+          recordTelemetry(
+            telemetry.streamResume({
+              resumeAttempt,
+              partialTokens: Math.ceil(reconstructPartialResponse(attemptChunks).length / 4),
+              ok: false,
+              reason: cutDuringToolCall ? 'tool-call-cut' : 'non-resumable',
+            }),
+          );
           throw new StreamResumeExhaustedError(
             cutDuringToolCall
               ? `Stream cut during a tool call after ${attemptChunks.length} chunks; cannot resume.`
@@ -1005,6 +1039,14 @@ export class AgentClient {
         }
 
         if (resumeAttempt >= maxResumeAttempts) {
+          recordTelemetry(
+            telemetry.streamResume({
+              resumeAttempt,
+              partialTokens: Math.ceil(reconstructPartialResponse(attemptChunks).length / 4),
+              ok: false,
+              reason: 'exhausted',
+            }),
+          );
           throw new StreamResumeExhaustedError(
             `Stream resume attempts exhausted (${resumeAttempt}/${maxResumeAttempts}).`,
             {
@@ -1017,6 +1059,9 @@ export class AgentClient {
 
         const partial = reconstructPartialResponse(attemptChunks);
         if (partial === '') {
+          recordTelemetry(
+            telemetry.streamResume({ resumeAttempt, partialTokens: 0, ok: false, reason: 'empty-partial' }),
+          );
           throw new StreamResumeExhaustedError(
             'No partial content available to resume from.',
             { resumeAttempt, chunks: attemptChunks, partial: '' },
@@ -1034,6 +1079,14 @@ export class AgentClient {
             'Begin mid-sentence if needed.',
         });
         resumeAttempt += 1;
+        // Telemetry: this attempt succeeded; the next one is in flight.
+        recordTelemetry(
+          telemetry.streamResume({
+            resumeAttempt,
+            partialTokens: Math.ceil(partial.length / 4),
+            ok: true,
+          }),
+        );
         // Loop continues with the augmented message list.
       }
     }
@@ -1072,7 +1125,7 @@ export class AgentClient {
         });
 
         if (RETRYABLE_STATUS_CODES.has(response.status)) {
-          providerCooldown.recordFailure(providerId, response.status, `HTTP ${response.status}`);
+          trackProviderError(providerId, response.status, `HTTP ${response.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             if (this.verbose) {
@@ -1105,7 +1158,7 @@ export class AgentClient {
           error.message.includes('ETIMEDOUT')
         );
         if (isNetworkError) {
-          providerCooldown.recordFailure(providerId, 0, error.message.slice(0, 200));
+          trackProviderError(providerId, 0, error.message.slice(0, 200));
         }
         const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
         await sleep(delayMs);

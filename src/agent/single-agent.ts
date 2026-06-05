@@ -14,6 +14,7 @@ import { isTrivialQuery } from '../planner.js';
 import { buildRepoMap } from './repo-map.js';
 import type { AgentContext, AgentResult } from '../types.js';
 import { loadConfig } from '../config.js';
+import { recordTelemetry, telemetry } from './telemetry.js';
 import * as p from '@clack/prompts';
 export const promptsWrapper = {
   select: p.select,
@@ -601,6 +602,15 @@ export class SingleAgent {
     console.log(
       `${colors.dim}[ContextBudget] ${report.tokensAfter} tokens after ` +
       `${report.actions.join(' → ')} (was ${report.tokensBefore}).${colors.reset}`
+    );
+
+    recordTelemetry(
+      telemetry.contextBudget({
+        tokensBefore: report.tokensBefore,
+        tokensAfter: report.tokensAfter,
+        actions: [...report.actions],
+        markedForCompaction: report.markForCompaction,
+      }),
     );
 
     if (report.markForCompaction && policy === 'auto') {
