@@ -105,7 +105,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let workspaceFiles: string[] = [];
   try {
     const { loadIndex } = await import('../indexer.js');
-    const index = loadIndex(cwd);
+    const index = await loadIndex(cwd);
     workspaceFiles = index.files.map(f => f.path);
   } catch (err) {
     // Ignore
@@ -915,18 +915,18 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           return;
 
         case '/index': {
-          const index = buildIndex(cwd);
+          const index = await buildIndex(cwd);
           workspaceFiles = index.files.map(f => f.path);
           console.log(`\n${c.green}✓ Indexed ${index.files.length} files${c.reset}`);
           return;
         }
 
         case '/find':
-          console.log(`\n${findInIndex(cwd, args.join(' '))}`);
+          console.log(`\n${await findInIndex(cwd, args.join(' '))}`);
           return;
 
         case '/explain':
-          console.log(`\n${explainIndexedTarget(cwd, args.join(' '))}`);
+          console.log(`\n${await explainIndexedTarget(cwd, args.join(' '))}`);
           return;
 
         case '/review':

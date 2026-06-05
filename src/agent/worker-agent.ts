@@ -117,16 +117,16 @@ export function getModifiedFiles(cwd: string, branchPoint: string): string[] {
   }
 }
 
-export function partitionContext(
+export async function partitionContext(
   cwd: string,
   persona: 'code' | 'test' | 'doc' | 'reviewer',
   subtaskFiles: string[] = []
-): { systemPrompt: string; filesToLoad: string[] } {
+): Promise<{ systemPrompt: string; filesToLoad: string[] }> {
   const guard = new WorkspaceGuard(cwd);
-  const index = loadIndex(cwd);
+  const index = await loadIndex(cwd);
   const branchPoint = getBranchPoint(cwd);
   const modified = getModifiedFiles(cwd, branchPoint);
-  
+
   const targetFiles = Array.from(new Set([...modified, ...subtaskFiles]));
 
   let filesToLoad: string[] = [];
@@ -233,7 +233,7 @@ export class WorkerAgent {
     tokensUsed: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
     toolCallCount: number;
   }> {
-    const { systemPrompt, filesToLoad } = partitionContext(context.cwd, subtask.persona, subtask.files);
+    const { systemPrompt, filesToLoad } = await partitionContext(context.cwd, subtask.persona, subtask.files);
     
     const parts = [
       systemPrompt,

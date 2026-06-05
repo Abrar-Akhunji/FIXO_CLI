@@ -59,7 +59,7 @@ test('planner creates and validates structured plans', () => {
   assert.equal(validatePlan({}), false);
 });
 
-test('indexer maps imports, dependents, and calculates PageRank importance', () => {
+test('indexer maps imports, dependents, and calculates PageRank importance', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-indexer-'));
   const fileA = path.join(root, 'fileA.ts');
   const fileB = path.join(root, 'fileB.ts');
@@ -68,7 +68,7 @@ test('indexer maps imports, dependents, and calculates PageRank importance', () 
   fs.writeFileSync(fileA, 'export const a = 1;', 'utf-8');
   fs.writeFileSync(fileB, 'import { a } from "./fileA.js";', 'utf-8');
   
-  const index = buildIndex(root);
+  const index = await buildIndex(root);
   assert.equal(index.files.length, 2);
   
   const indexedA = index.files.find(f => f.path === 'fileA.ts');
@@ -85,7 +85,7 @@ test('indexer maps imports, dependents, and calculates PageRank importance', () 
   // PageRank: A should have higher importance than B because B imports A
   assert.ok((indexedA.importance || 0) > (indexedB.importance || 0));
   
-  const depsReport = findCodebaseDependencies(root, 'fileA.ts');
+  const depsReport = await findCodebaseDependencies(root, 'fileA.ts');
   assert.match(depsReport, /Direct Dependents/);
   assert.match(depsReport, /fileB.ts/);
 });

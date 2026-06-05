@@ -1,94 +1,24 @@
-import * as ParserModule from 'web-tree-sitter';
 import path from 'path';
 import os from 'os';
-import { fileURLToPath } from 'url';
 import { WorkspaceGuard } from '../workspace-guard.js';
+import { ParserFactory, type ParsedCommand } from './parser-adapter.js';
 
-// Resolve parser ESM named exports
-const Parser = (ParserModule as any).Parser;
-const Language = (ParserModule as any).Language;
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-let isInitialized = false;
-let parser: any = null;
-
-/**
- * Initializes the Tree-Sitter parser using the bundled tree-sitter.wasm 
- * and tree-sitter-bash.wasm files.
- */
-export async function initTreeSitter(): Promise<void> {
-  if (isInitialized) return;
-  
-  await Parser.init({
-    locateFile(scriptName: string) {
-      if (scriptName === 'tree-sitter.wasm') {
-        return path.resolve(__dirname, '../../vendor/tree-sitter.wasm');
-      }
-      return scriptName;
-    }
-  });
-
-  const Bash = await Language.load(path.resolve(__dirname, '../../vendor/tree-sitter-bash.wasm'));
-  parser = new Parser();
-  parser.setLanguage(Bash);
-  isInitialized = true;
-}
-
-export interface ParsedCommand {
-  binary: string;
-  arguments: string[];
-  raw: string;
-}
-
-function findCommandNodes(node: any): any[] {
-  const list: any[] = [];
-  if (node.type === 'command') {
-    list.push(node);
-  }
-  for (let i = 0; i < node.childCount; i++) {
-    list.push(...findCommandNodes(node.child(i)));
-  }
-  return list;
-}
+export { ParserFactory };
+export type { ParsedCommand } from './parser-adapter.js';
 
 /**
  * Parses a shell command string into individual binary and arguments sets.
+ *
+ * Resolves the active parser via the `ParserFactory` singleton. When the
+ * underlying tree-sitter engine is healthy, the AST is used for maximum
+ * accuracy. When the WASM is unavailable (architecture mismatch, missing
+ * vendor file, etc.) the factory falls back transparently to a pure-JS
+ * regex tokenizer — the rest of the safety check pipeline keeps working
+ * unchanged.
  */
 export async function parseShellCommand(command: string): Promise<ParsedCommand[]> {
-  await initTreeSitter();
-  const tree = parser.parse(command);
-  const commandNodes = findCommandNodes(tree.rootNode);
-
-  const parsed: ParsedCommand[] = [];
-  for (const node of commandNodes) {
-    let binary = '';
-    const args: string[] = [];
-
-    // Command elements are typically child nodes of type word or string.
-    for (let i = 0; i < node.childCount; i++) {
-      const child = node.child(i);
-      if (child.type === 'command_name') {
-        binary = child.text.trim();
-      } else if (child.type === 'word' || child.type === 'string' || child.type === 'concatenation') {
-        if (!binary) {
-          binary = child.text.trim();
-        } else {
-          args.push(child.text.trim());
-        }
-      }
-    }
-
-    if (binary) {
-      parsed.push({
-        binary,
-        arguments: args,
-        raw: node.text.trim(),
-      });
-    }
-  }
-
-  return parsed;
+  const parser = await ParserFactory.getParser();
+  return parser.parseShellCommand ? parser.parseShellCommand(command) : [];
 }
 
 export interface CommandSafetyResult {
@@ -96,6 +26,14 @@ export interface CommandSafetyResult {
   reason?: string;
   affectedPath?: string;
 }
+
+const DANGEROUS_MODIFIERS = new Set([
+  'rm', 'mv', 'cp', 'mkdir', 'touch', 'chmod', 'chown', 'dd', 'ln', 'rmdir'
+]);
+
+const DANGEROUS_READERS = new Set([
+  'cat', 'less', 'more', 'grep', 'head', 'tail'
+]);
 
 function unquote(str: string): string {
   if (str.length < 2) return str;
@@ -106,14 +44,6 @@ function unquote(str: string): string {
   }
   return str;
 }
-
-const DANGEROUS_MODIFIERS = new Set([
-  'rm', 'mv', 'cp', 'mkdir', 'touch', 'chmod', 'chown', 'dd', 'ln', 'rmdir'
-]);
-
-const DANGEROUS_READERS = new Set([
-  'cat', 'less', 'more', 'grep', 'head', 'tail'
-]);
 
 /**
  * Checks whether a shell command is safe to execute based on active path safety rules.
@@ -194,4 +124,17 @@ export async function isCommandSafe(command: string, workspaceRoot: string): Pro
   }
 
   return { safe: true };
+}
+
+// ──── Backwards-compatible exports ───────────────────────────────
+
+/**
+ * @deprecated Direct tree-sitter initialisation is no longer required.
+ * `parseShellCommand` now handles initialisation internally via the
+ * `ParserFactory` singleton. This export is kept for callers that still
+ * need to explicitly warm the parser at startup; it is a no-op once
+ * the factory has already initialised.
+ */
+export async function initTreeSitter(): Promise<void> {
+  await ParserFactory.getParser();
 }

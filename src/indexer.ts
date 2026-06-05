@@ -2,6 +2,12 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { WorkspaceGuard } from './workspace-guard.js';
+import {
+  ParserFactory,
+  languageIdFromExtension,
+  type SymbolInfo,
+  type ImportInfo,
+} from './agent/parser-adapter.js';
 
 export interface IndexedFile {
   path: string;
@@ -102,98 +108,163 @@ function calculatePageRank(files: IndexedFile[]): Record<string, number> {
   return ranks;
 }
 
-export function buildIndex(cwd: string): RepoIndex {
-  const files: IndexedFile[] = [];
-  const list = listFiles(cwd);
-  
-  // First pass: extract symbols and raw imports
-  for (const file of list) {
-    const ext = path.extname(file);
-    if (!CODE_EXTENSIONS.has(ext)) continue;
-    const absolute = path.join(cwd, file);
-    const content = fs.readFileSync(absolute, 'utf-8');
-    files.push({
-      path: file,
-      hash: crypto.createHash('sha256').update(content).digest('hex'),
-      symbols: extractSymbols(content),
-      imports: extractImports(content),
-      resolvedImports: [],
-      dependents: [],
-      importance: 0,
-    });
-  }
+/**
+ * Process-local deduplication map. Concurrent `buildIndex` / `loadIndex`
+ * requests for the same `cwd` share a single in-flight promise so we
+ * never index the same repo twice in parallel.
+ */
+const inFlightBuilds = new Map<string, Promise<RepoIndex>>();
 
-  // Second pass: resolve internal imports & build dependents
-  const fileMap = new Map<string, IndexedFile>();
-  for (const f of files) {
-    fileMap.set(f.path, f);
-  }
+/**
+ * Builds a fresh `RepoIndex` for the workspace at `cwd` and persists it
+ * to `.fixo/index/repo-index.json`. Routes symbol and import extraction
+ * through the `ParserFactory` so the same call site transparently uses
+ * tree-sitter when the WASM is available and the regex fallback when
+ * it is not.
+ */
+export function buildIndex(cwd: string): Promise<RepoIndex> {
+  const cached = inFlightBuilds.get(cwd);
+  if (cached) return cached;
 
-  for (const f of files) {
-    const resolvedSet = new Set<string>();
-    for (const imp of f.imports) {
-      const resolved = resolveInternalImport(cwd, f.path, imp);
-      if (resolved && fileMap.has(resolved)) {
-        resolvedSet.add(resolved);
-      }
+  const promise = (async (): Promise<RepoIndex> => {
+    const files: IndexedFile[] = [];
+    const list = listFiles(cwd);
+
+    // Initialise the parser factory once and reuse the resulting adapter
+    // for every file in this build.
+    const parser = await ParserFactory.getParser();
+
+    // First pass: extract symbols and raw imports via the active adapter.
+    for (const file of list) {
+      const ext = path.extname(file);
+      if (!CODE_EXTENSIONS.has(ext)) continue;
+      const absolute = path.join(cwd, file);
+      const content = fs.readFileSync(absolute, 'utf-8');
+      const language = languageIdFromExtension(ext);
+      const symbols: SymbolInfo[] = parser.extractSymbols(content, language);
+      const imports: ImportInfo[] = parser.extractImports(content, language);
+      files.push({
+        path: file,
+        hash: crypto.createHash('sha256').update(content).digest('hex'),
+        symbols: symbols.map((s) => s.name),
+        imports: imports.map((i) => i.source),
+        resolvedImports: [],
+        dependents: [],
+        importance: 0,
+      });
     }
-    f.resolvedImports = Array.from(resolvedSet);
-  }
 
-  // Populate dependents lists
-  for (const f of files) {
-    for (const imp of f.resolvedImports || []) {
-      const target = fileMap.get(imp);
-      if (target) {
-        target.dependents = target.dependents || [];
-        if (!target.dependents.includes(f.path)) {
-          target.dependents.push(f.path);
+    // Second pass: resolve internal imports & build dependents
+    const fileMap = new Map<string, IndexedFile>();
+    for (const f of files) {
+      fileMap.set(f.path, f);
+    }
+
+    for (const f of files) {
+      const resolvedSet = new Set<string>();
+      for (const imp of f.imports) {
+        const resolved = resolveInternalImport(cwd, f.path, imp);
+        if (resolved && fileMap.has(resolved)) {
+          resolvedSet.add(resolved);
+        }
+      }
+      f.resolvedImports = Array.from(resolvedSet);
+    }
+
+    // Populate dependents lists
+    for (const f of files) {
+      for (const imp of f.resolvedImports || []) {
+        const target = fileMap.get(imp);
+        if (target) {
+          target.dependents = target.dependents || [];
+          if (!target.dependents.includes(f.path)) {
+            target.dependents.push(f.path);
+          }
         }
       }
     }
-  }
 
-  // Third pass: calculate PageRank scores
-  const pageRanks = calculatePageRank(files);
-  for (const f of files) {
-    f.importance = pageRanks[f.path] || 0;
-  }
+    // Third pass: calculate PageRank scores
+    const pageRanks = calculatePageRank(files);
+    for (const f of files) {
+      f.importance = pageRanks[f.path] || 0;
+    }
 
-  const index = { updatedAt: new Date().toISOString(), files };
-  const dir = path.join(cwd, '.fixo', 'index');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'repo-index.json'), JSON.stringify(index, null, 2) + '\n', 'utf-8');
-  return index;
+    const index = { updatedAt: new Date().toISOString(), files };
+    const dir = path.join(cwd, '.fixo', 'index');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'repo-index.json'),
+      JSON.stringify(index, null, 2) + '\n',
+      'utf-8',
+    );
+    return index;
+  })();
+
+  inFlightBuilds.set(cwd, promise);
+  // Once the promise settles, clear the entry so a future rebuild is
+  // allowed to re-run (cache files may have been invalidated).
+  const cleanup = (): void => {
+    inFlightBuilds.delete(cwd);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
 }
 
-export function loadIndex(cwd: string): RepoIndex {
+/**
+ * Loads the cached `RepoIndex` for `cwd`. If no cache exists, builds one
+ * first (sharing the in-flight promise with any concurrent caller).
+ */
+export function loadIndex(cwd: string): Promise<RepoIndex> {
   const file = path.join(cwd, '.fixo', 'index', 'repo-index.json');
-  if (!fs.existsSync(file)) return buildIndex(cwd);
-  return JSON.parse(fs.readFileSync(file, 'utf-8')) as RepoIndex;
+  if (!fs.existsSync(file)) {
+    return buildIndex(cwd);
+  }
+  // Cache hit — read it from disk. Concurrent calls for the same cwd
+  // would otherwise stampede the disk; we still dedupe them in the
+  // in-flight map so they all see the same JSON.parse result.
+  const cached = inFlightBuilds.get(cwd);
+  if (cached) return cached;
+  const promise = Promise.resolve().then(
+    () => JSON.parse(fs.readFileSync(file, 'utf-8')) as RepoIndex,
+  );
+  inFlightBuilds.set(cwd, promise);
+  const cleanup = (): void => {
+    inFlightBuilds.delete(cwd);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
 }
 
-export function findInIndex(cwd: string, query: string): string {
+export async function findInIndex(cwd: string, query: string): Promise<string> {
   const q = query.toLowerCase();
-  const index = loadIndex(cwd);
+  const index = await loadIndex(cwd);
   const matches = index.files
-    .map(file => {
+    .map((file) => {
       const score =
         (file.path.toLowerCase().includes(q) ? 5 : 0) +
-        file.symbols.filter(s => s.toLowerCase().includes(q)).length * 3 +
-        file.imports.filter(s => s.toLowerCase().includes(q)).length;
+        file.symbols.filter((s) => s.toLowerCase().includes(q)).length * 3 +
+        file.imports.filter((s) => s.toLowerCase().includes(q)).length;
       return { file, score };
     })
-    .filter(item => item.score > 0)
+    .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 20);
   if (matches.length === 0) return `No indexed matches for "${query}".`;
-  return matches.map(({ file, score }) => `${file.path} score=${score} symbols=${file.symbols.slice(0, 6).join(', ')}`).join('\n');
+  return matches
+    .map(({ file, score }) => `${file.path} score=${score} symbols=${file.symbols.slice(0, 6).join(', ')}`)
+    .join('\n');
 }
 
-export function explainIndexedTarget(cwd: string, query: string): string {
+export async function explainIndexedTarget(cwd: string, query: string): Promise<string> {
   const q = query.toLowerCase();
-  const index = loadIndex(cwd);
-  const file = index.files.find(f => f.path.toLowerCase() === q || f.path.toLowerCase().includes(q) || f.symbols.some(s => s.toLowerCase() === q));
+  const index = await loadIndex(cwd);
+  const file = index.files.find(
+    (f) =>
+      f.path.toLowerCase() === q ||
+      f.path.toLowerCase().includes(q) ||
+      f.symbols.some((s) => s.toLowerCase() === q),
+  );
   if (!file) return `No indexed file or symbol found for "${query}".`;
   return [
     `Path: ${file.path}`,
@@ -203,19 +274,19 @@ export function explainIndexedTarget(cwd: string, query: string): string {
   ].join('\n');
 }
 
-export function findCodebaseDependencies(cwd: string, targetPath: string): string {
-  const index = loadIndex(cwd);
+export async function findCodebaseDependencies(cwd: string, targetPath: string): Promise<string> {
+  const index = await loadIndex(cwd);
   const guard = new WorkspaceGuard(cwd);
   let relPath: string;
   try {
     relPath = guard.relative(guard.resolve(targetPath));
   } catch {
-    const match = index.files.find(f => f.path.toLowerCase().includes(targetPath.toLowerCase()));
+    const match = index.files.find((f) => f.path.toLowerCase().includes(targetPath.toLowerCase()));
     if (!match) return `No indexed file found for "${targetPath}".`;
     relPath = match.path;
   }
 
-  const file = index.files.find(f => f.path === relPath);
+  const file = index.files.find((f) => f.path === relPath);
   if (!file) return `File "${relPath}" is not indexed.`;
 
   const imports = file.resolvedImports || [];
@@ -226,10 +297,10 @@ export function findCodebaseDependencies(cwd: string, targetPath: string): strin
     `File: ${file.path}`,
     `Codebase Importance Score: ${importance}%`,
     `\nDirect Dependencies (Imports ${imports.length} files):`,
-    ...imports.map(i => `  → ${i}`),
+    ...imports.map((i) => `  → ${i}`),
     imports.length === 0 ? '  (none)' : '',
     `\nDirect Dependents (Imported by ${dependents.length} files):`,
-    ...dependents.map(d => `  ← ${d}`),
+    ...dependents.map((d) => `  ← ${d}`),
     dependents.length === 0 ? '  (none)' : '',
   ];
 
@@ -238,7 +309,7 @@ export function findCodebaseDependencies(cwd: string, targetPath: string): strin
 
 function listFiles(root: string): string[] {
   const result: string[] = [];
-  const walk = (dir: string) => {
+  const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === '.fixo') continue;
       const full = path.join(dir, entry.name);
@@ -248,20 +319,4 @@ function listFiles(root: string): string[] {
   };
   walk(root);
   return result;
-}
-
-function extractSymbols(content: string): string[] {
-  const symbols = new Set<string>();
-  const re = /\b(?:export\s+)?(?:class|function|interface|type|const|let|var|enum)\s+([A-Za-z_$][\w$]*)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(content)) !== null) symbols.add(match[1]);
-  return Array.from(symbols).slice(0, 100);
-}
-
-function extractImports(content: string): string[] {
-  const imports = new Set<string>();
-  const re = /\bimport\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"]/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(content)) !== null) imports.add(match[1]);
-  return Array.from(imports).slice(0, 100);
 }
