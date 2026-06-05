@@ -5,6 +5,19 @@ import type { PolicyProfile } from './runtime/policy.js';
 
 export const DEFAULT_API_URL = 'https://api.freellmapi.com/v1';
 
+/** Stream-resume policy. */
+export type StreamResumePolicy = 'auto' | 'never';
+
+/** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
+export interface ResilienceConfig {
+  /** When 'auto', mid-stream cuts are resumed transparently (default). */
+  streamResume: StreamResumePolicy;
+  /** Max additional resume attempts after a mid-stream cut. */
+  maxResumeAttempts: number;
+  /** When true, the new withRetry engine is used for non-streaming calls. */
+  useWithRetry: boolean;
+}
+
 /**
  * Global configuration for the FixO CLI.
  * Persisted at `~/.fixocli/config.json`.
@@ -20,6 +33,7 @@ export interface FreeLLMConfig {
     maxRetries: number;
     policy: PolicyProfile;
     telemetry: boolean;
+    resilience: ResilienceConfig;
   };
   _firstRunComplete: boolean;
 }
@@ -58,6 +72,11 @@ export function getDefaultConfig(): FreeLLMConfig {
       maxRetries: 3,
       policy: 'shell-confirm',
       telemetry: true,
+      resilience: {
+        streamResume: 'auto',
+        maxResumeAttempts: 3,
+        useWithRetry: true,
+      },
     },
     _firstRunComplete: false,
   };

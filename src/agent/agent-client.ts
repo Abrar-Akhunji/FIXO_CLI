@@ -14,6 +14,11 @@ import type {
 import { colors } from '../ui/colors.js';
 import { ProvidersManager } from './providers-manager.js';
 import { providerCooldown } from './provider-cooldown.js';
+import {
+  reconstructPartialResponse,
+  isMidStreamResumable,
+  StreamResumeExhaustedError,
+} from './stream-glue.js';
 import { DEFAULT_API_URL } from '../config.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
@@ -923,6 +928,115 @@ export class AgentClient {
     }
 
     throw lastError ?? new Error('All streaming retry attempts exhausted.');
+  }
+
+  /**
+   * Streaming chat with autonomous mid-stream resume.
+   *
+   * If the underlying `chatStream` throws *after* at least one chunk
+   * has been yielded, the resume engine inspects the partial response,
+   * appends a "continue from here" payload to the working message list,
+   * and starts a fresh streaming attempt. The consumer sees a single
+   * continuous `AsyncGenerator<StreamChunk>` — the resume is invisible.
+   *
+   * The engine respects:
+   *   - `maxResumeAttempts` (default 3) — additional attempts beyond
+   *     this throw `StreamResumeExhaustedError`.
+   *   - `isMidStreamResumable` — user aborts and 4xx are never resumed.
+   *   - Cuts inside a tool call — the partial text up to the tool call
+   *     boundary is preserved, but the call itself cannot be resumed.
+   *
+   * The method is *additive* and does not change the existing
+   * `chatStream` contract. Callers opt in by switching to this entry
+   * point (see `SingleAgent.streamResponse`).
+   */
+  async *chatStreamWithResume(
+    messages: ChatMessage[],
+    model: string,
+    options: ChatOptions = {},
+    maxResumeAttempts: number = 3,
+  ): AsyncGenerator<StreamChunk, void, void> {
+    const workingMessages: ChatMessage[] = messages.map((m) => ({ ...m }));
+    let resumeAttempt = 0;
+
+    // Per-attempt state. Reset at the top of every loop iteration.
+    let attemptChunks: StreamChunk[] = [];
+    let attemptYielded = false;
+
+    while (true) {
+      attemptChunks = [];
+      attemptYielded = false;
+      try {
+        for await (const chunk of this.chatStream(workingMessages, model, options)) {
+          attemptChunks.push(chunk);
+          attemptYielded = true;
+          yield chunk;
+        }
+        return; // Natural completion.
+      } catch (err: unknown) {
+        // Pre-stream error — the inner chatStream never even started
+        // (413, 404, 502 all-models-exhausted, etc.). Do not attempt a
+        // resume; bubble up unchanged so the agent loop can react.
+        if (!attemptYielded) {
+          throw err;
+        }
+
+        // If the inner stream was already yielding a tool call, the
+        // tool call is atomic and cannot be resumed.
+        const last = attemptChunks[attemptChunks.length - 1];
+        const cutDuringToolCall =
+          !!last && (last.type === 'tool_call_start' || last.type === 'tool_call_delta');
+
+        // Errors that are explicitly not candidates for a resume.
+        if (!isMidStreamResumable(err) || cutDuringToolCall) {
+          throw new StreamResumeExhaustedError(
+            cutDuringToolCall
+              ? `Stream cut during a tool call after ${attemptChunks.length} chunks; cannot resume.`
+              : err instanceof Error
+                ? `Stream cut and error is non-resumable: ${err.message}`
+                : 'Stream cut and error is non-resumable.',
+            {
+              resumeAttempt,
+              chunks: attemptChunks,
+              partial: reconstructPartialResponse(attemptChunks),
+              cutDuringToolCall,
+            },
+          );
+        }
+
+        if (resumeAttempt >= maxResumeAttempts) {
+          throw new StreamResumeExhaustedError(
+            `Stream resume attempts exhausted (${resumeAttempt}/${maxResumeAttempts}).`,
+            {
+              resumeAttempt,
+              chunks: attemptChunks,
+              partial: reconstructPartialResponse(attemptChunks),
+            },
+          );
+        }
+
+        const partial = reconstructPartialResponse(attemptChunks);
+        if (partial === '') {
+          throw new StreamResumeExhaustedError(
+            'No partial content available to resume from.',
+            { resumeAttempt, chunks: attemptChunks, partial: '' },
+          );
+        }
+
+        // Build the resume payload: assistant partial + user "continue".
+        workingMessages.push({ role: 'assistant', content: partial });
+        workingMessages.push({
+          role: 'user',
+          content:
+            `[STREAM RESUMED] Your previous response was interrupted at ` +
+            `${attemptChunks.length} chunks. Continue exactly from where you left off. ` +
+            'Do NOT repeat the partial content. Do NOT add preamble. ' +
+            'Begin mid-sentence if needed.',
+        });
+        resumeAttempt += 1;
+        // Loop continues with the augmented message list.
+      }
+    }
   }
 
   async getEmbedding(text: string, model = 'text-embedding-3-small'): Promise<number[]> {

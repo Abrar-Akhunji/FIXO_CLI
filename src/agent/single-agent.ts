@@ -442,6 +442,11 @@ export class SingleAgent {
 
   /**
    * Stream a text-only response to the terminal.
+   *
+   * Selects the resumable streaming path when `preferences.resilience.
+   * streamResume === 'auto'` (the default). Set it to `'never'` to
+   * fall back to the legacy non-resumable path — useful for tests
+   * that want to observe raw stream cuts.
    */
   private async streamResponse(
     messages: ChatMessage[],
@@ -450,8 +455,15 @@ export class SingleAgent {
   ): Promise<{ responseText: string; resolvedModel: string }> {
     let fullText = '';
     let resolvedModel = model;
+    const policy = loadConfig().preferences.resilience?.streamResume ?? 'auto';
+    const maxResumeAttempts =
+      loadConfig().preferences.resilience?.maxResumeAttempts ?? 3;
 
-    for await (const chunk of this.client.chatStream(messages, model)) {
+    const stream = policy === 'auto'
+      ? this.client.chatStreamWithResume(messages, model, {}, maxResumeAttempts)
+      : this.client.chatStream(messages, model);
+
+    for await (const chunk of stream) {
       if (chunk.type === 'content' && chunk.content) {
         process.stdout.write(chunk.content);
         fullText += chunk.content;
