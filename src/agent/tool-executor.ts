@@ -7,6 +7,7 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import type { ChatToolDefinition } from '../shared/types.js';
 import { colors } from '../ui/colors.js';
+import { renderToolCall } from '../ui/render-primitives.js';
 import { WorkspaceGuard } from '../workspace-guard.js';
 import type { TaskSession } from '../runtime/task-session.js';
 import { decidePolicy, type PolicyProfile } from '../runtime/policy.js';
@@ -16,11 +17,21 @@ import type { AgentClient } from './agent-client.js';
 import { createBranch, commitChanges, pushBranch, createPullRequest } from '../git/git-ops.js';
 import { pathToFileURL } from 'url';
 import * as p from '@clack/prompts';
-import { loadConfig, saveConfig } from '../config.js';
+import { loadConfig, saveConfig, type SafetyConfig } from '../config.js';
+import { AtomicStagingManager } from '../runtime/staging.js';
+import { LspPreSaveGate, makeLspProvider } from '../lsp/lsp-pre-save.js';
+import { syntaxHealthCheck, formatSyntaxVerdict } from '../lsp/syntax-fallback.js';
+import { PlatformPathLockedError } from '../workspace-guard.js';
 
 import { McpBridgeManager } from './mcp-bridge.js';
 import { LspManager } from '../lsp/lsp-manager.js';
 import { webFetch, webSearch } from './web.js';
+import {
+  ParserFactory,
+  languageIdFromExtension,
+  type ImportInfo,
+  type SymbolInfo,
+} from './parser-adapter.js';
 
 export const mcpManager = new McpManager();
 export const mcpBridgeManager = new McpBridgeManager();
@@ -123,10 +134,45 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
 
 /* ──────────────────────── Tool Definitions ──────────────────────── */
 
+/**
+ * Names of all tools that perform a write / mutation. Used by
+ * {@link getActiveTools} to enforce role-based tool masking
+ * (Pillar 5 / Protection 2 — Strict Runtime Role Isolation).
+ * Kept as a Set for O(1) membership checks; never read in
+ * production paths.
+ */
+export const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'write_file',
+  'apply_patch',
+  'replace_range',
+  'insert_after',
+  'rename_file',
+  'delete_file',
+  'create_branch',
+  'commit_changes',
+  'push_branch',
+  'create_pull_request',
+  'run_command',
+]);
+
+/**
+ * Build the active tool list for a given execution role. The
+ * mode argument is the role the agent is operating in:
+ *
+ *   - `BUILD`  — the default; all tools are available.
+ *   - `EXPLORE` — only read + LSP navigation tools.
+ *   - `SCOUT`  — only web fetch / search.
+ *   - `PLAN`   — read + web + LSP, but no mutations.
+ *   - `READ_ONLY` (Pillar 5) — no mutation tools at all.
+ *     This is the role forced on during vulnerability audits,
+ *     reviews, and explanations, so the LLM has zero
+ *     visibility of code-writing tools and cannot accidentally
+ *     mutate the workspace.
+ */
 export function getActiveTools(mode?: string): ChatToolDefinition[] {
   const pluginTools = loadedPlugins.flatMap(p => p.tools);
   let tools = [...TOOL_DEFINITIONS, ...mcpManager.getTools(), ...mcpBridgeManager.getTools(), ...pluginTools];
-  
+
   if (mode === 'EXPLORE') {
     const allowed = ['read_file', 'list_dir', 'search_code', 'lsp_goto_definition', 'lsp_find_references', 'lsp_hover'];
     tools = tools.filter(t => allowed.includes(t.function.name));
@@ -136,9 +182,40 @@ export function getActiveTools(mode?: string): ChatToolDefinition[] {
   } else if (mode === 'PLAN') {
     const readOnly = ['read_file', 'list_dir', 'search_code', 'lsp_goto_definition', 'lsp_find_references', 'lsp_hover', 'web_fetch', 'web_search'];
     tools = tools.filter(t => readOnly.includes(t.function.name));
+  } else if (mode === 'READ_ONLY') {
+    // Pillar 5 — strip every mutation tool. The agent sees
+    // only read + search + LSP navigation.
+    tools = tools.filter(t => !MUTATION_TOOL_NAMES.has(t.function.name));
   }
-  
+
   return tools;
+}
+
+/**
+ * Classify a task into an execution role. Read-only tasks
+ * (analysis, explanation, review) get the `READ_ONLY` role so
+ * mutation tools are not even visible to the model. This is
+ * the dynamic-tool-masking layer of Pillar 5.
+ */
+export function classifyExecutionRole(task: string): 'BUILD' | 'READ_ONLY' {
+  const lower = task.toLowerCase();
+  // Read-only keywords — the agent must answer a question or
+  // describe something, not modify files.
+  const readOnlyPatterns: RegExp[] = [
+    /\b(analy[sz]e|analysing|analysed)\b/,
+    /\b(review|auditing|audit)\b/,
+    /\b(explain|describe|what does|how does|why does)\b/,
+    /\b(vulnerabilit(y|ies)|security review|threat model)\b/,
+    /\b(read(ing)? the (entire )?code(base)?)\b/,
+    /\b(find (the )?bugs?|find (the )?vulnerabilities|find (the )?issues?)\b/,
+    /\b(list(ing)? (the )?files|show (me )?the files|what files)\b/,
+    /\b(without (modif|chang|edit|alter)ing)\b/,
+    /\b(read[\s-]only)\b/,
+  ];
+  for (const pattern of readOnlyPatterns) {
+    if (pattern.test(lower)) return 'READ_ONLY';
+  }
+  return 'BUILD';
 }
 
 export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
@@ -147,7 +224,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'read_file',
       description:
-        'Read the full text contents of a file at the given path. Use this to understand existing code before making changes. Returns the file contents as a string.',
+        'Read the full text contents of a file at the given path. Use this to understand existing code before making changes. Returns the file contents as a string. Files larger than the large-file gate (15 KiB / 350 lines by default) will return a [Context-Budget Guard] synthetic directive telling you to call extract_symbols or extract_imports first.',
       parameters: {
         type: 'object',
         properties: {
@@ -155,6 +232,44 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
             type: 'string',
             description:
               'The file path to read, relative to the workspace root or absolute.',
+          },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'extract_symbols',
+      description:
+        'Extract symbol declarations (classes, functions, interfaces, types, consts) from a file. Output is capped at 100 entries. Cheaper than read_file for large files because it skips the body content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description:
+              'The file path to inspect, relative to the workspace root or absolute.',
+          },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'extract_imports',
+      description:
+        'Extract import statements from a file. Output is capped at 100 entries. Cheaper than read_file for large files because it skips the body content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description:
+              'The file path to inspect, relative to the workspace root or absolute.',
           },
         },
         required: ['path'],
@@ -483,6 +598,147 @@ export interface ToolExecutionOptions {
   allowWithoutPrompt?: boolean;
   client?: AgentClient;
   model?: string;
+  /**
+   * Safety preferences (Pillar 1/2/3). When
+   * `preferences.safety.atomicStaging` is true, file writes are
+   * routed through {@link AtomicStagingManager} so the swap is
+   * atomic and rollback is possible. When undefined, the legacy
+   * direct-write path is used.
+   */
+  safety?: SafetyConfig;
+}
+
+/* ──────────────────────── Per-process Run ID (Pillar 2) ──────────── */
+
+let cachedRunId: string | null = null;
+
+/**
+ * Lazily generate a per-process run id. Used to namespace
+ * `.fixo/staging/<runId>/` so concurrent runs against the same
+ * workspace never collide. The id is a 12-character base36 token.
+ */
+export function getOrCreateRunId(): string {
+  if (cachedRunId) return cachedRunId;
+  cachedRunId = Math.random().toString(36).slice(2, 8) +
+    Date.now().toString(36).slice(-6);
+  return cachedRunId;
+}
+
+/** Test/utility hook — reset the cached run id. */
+export function resetRunId(): void {
+  cachedRunId = null;
+}
+
+/* ──────────────────────── LSP Pre-Save Gate (Pillar 3) ──────────── */
+
+let cachedLspGate: LspPreSaveGate | null = null;
+
+/**
+ * Lazily construct a singleton {@link LspPreSaveGate} that wires
+ * the tool-executor to the live `LspManager`. Mode is read from
+ * the user's safety config (default: `'warn'`). The gate is a
+ * no-op when no language server is installed on `PATH`, matching
+ * the existing `LspManager` behaviour.
+ */
+export function getOrCreateLspGate(cwd: string, safety: SafetyConfig): LspPreSaveGate {
+  if (cachedLspGate) return cachedLspGate;
+  cachedLspGate = new LspPreSaveGate({
+    mode: safety.lspPreSave,
+    provider: makeLspProvider(getLspManager(cwd)),
+  });
+  return cachedLspGate;
+}
+
+/** Test/utility hook — reset the cached gate. */
+export function resetLspGate(): void {
+  cachedLspGate = null;
+}
+
+/* ──────────────────────── Atomic Write Helper (Pillar 2) ─────────── */
+
+/**
+ * Stage-and-commit a file write. When `safety.atomicStaging` is
+ * true, the new content goes through
+ * {@link AtomicStagingManager} so the swap is atomic and the
+ * pre-commit hook (Pillar 3) gets a chance to validate. When
+ * false, the legacy direct-write path is used and a `null`
+ * staging manager is returned to the caller.
+ */
+async function applyAtomicWrite(
+  cwd: string,
+  filePath: string,
+  content: string,
+  safety: SafetyConfig | undefined,
+  session: TaskSession | undefined,
+): Promise<{ result: string; staged: boolean; created: boolean }> {
+  const guard = new WorkspaceGuard(cwd);
+  const resolved = guard.resolve(filePath, 'file');
+  const existed = fs.existsSync(resolved);
+
+  if (!safety?.atomicStaging) {
+    // Legacy path: write directly (preserves the existing diff-printing
+    // and session semantics inside the caller).
+    const parentDir = path.dirname(resolved);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+    fs.writeFileSync(resolved, content, 'utf-8');
+    session?.noteChange(resolved);
+    return {
+      result: existed ? `File updated: ${filePath}` : `File created: ${filePath}`,
+      staged: false,
+      created: !existed,
+    };
+  }
+
+  const mgr = new AtomicStagingManager(cwd, getOrCreateRunId(), {
+    ttlMs: safety.stagingTtlMs,
+    // Pillar 3 — wire the LSP pre-save gate as the staging
+    // manager's pre-commit hook. The gate runs diagnostics on
+    // the staged file; in `block` mode it throws on any
+    // error-severity diagnostic, which causes the staging
+    // manager to surface a PreCommitHookRejectedError and the
+    // user keeps the original file. In `warn` mode the gate
+    // just logs via onResult and lets the commit proceed.
+    preCommitHook: async (e) => {
+      const gate = getOrCreateLspGate(cwd, safety);
+      const result = await gate.check(e);
+      gate.enforce(result, e);
+    },
+    // Pillar 5 / Protection 3 — structural syntax health check.
+    // JS/TS files are passed through the brace/paren/bracket
+    // balance check in `src/lsp/syntax-fallback.ts`. The real
+    // TypeScript compile is the LSP gate's job; this is a fast
+    // structural sanity check that catches the catastrophic case
+    // (unclosed `try` block, dangling `catch` keyword, etc.).
+    syntaxHealthCheck: async (e, content) => {
+      const lower = e.targetPath.toLowerCase();
+      const isJs = lower.endsWith('.js') || lower.endsWith('.cjs') || lower.endsWith('.mjs');
+      const isTs = lower.endsWith('.ts') || lower.endsWith('.tsx');
+      if (!isJs && !isTs) return;
+      const verdict = syntaxHealthCheck(content);
+      if (verdict.state === 'ok') return;
+      const e2 = new Error(
+        `Structural syntax check failed for ${path.basename(e.targetPath)}: ` +
+        `${formatSyntaxVerdict(verdict)} ` +
+        `The staged write was rejected to protect the target file.`,
+      );
+      (e2 as Error & { code?: string }).code = 'FIXO_STRUCTURAL_SYNTAX';
+      throw e2;
+    },
+  });
+  const entry = mgr.stage(filePath, content, 0o644);
+  const commit = await mgr.commit(entry.id);
+  if (commit.committed) {
+    session?.noteChange(resolved);
+  }
+  return {
+    result: existed
+      ? `File updated (atomic): ${filePath}`
+      : `File created (atomic): ${filePath}`,
+    staged: commit.committed,
+    created: !existed,
+  };
 }
 
 async function askUnsafeCommandPermission(
@@ -539,14 +795,14 @@ export async function executeTool(
         return event;
       }
       options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
-      logToolCall('🔌', 'Plugin', name);
+      console.log(`  ${colors.dim}🔌 Plugin: ${name}${colors.reset}`);
       try {
         event.result = await plugin.execute(name, args, { cwd, verbose, policy, options });
         event.isWrite = action === 'write';
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         event.result = `Error: ${msg}`;
-        console.log(`  ${colors.red}✗ ${name} failed: ${truncate(msg, 80)}${colors.reset}`);
+        renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
       }
       options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
       return event;
@@ -561,14 +817,14 @@ export async function executeTool(
         return event;
       }
       options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
-      logToolCall('🔌', 'MCP', name);
+      console.log(`  ${colors.dim}🔌 MCP: ${name}${colors.reset}`);
       try {
         event.result = await mcpManager.executeTool(name, args);
         event.isWrite = action === 'write';
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         event.result = `Error: ${msg}`;
-        console.log(`  ${colors.red}✗ ${name} failed: ${truncate(msg, 80)}${colors.reset}`);
+        renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
       }
       options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
       return event;
@@ -583,14 +839,14 @@ export async function executeTool(
         return event;
       }
       options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
-      logToolCall('🔌', 'Local MCP', name);
+      console.log(`  ${colors.dim}🔌 Local MCP: ${name}${colors.reset}`);
       try {
         event.result = await mcpBridgeManager.executeTool(name, args);
         event.isWrite = action === 'write';
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         event.result = `Error: ${msg}`;
-        console.log(`  ${colors.red}✗ ${name} failed: ${truncate(msg, 80)}${colors.reset}`);
+        renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
       }
       options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
       return event;
@@ -613,20 +869,38 @@ export async function executeTool(
     options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
     switch (name) {
       case 'read_file':
-        event.result = executeReadFile(args.path, cwd, options.session);
+        event.result = executeReadFile(
+          args.path,
+          cwd,
+          options.session,
+          options.safety?.largeFileGateBytes,
+          options.safety?.largeFileGateLines,
+        );
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
-        logToolCall('📖', 'Read', shortenPath(args.path, cwd));
+        renderToolCall({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });
+        break;
+
+      case 'extract_symbols':
+        event.result = await executeExtractSymbols(args.path, cwd, options.session);
+        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        renderToolCall({ kind: 'read', name: 'Symbols', detail: shortenPath(args.path, cwd) });
+        break;
+
+      case 'extract_imports':
+        event.result = await executeExtractImports(args.path, cwd, options.session);
+        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        renderToolCall({ kind: 'read', name: 'Imports', detail: shortenPath(args.path, cwd) });
         break;
 
       case 'write_file':
-        event.result = executeWriteFile(args.path, args.content, cwd, options.session);
+        event.result = await executeWriteFile(args.path, args.content, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
-        logToolCall('✏️', 'Write', shortenPath(args.path, cwd));
+        renderToolCall({ kind: 'write', name: 'Write', detail: shortenPath(args.path, cwd) });
         break;
 
       case 'run_command':
-        logToolCall('⚙️', 'Run', truncate(args.command, 60));
+        renderToolCall({ kind: 'bash', name: 'Run', detail: truncate(args.command, 60) });
         let safetyResult = { safe: true, reason: '' };
         try {
           const { isCommandSafe } = await import('./command-parser.js');
@@ -666,69 +940,69 @@ export async function executeTool(
         break;
 
       case 'search_code':
-        logToolCall('🔍', 'Search', `"${truncate(args.query, 40)}" in ${args.path ?? '.'}`);
+        renderToolCall({ kind: 'search', name: 'Search', detail: `"${truncate(args.query, 40)}" in ${args.path ?? '.'}` });
         event.result = executeSearchCode(args.query, args.path, args.file_pattern, cwd);
         break;
 
       case 'list_dir':
-        logToolCall('📂', 'List', args.path ?? '.');
+        renderToolCall({ kind: 'read', name: 'List', detail: args.path ?? '.' });
         event.result = executeListDir(args.path, cwd);
         break;
 
       case 'delete_file':
-        logToolCall('🗑️', 'Delete', shortenPath(args.path, cwd));
+        renderToolCall({ kind: 'write', name: 'Delete', detail: shortenPath(args.path, cwd) });
         event.result = executeDeleteFile(args.path, cwd, options.session);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'apply_patch':
-        logToolCall('🩹', 'Patch', 'unified diff');
-        event.result = executeApplyPatch(args.patch, cwd, options.session);
+        renderToolCall({ kind: 'write', name: 'Patch', detail: 'unified diff' });
+        event.result = await executeApplyPatch(args.patch, cwd, options);
         event.isWrite = true;
         break;
 
       case 'replace_range':
-        logToolCall('✂️', 'Replace', shortenPath(args.path, cwd));
-        event.result = executeReplaceRange(args.path, Number(args.startLine), Number(args.endLine), args.content, cwd, options.session);
+        renderToolCall({ kind: 'write', name: 'Replace', detail: shortenPath(args.path, cwd) });
+        event.result = await executeReplaceRange(args.path, Number(args.startLine), Number(args.endLine), args.content, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'insert_after':
-        logToolCall('➕', 'Insert', shortenPath(args.path, cwd));
-        event.result = executeInsertAfter(args.path, args.anchor, args.content, cwd, options.session);
+        renderToolCall({ kind: 'write', name: 'Insert', detail: shortenPath(args.path, cwd) });
+        event.result = await executeInsertAfter(args.path, args.anchor, args.content, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'rename_file':
-        logToolCall('↪', 'Rename', `${args.from} -> ${args.to}`);
-        event.result = executeRenameFile(args.from, args.to, cwd, options.session);
+        renderToolCall({ kind: 'write', name: 'Rename', detail: `${args.from} -> ${args.to}` });
+        event.result = await executeRenameFile(args.from, args.to, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.to, 'file');
         break;
 
       case 'create_branch':
-        logToolCall('🌳', 'Branch', args.branchName);
+        renderToolCall({ kind: 'write', name: 'Branch', detail: args.branchName });
         event.result = createBranch(cwd, args.branchName);
         event.isWrite = true;
         break;
 
       case 'commit_changes':
-        logToolCall('💾', 'Commit', truncate(args.message, 60));
+        renderToolCall({ kind: 'write', name: 'Commit', detail: truncate(args.message, 60) });
         event.result = commitChanges(cwd, args.message);
         event.isWrite = true;
         break;
 
       case 'push_branch':
-        logToolCall('🚀', 'Push', args.remote || 'origin');
+        renderToolCall({ kind: 'write', name: 'Push', detail: args.remote || 'origin' });
         event.result = pushBranch(cwd, args.remote || 'origin');
         event.isWrite = true;
         break;
 
       case 'create_pull_request':
-        logToolCall('🐙', 'PR', `base: ${args.baseBranch || 'main'}`);
+        renderToolCall({ kind: 'write', name: 'PR', detail: `base: ${args.baseBranch || 'main'}` });
         if (!options.client) {
           throw new Error('Agent client is required to generate pull request description');
         }
@@ -740,8 +1014,8 @@ export async function executeTool(
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        logToolCall('🔍', 'LSP Definition', `${fileBasename}:${line}:${char}`);
-        
+        renderToolCall({ kind: 'read', name: 'Definition', detail: `${fileBasename}:${line}:${char}` });
+
         const manager = getLspManager(cwd);
         const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         const def = await manager.gotoDefinition(resolvedPath, line, char);
@@ -753,8 +1027,8 @@ export async function executeTool(
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        logToolCall('🔍', 'LSP References', `${fileBasename}:${line}:${char}`);
-        
+        renderToolCall({ kind: 'read', name: 'References', detail: `${fileBasename}:${line}:${char}` });
+
         const manager = getLspManager(cwd);
         const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         const refs = await manager.findReferences(resolvedPath, line, char);
@@ -766,8 +1040,8 @@ export async function executeTool(
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        logToolCall('ℹ️', 'LSP Hover', `${fileBasename}:${line}:${char}`);
-        
+        renderToolCall({ kind: 'read', name: 'Hover', detail: `${fileBasename}:${line}:${char}` });
+
         const manager = getLspManager(cwd);
         const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         const hoverRes = await manager.hover(resolvedPath, line, char);
@@ -776,12 +1050,12 @@ export async function executeTool(
       }
 
       case 'web_fetch':
-        logToolCall('🌐', 'Web Fetch', args.url);
+        renderToolCall({ kind: 'search', name: 'Fetch', detail: args.url });
         event.result = await webFetch(args.url);
         break;
 
       case 'web_search':
-        logToolCall('🔍', 'Web Search', truncate(args.query, 40));
+        renderToolCall({ kind: 'search', name: 'Search', detail: truncate(args.query, 40) });
         event.result = await webSearch(args.query);
         break;
 
@@ -791,7 +1065,7 @@ export async function executeTool(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     event.result = `Error: ${msg}`;
-    console.log(`  ${colors.red}✗ ${name} failed: ${truncate(msg, 80)}${colors.reset}`);
+    renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
   }
   options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
 
@@ -800,7 +1074,13 @@ export async function executeTool(
 
 /* ──────────────────────── Tool Implementations ──────────────────────── */
 
-function executeReadFile(filePath: string, cwd: string, session?: TaskSession): string {
+function executeReadFile(
+  filePath: string,
+  cwd: string,
+  session?: TaskSession,
+  largeFileGateBytes: number = 15 * 1024,
+  largeFileGateLines: number = 350,
+): string {
   const guard = new WorkspaceGuard(cwd);
   const resolved = guard.resolve(filePath, 'file');
 
@@ -821,53 +1101,195 @@ function executeReadFile(filePath: string, cwd: string, session?: TaskSession): 
     return `Error: File appears to be binary: ${filePath}`;
   }
 
+  // Pillar 3 — Context-Budget Guard. When a file exceeds either
+  // the byte or line gate we refuse to return the full body and
+  // instead hand the LLM a synthetic directive telling it to use
+  // the structural pre-scan tools (`extract_symbols` /
+  // `extract_imports`) instead. This prevents an LLM from
+  // dumping half the workspace into the context window.
+  if (
+    stat.size > largeFileGateBytes ||
+    // Read just enough to count lines without holding the file in
+    // memory twice. `readFileSync` is unavoidable for the content
+    // path below, so accept the cost here.
+    countLines(resolved) > largeFileGateLines
+  ) {
+    return buildContextBudgetGuardDirective(
+      resolved,
+      stat.size,
+      largeFileGateBytes,
+      largeFileGateLines,
+    );
+  }
+
   const content = fs.readFileSync(resolved, 'utf-8');
   session?.noteRead(resolved);
   return content;
 }
 
-function executeWriteFile(filePath: string, content: string, cwd: string, session?: TaskSession): string {
-  const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
-  const mutation = session?.canMutate(resolved);
-  if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
-  session?.captureBefore(resolved);
-
-  // Create parent directories
-  const parentDir = path.dirname(resolved);
-  if (!fs.existsSync(parentDir)) {
-    fs.mkdirSync(parentDir, { recursive: true });
-  }
-
-  const existed = fs.existsSync(resolved);
-  fs.writeFileSync(resolved, content, 'utf-8');
-  session?.noteChange(resolved);
-
-  if (existed) {
-    try {
-      const relativePath = guard.relative(resolved);
-      const result = spawnSync('git', ['diff', '--color=always', '--', relativePath], { cwd, encoding: 'utf-8' });
-      if (result.status === 0 && result.stdout) {
-        const diffOutput = result.stdout.trim();
-        if (diffOutput) {
-          console.log(`\n${colors.cyan}--- File Changes Diff ---${colors.reset}`);
-          const lines = diffOutput.split('\n');
-          if (lines.length > 50) {
-            console.log(lines.slice(0, 48).join('\n') + `\n${colors.yellow}... (diff truncated)${colors.reset}`);
-          } else {
-            console.log(diffOutput);
-          }
-          console.log(`${colors.cyan}-------------------------${colors.reset}\n`);
+/**
+ * Count lines in a file. Uses a streaming read so a 500 KB binary
+ * that has slipped past `isBinaryFile` cannot OOM the process.
+ */
+function countLines(filePath: string): number {
+  let count = 0;
+  let sawNewline = true;
+  const stream = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(stream, buf, 0, buf.length, null)) > 0) {
+      for (let i = 0; i < bytesRead; i++) {
+        if (buf[i] === 0x0a) {
+          count++;
+          sawNewline = true;
+        } else {
+          sawNewline = false;
         }
       }
-    } catch {
-      // Fail-safe diff printing
     }
+    if (!sawNewline) count++;
+  } finally {
+    fs.closeSync(stream);
   }
+  return count;
+}
 
-  return existed
-    ? `File updated: ${filePath}`
-    : `File created: ${filePath}`;
+/**
+ * Build the [Context-Budget Guard] directive returned to the LLM
+ * when `read_file` would otherwise flood the context window.
+ */
+function buildContextBudgetGuardDirective(
+  resolved: string,
+  bytes: number,
+  byteLimit: number,
+  lineLimit: number,
+): string {
+  const relPath = path.relative(process.cwd(), resolved) || resolved;
+  return (
+    `[Context-Budget Guard] File '${relPath}' is ${(bytes / 1024).toFixed(1)} KiB ` +
+    `(> ${(byteLimit / 1024).toFixed(0)} KiB) or exceeds ${lineLimit} lines. ` +
+    `Full body suppressed to protect the context window. ` +
+    `Call extract_symbols(path='${relPath}') to list top-level declarations, ` +
+    `or extract_imports(path='${relPath}') to list dependencies, before ` +
+    `narrowing your read with a tool like search_code.`
+  );
+}
+
+/**
+ * Resolve a file's `LanguageId` from its extension. Falls back to
+ * 'generic' for unrecognised suffixes.
+ */
+function resolveLanguageId(filePath: string) {
+  return languageIdFromExtension(path.extname(filePath));
+}
+
+async function executeExtractSymbols(
+  filePath: string,
+  cwd: string,
+  session?: TaskSession,
+): Promise<string> {
+  const guard = new WorkspaceGuard(cwd);
+  const resolved = guard.resolve(filePath, 'file');
+  if (!fs.existsSync(resolved)) {
+    return `Error: File not found: ${filePath}`;
+  }
+  if (guard.isBinaryFile(resolved)) {
+    return `Error: File appears to be binary: ${filePath}`;
+  }
+  const content = fs.readFileSync(resolved, 'utf-8');
+  const language = resolveLanguageId(resolved);
+  const parser = await ParserFactory.getParser();
+  const symbols: SymbolInfo[] = parser.extractSymbols(content, language);
+  session?.noteStructuralMap?.(resolved, { symbols: true, imports: false });
+  if (symbols.length === 0) {
+    return `No symbols detected in '${filePath}' (language=${language}).`;
+  }
+  const lines = symbols.map(
+    (s) => `- [${s.kind}${s.exported ? ', exported' : ''}] ${s.name} (line ${s.line})`,
+  );
+  return `Symbols in '${filePath}' (${symbols.length}):\n${lines.join('\n')}`;
+}
+
+async function executeExtractImports(
+  filePath: string,
+  cwd: string,
+  session?: TaskSession,
+): Promise<string> {
+  const guard = new WorkspaceGuard(cwd);
+  const resolved = guard.resolve(filePath, 'file');
+  if (!fs.existsSync(resolved)) {
+    return `Error: File not found: ${filePath}`;
+  }
+  if (guard.isBinaryFile(resolved)) {
+    return `Error: File appears to be binary: ${filePath}`;
+  }
+  const content = fs.readFileSync(resolved, 'utf-8');
+  const language = resolveLanguageId(resolved);
+  const parser = await ParserFactory.getParser();
+  const imports: ImportInfo[] = parser.extractImports(content, language);
+  session?.noteStructuralMap?.(resolved, { symbols: false, imports: true });
+  if (imports.length === 0) {
+    return `No imports detected in '${filePath}' (language=${language}).`;
+  }
+  const lines = imports.map((i) => {
+    const tag = i.isTypeOnly ? ' [type-only]' : '';
+    const syms = i.symbols.length > 0 ? ` {${i.symbols.join(', ')}}` : '';
+    return `- '${i.source}'${tag}${syms} (line ${i.line})`;
+  });
+  return `Imports in '${filePath}' (${imports.length}):\n${lines.join('\n')}`;
+}
+
+function executeWriteFile(
+  filePath: string,
+  content: string,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
+  const guard = new WorkspaceGuard(cwd);
+  const resolved = guard.resolve(filePath, 'file');
+  // Pillar 5 / Protection 1 — refuse to mutate the platform's
+  // own runtime. This is the guard that prevents an autonomous
+  // agent from corrupting `src/agent/tool-executor.ts` and
+  // breaking its own host.
+  try {
+    guard.assertNotPlatformPath(resolved);
+  } catch (err: unknown) {
+    if (err instanceof PlatformPathLockedError) {
+      return Promise.resolve(err.message);
+    }
+    throw err;
+  }
+  const mutation = options.session?.canMutate(resolved);
+  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  options.session?.captureBefore(resolved);
+  const existed = fs.existsSync(resolved);
+
+  return applyAtomicWrite(cwd, filePath, content, options.safety, options.session)
+    .then(() => {
+      if (!existed) return `File created: ${filePath}`;
+      // Existing file — print the diff for the user.
+      try {
+        const relativePath = guard.relative(resolved);
+        const result = spawnSync('git', ['diff', '--color=always', '--', relativePath], { cwd, encoding: 'utf-8' });
+        if (result.status === 0 && result.stdout) {
+          const diffOutput = result.stdout.trim();
+          if (diffOutput) {
+            console.log(`\n${colors.cyan}--- File Changes Diff ---${colors.reset}`);
+            const lines = diffOutput.split('\n');
+            if (lines.length > 50) {
+              console.log(lines.slice(0, 48).join('\n') + `\n${colors.yellow}... (diff truncated)${colors.reset}`);
+            } else {
+              console.log(diffOutput);
+            }
+            console.log(`${colors.cyan}-------------------------${colors.reset}\n`);
+          }
+        }
+      } catch {
+        // Fail-safe diff printing
+      }
+      return `File updated: ${filePath}`;
+    });
 }
 
 function executeRunCommand(command: string, requestedCwd: string, workspaceRoot: string, session?: TaskSession): string {
@@ -1038,10 +1460,6 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-function logToolCall(icon: string, action: string, detail: string): void {
-  console.log(`  ${colors.dim}${icon} ${action}: ${detail}${colors.reset}`);
-}
-
 function executeDeleteFile(filePath: string, cwd: string, session?: TaskSession): string {
   const guard = new WorkspaceGuard(cwd);
   const resolved = guard.resolve(filePath, 'file');
@@ -1061,10 +1479,32 @@ function executeDeleteFile(filePath: string, cwd: string, session?: TaskSession)
   return `File deleted: ${filePath}`;
 }
 
-function executeApplyPatch(patch: string, cwd: string, session?: TaskSession): string {
-  if (!patch?.trim()) return 'Error: patch is required.';
+function executeApplyPatch(
+  patch: string,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
+  if (!patch?.trim()) return Promise.resolve('Error: patch is required.');
+  const guard = new WorkspaceGuard(cwd);
+  // Pillar 5 — refuse to apply patches that target platform
+  // runtime files. The `git apply` invocation would otherwise
+  // succeed in corrupting our own source.
   for (const file of filesFromPatch(patch)) {
-    try { session?.captureBefore(file); } catch { /* best effort */ }
+    try {
+      const resolved = guard.resolve(file, 'patch target');
+      guard.assertNotPlatformPath(resolved);
+    } catch (err: unknown) {
+      if (err instanceof PlatformPathLockedError) {
+        return Promise.resolve(err.message);
+      }
+      if (err instanceof Error) {
+        return Promise.resolve(`Error: ${err.message}`);
+      }
+      throw err;
+    }
+  }
+  for (const file of filesFromPatch(patch)) {
+    try { options.session?.captureBefore(file); } catch { /* best effort */ }
   }
   const result = spawnSync('git', ['apply', '--whitespace=nowarn', '-'], {
     cwd,
@@ -1073,57 +1513,94 @@ function executeApplyPatch(patch: string, cwd: string, session?: TaskSession): s
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status !== 0) return `Patch failed:\n${result.stderr || result.stdout}`;
+  if (result.status !== 0) return Promise.resolve(`Patch failed:\n${result.stderr || result.stdout}`);
   for (const file of filesFromPatch(patch)) {
-    try { session?.noteChange(file); } catch { /* best effort */ }
+    try { options.session?.noteChange(file); } catch { /* best effort */ }
   }
-  return 'Patch applied.';
+  return Promise.resolve('Patch applied.');
 }
 
-function executeReplaceRange(filePath: string, startLine: number, endLine: number, content: string, cwd: string, session?: TaskSession): string {
+function executeReplaceRange(
+  filePath: string,
+  startLine: number,
+  endLine: number,
+  content: string,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
   const resolved = guard.resolve(filePath, 'file');
-  const mutation = session?.canMutate(resolved);
-  if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
-  session?.captureBefore(resolved);
-  const lines = fs.readFileSync(resolved, 'utf-8').split('\n');
+  try {
+    guard.assertNotPlatformPath(resolved);
+  } catch (err: unknown) {
+    if (err instanceof PlatformPathLockedError) return Promise.resolve(err.message);
+    throw err;
+  }
+  const mutation = options.session?.canMutate(resolved);
+  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  options.session?.captureBefore(resolved);
+  const original = fs.readFileSync(resolved, 'utf-8');
+  const lines = original.split('\n');
   if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length) {
-    return `Error: invalid line range ${startLine}-${endLine}.`;
+    return Promise.resolve(`Error: invalid line range ${startLine}-${endLine}.`);
   }
   lines.splice(startLine - 1, endLine - startLine + 1, ...content.split('\n'));
-  fs.writeFileSync(resolved, lines.join('\n'), 'utf-8');
-  session?.noteChange(resolved);
-  return `Replaced ${filePath}:${startLine}-${endLine}.`;
+  return applyAtomicWrite(cwd, filePath, lines.join('\n'), options.safety, options.session)
+    .then(() => `Replaced ${filePath}:${startLine}-${endLine}.`);
 }
 
-function executeInsertAfter(filePath: string, anchor: string, content: string, cwd: string, session?: TaskSession): string {
+function executeInsertAfter(
+  filePath: string,
+  anchor: string,
+  content: string,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
   const resolved = guard.resolve(filePath, 'file');
-  const mutation = session?.canMutate(resolved);
-  if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
-  session?.captureBefore(resolved);
+  try {
+    guard.assertNotPlatformPath(resolved);
+  } catch (err: unknown) {
+    if (err instanceof PlatformPathLockedError) return Promise.resolve(err.message);
+    throw err;
+  }
+  const mutation = options.session?.canMutate(resolved);
+  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  options.session?.captureBefore(resolved);
   const original = fs.readFileSync(resolved, 'utf-8');
   const idx = original.indexOf(anchor);
-  if (idx === -1) return `Error: anchor not found in ${filePath}.`;
+  if (idx === -1) return Promise.resolve(`Error: anchor not found in ${filePath}.`);
   const insertAt = idx + anchor.length;
-  fs.writeFileSync(resolved, original.slice(0, insertAt) + content + original.slice(insertAt), 'utf-8');
-  session?.noteChange(resolved);
-  return `Inserted content in ${filePath}.`;
+  const next = original.slice(0, insertAt) + content + original.slice(insertAt);
+  return applyAtomicWrite(cwd, filePath, next, options.safety, options.session)
+    .then(() => `Inserted content in ${filePath}.`);
 }
 
-function executeRenameFile(from: string, to: string, cwd: string, session?: TaskSession): string {
+function executeRenameFile(
+  from: string,
+  to: string,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
   const source = guard.resolve(from, 'source file');
   const target = guard.resolve(to, 'target file');
-  const mutation = session?.canMutate(source);
-  if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
-  session?.captureBefore(source);
-  session?.captureBefore(target);
+  try {
+    guard.assertNotPlatformPath(source);
+    guard.assertNotPlatformPath(target);
+  } catch (err: unknown) {
+    if (err instanceof PlatformPathLockedError) return Promise.resolve(err.message);
+    throw err;
+  }
+  const mutation = options.session?.canMutate(source);
+  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  options.session?.captureBefore(source);
+  options.session?.captureBefore(target);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.renameSync(source, target);
-  session?.noteChange(source);
-  session?.noteChange(target);
-  return `Renamed ${from} -> ${to}.`;
+  options.session?.noteChange(source);
+  options.session?.noteChange(target);
+  return Promise.resolve(`Renamed ${from} -> ${to}.`);
 }
 
 function filesFromPatch(patch: string): string[] {

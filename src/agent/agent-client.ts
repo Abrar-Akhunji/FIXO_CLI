@@ -21,6 +21,7 @@ import {
 } from './stream-glue.js';
 import { DEFAULT_API_URL } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
+import { getProviderKeyVault } from '../runtime/credential-vault.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -251,7 +252,6 @@ export class AgentClient {
   }
 
   private resolveDirectConfig(model: string): {
-    apiKey: string;
     baseUrl: string;
     displayName: string;
     providerName: string;
@@ -289,7 +289,8 @@ export class AgentClient {
       if (direct) {
         const def = ProvidersManager.getDefinition(providerName);
         return {
-          ...direct,
+          baseUrl: direct.baseUrl,
+          displayName: direct.displayName,
           providerName,
           openAICompat: def ? def.openAICompat : true,
         };
@@ -331,30 +332,38 @@ export class AgentClient {
     let body = '';
 
     if (direct) {
+      // Pillar 4: source the API key from the credential vault so
+      // the raw value never lands in a return value, an error
+      // payload, or a log line. The key is reachable only inside
+      // the withApiKey callback.
+      const vault = getProviderKeyVault();
       if (isAnthropicDirect) {
         requestUrl = `${direct.baseUrl}/messages`;
-        headers = {
+        headers = await vault.withApiKey(direct.providerName, (key) => ({
           'Content-Type': 'application/json',
-          'x-api-key': direct.apiKey,
+          'x-api-key': key,
           'anthropic-version': '2023-06-01',
-        };
+        }));
         body = JSON.stringify(translateOpenAIToAnthropic(messages, model, options));
       } else {
         requestUrl = `${direct.baseUrl}/chat/completions`;
-        headers = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${direct.apiKey}`,
-        };
-        if (direct.providerName === 'zen' || direct.providerName === 'openrouter') {
-          headers['HTTP-Referer'] = 'https://opencode.ai/';
-          headers['X-Title'] = 'opencode';
-        } else if (direct.providerName === 'nvidia') {
-          headers['HTTP-Referer'] = 'https://opencode.ai/';
-          headers['X-Title'] = 'opencode';
-          headers['X-BILLING-INVOKE-ORIGIN'] = 'OpenCode';
-        } else if (direct.providerName === 'cerebras') {
-          headers['X-Cerebras-3rd-Party-Integration'] = 'opencode';
-        }
+        headers = await vault.withApiKey(direct.providerName, (key) => {
+          const h: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key}`,
+          };
+          if (direct.providerName === 'zen' || direct.providerName === 'openrouter') {
+            h['HTTP-Referer'] = 'https://opencode.ai/';
+            h['X-Title'] = 'opencode';
+          } else if (direct.providerName === 'nvidia') {
+            h['HTTP-Referer'] = 'https://opencode.ai/';
+            h['X-Title'] = 'opencode';
+            h['X-BILLING-INVOKE-ORIGIN'] = 'OpenCode';
+          } else if (direct.providerName === 'cerebras') {
+            h['X-Cerebras-3rd-Party-Integration'] = 'opencode';
+          }
+          return h;
+        });
         const bodyObj: Record<string, any> = {
           model,
           messages,
@@ -804,32 +813,37 @@ export class AgentClient {
     let body = '';
 
     if (direct) {
+      // Pillar 4: source the API key from the credential vault.
+      const vault = getProviderKeyVault();
       if (isAnthropicDirect) {
         requestUrl = `${direct.baseUrl}/messages`;
-        headers = {
+        headers = await vault.withApiKey(direct.providerName, (key) => ({
           'Content-Type': 'application/json',
-          'x-api-key': direct.apiKey,
+          'x-api-key': key,
           'anthropic-version': '2023-06-01',
-        };
+        }));
         const payload = translateOpenAIToAnthropic(messages, model, options);
         payload.stream = true;
         body = JSON.stringify(payload);
       } else {
         requestUrl = `${direct.baseUrl}/chat/completions`;
-        headers = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${direct.apiKey}`,
-        };
-        if (direct.providerName === 'zen' || direct.providerName === 'openrouter') {
-          headers['HTTP-Referer'] = 'https://opencode.ai/';
-          headers['X-Title'] = 'opencode';
-        } else if (direct.providerName === 'nvidia') {
-          headers['HTTP-Referer'] = 'https://opencode.ai/';
-          headers['X-Title'] = 'opencode';
-          headers['X-BILLING-INVOKE-ORIGIN'] = 'OpenCode';
-        } else if (direct.providerName === 'cerebras') {
-          headers['X-Cerebras-3rd-Party-Integration'] = 'opencode';
-        }
+        headers = await vault.withApiKey(direct.providerName, (key) => {
+          const h: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key}`,
+          };
+          if (direct.providerName === 'zen' || direct.providerName === 'openrouter') {
+            h['HTTP-Referer'] = 'https://opencode.ai/';
+            h['X-Title'] = 'opencode';
+          } else if (direct.providerName === 'nvidia') {
+            h['HTTP-Referer'] = 'https://opencode.ai/';
+            h['X-Title'] = 'opencode';
+            h['X-BILLING-INVOKE-ORIGIN'] = 'OpenCode';
+          } else if (direct.providerName === 'cerebras') {
+            h['X-Cerebras-3rd-Party-Integration'] = 'opencode';
+          }
+          return h;
+        });
         const bodyObj: Record<string, any> = {
           model,
           messages,
@@ -1104,11 +1118,13 @@ export class AgentClient {
     };
 
     if (direct) {
+      // Pillar 4: source the API key from the credential vault.
+      const vault = getProviderKeyVault();
       requestUrl = `${direct.baseUrl}/embeddings`;
-      headers = {
+      headers = await vault.withApiKey(direct.providerName, (key) => ({
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${direct.apiKey}`,
-      };
+        'Authorization': `Bearer ${key}`,
+      }));
     }
 
     const body = JSON.stringify({

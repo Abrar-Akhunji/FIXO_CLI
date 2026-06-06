@@ -22,6 +22,63 @@ export type StreamResumePolicy = 'auto' | 'never';
  */
 export type ContextBudgetPolicy = 'auto' | 'truncate' | 'never';
 
+/* ──────────────────────── Safety Configuration ──────────────────────── */
+
+/**
+ * Loop-trap configuration. Lives under `preferences.safety.loopTrap`
+ * (not `preferences.resilience`) so the safety and resilience
+ * concerns remain orthogonal.
+ *
+ * The defaults match the design decision: warn at 3 consecutive
+ * equivalent turns (acts as an intentional psychological disruptor
+ * to the LLM via system-prompt injection), hard-abort at 6.
+ */
+export interface LoopTrapPolicy {
+  /** Number of consecutive equivalent turns that triggers a directive. */
+  triggerCount: number;
+  /** Number of consecutive equivalent turns that triggers a hard abort. */
+  hardAbortCount: number;
+  /** Maximum number of tool-result bytes to include in the fingerprint. */
+  toolResultTailBytes: number;
+  /** Hard cap on in-memory history to bound memory growth. */
+  maxHistory: number;
+  /** Master kill-switch; when false, the detector is never invoked. */
+  enabled: boolean;
+}
+
+/** Semantic loop-trap configuration. Tracks file-target frequency
+ *  inside a sliding window so that an LLM which varies its search
+ *  arguments but keeps hammering the same file still trips. */
+export interface SemanticLoopTrapPolicy {
+  enabled: boolean;
+  windowSize: number;
+  triggerCount: number;
+  hardAbortCount: number;
+}
+
+/** Pre-save gate severity. */
+export type LspPreSaveMode = 'off' | 'warn' | 'block' | 'sandbox-mock';
+
+/** Safety preferences — Pillar 1, 2, 3 surface. Pillar 4 lives in the
+ *  credential vault module, not in the user-facing config. */
+export interface SafetyConfig {
+  /** Run file writes through the atomic shadow-staging pipeline. */
+  atomicStaging: boolean;
+  /** Staged writes older than this (ms) are eligible for auto-GC. */
+  stagingTtlMs: number;
+  /** How to react to LSP diagnostics on a staged write. */
+  lspPreSave: LspPreSaveMode;
+  /** Loop-trap thresholds. */
+  loopTrap: LoopTrapPolicy;
+  /** Semantic loop-trap thresholds (Pillar 2 of the refit). */
+  semanticLoopTrap: SemanticLoopTrapPolicy;
+  /** Maximum bytes a file may be before read_file is gated by the
+   *  structural pre-scan rule. Defaults to 15 KiB. */
+  largeFileGateBytes: number;
+  /** Maximum line count before read_file is gated. Defaults to 350. */
+  largeFileGateLines: number;
+}
+
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
 export interface ResilienceConfig {
   /** When 'auto', mid-stream cuts are resumed transparently (default). */
@@ -75,6 +132,18 @@ export interface FreeLLMConfig {
      */
     telemetryRemote: boolean;
     resilience: ResilienceConfig;
+    /**
+     * Safety preferences — orthogonal to `resilience`.
+     *
+     * - `resilience` keeps the system alive through network noise.
+     * - `safety`     keeps the system from corrupting the user's
+     *                 workspace or leaking secrets.
+     *
+     * Pillar 1 (loop-trap), Pillar 2 (atomic staging), and Pillar 3
+     * (LSP pre-save) are wired up here. Pillar 4 (credential vault)
+     * is a programmatic-only surface and is not user-configurable.
+     */
+    safety: SafetyConfig;
   };
   _firstRunComplete: boolean;
 }
@@ -122,6 +191,26 @@ export function getDefaultConfig(): FreeLLMConfig {
         contextBudget: 'auto',
         contextBudgetRatio: 0.8,
       },
+      safety: {
+        atomicStaging: true,
+        stagingTtlMs: 24 * 60 * 60 * 1000,
+        lspPreSave: 'warn',
+        loopTrap: {
+          triggerCount: 3,
+          hardAbortCount: 6,
+          toolResultTailBytes: 1024,
+          maxHistory: 64,
+          enabled: true,
+        },
+        semanticLoopTrap: {
+          enabled: true,
+          windowSize: 5,
+          triggerCount: 3,
+          hardAbortCount: 6,
+        },
+        largeFileGateBytes: 15 * 1024,
+        largeFileGateLines: 350,
+      },
     },
     _firstRunComplete: false,
   };
@@ -141,11 +230,18 @@ export function loadConfig(): FreeLLMConfig {
     const defaults = getDefaultConfig();
 
     // Merge top-level keys while keeping nested `preferences` safe.
-    // `resilience` is deep-merged so old configs that predate a new
-    // resilience field still pick up the new default.
+    // `resilience` and `safety` are deep-merged so old configs that
+    // predate a new field still pick up the new default.
     const parsedPreferences = parsed.preferences ?? {};
     const parsedResilience =
       (parsedPreferences as { resilience?: Partial<ResilienceConfig> }).resilience ?? {};
+    const parsedSafety =
+      (parsedPreferences as { safety?: Partial<SafetyConfig> }).safety ?? {};
+    const parsedLoopTrap =
+      (parsedSafety as { loopTrap?: Partial<LoopTrapPolicy> }).loopTrap ?? {};
+    const parsedSemanticLoopTrap =
+      (parsedSafety as { semanticLoopTrap?: Partial<SemanticLoopTrapPolicy> })
+        .semanticLoopTrap ?? {};
     return {
       ...defaults,
       ...parsed,
@@ -155,6 +251,18 @@ export function loadConfig(): FreeLLMConfig {
         resilience: {
           ...defaults.preferences.resilience,
           ...parsedResilience,
+        },
+        safety: {
+          ...defaults.preferences.safety,
+          ...parsedSafety,
+          loopTrap: {
+            ...defaults.preferences.safety.loopTrap,
+            ...parsedLoopTrap,
+          },
+          semanticLoopTrap: {
+            ...defaults.preferences.safety.semanticLoopTrap,
+            ...parsedSemanticLoopTrap,
+          },
         },
       },
     };

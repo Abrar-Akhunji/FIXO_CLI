@@ -43,6 +43,18 @@ export class TaskSession {
   readonly startedAt: string;
   readonly readFiles = new Map<string, string | null>();
   readonly changedFiles = new Map<string, ChangeRecord>();
+  /**
+   * Tracks which files the agent has done a *structural* pre-scan on
+   * (via `extract_symbols` / `extract_imports`). The map is read by
+   * Pillar 3 (Context-Budget Guard) to verify that a large file the
+   * LLM wants to read was first reduced to its declarations. The
+   * `noteStructuralMap` and `hasStructuralMap` helpers below are
+   * intentionally side-effect-free for tests.
+   */
+  readonly structuralMaps = new Map<
+    string,
+    { symbols: boolean; imports: boolean }
+  >();
   private summary: TaskSessionSummary;
 
   constructor(opts: { cwd: string; task: string; model: string; policy?: PolicyProfile }) {
@@ -78,6 +90,44 @@ export class TaskSession {
     const resolved = this.guard.resolve(file, 'file');
     this.readFiles.set(resolved, hashFile(resolved));
     this.record('file_read', { file: this.guard.relative(resolved), hash: this.readFiles.get(resolved) });
+  }
+
+  /**
+   * Mark a file as having been pre-scanned structurally. The
+   * `flags` object records which dimensions were extracted so
+   * Pillar 3 can decide whether the LLM is still missing
+   * information when it later calls `read_file` on the same path.
+   */
+  noteStructuralMap(
+    file: string,
+    flags: { symbols: boolean; imports: boolean },
+  ): void {
+    const resolved = this.guard.resolve(file, 'file');
+    const existing = this.structuralMaps.get(resolved) ?? {
+      symbols: false,
+      imports: false,
+    };
+    this.structuralMaps.set(resolved, {
+      symbols: existing.symbols || flags.symbols,
+      imports: existing.imports || flags.imports,
+    });
+    this.record('structural_map', {
+      file: this.guard.relative(resolved),
+      ...flags,
+    });
+  }
+
+  /**
+   * Returns the structural pre-scan flags recorded for a file.
+   * Returns `null` if the file has never been pre-scanned — the
+   * caller should treat this as a hard-fail for the
+   * Context-Budget Guard rule.
+   */
+  hasStructuralMap(
+    file: string,
+  ): { symbols: boolean; imports: boolean } | null {
+    const resolved = this.guard.resolve(file, 'file');
+    return this.structuralMaps.get(resolved) ?? null;
   }
 
   captureBefore(file: string): void {

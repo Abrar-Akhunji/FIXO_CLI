@@ -3,11 +3,13 @@
  * FixO CLI — Entry Point
  *
  * Boot sequence:
- * 1. Load global config (~/.fixocli/config.json)
- * 2. If first run → run setup wizard
- * 3. Load project config (.freellmapi.yml) if present
- * 4. Ensure proxy server is running on the configured port
- * 5. Launch interactive REPL
+ * 1. Print the lava logo + command grid (new UI is the only UI).
+ * 2. Load global config (~/.fixocli/config.json)
+ * 3. If first run → run setup wizard
+ * 4. Load project config (.freellmapi.yml) if present
+ * 5. Ensure proxy server is running on the configured port
+ * 6. Print the session header
+ * 7. Launch interactive REPL
  */
 import fs from 'fs';
 import path from 'path';
@@ -17,8 +19,8 @@ import { startREPL } from './ui/prompt.js';
 import type { ProjectConfig } from './types.js';
 import yaml from 'js-yaml';
 
-import { colors } from './ui/colors.js';
-const c = colors;
+import { C } from './ui/colors.js';
+import { renderLogo, renderCommandGrid, renderSessionHeader } from './ui/index.js';
 
 /* ──────────────────────── CLI Args ──────────────────────── */
 
@@ -91,14 +93,14 @@ function parseArgs(): {
 
 function printHelpMessage(): void {
   console.log(`
-${c.cyan}${c.bold}FixO CLI${c.reset} — Autonomous Free Multi-Provider LLM Coding Tool
+${C.LAVA}${C.BOLD}FixO CLI${C.RESET} — Autonomous Free Multi-Provider LLM Coding Tool
 
-${c.bold}USAGE${c.reset}
+${C.BOLD}USAGE${C.RESET}
   fixo                           Start interactive REPL
   fixo "fix the bug"             Run a one-shot task
   fixo --help                    Show this help
 
-${c.bold}OPTIONS${c.reset}
+${C.BOLD}OPTIONS${C.RESET}
   -h, --help          Show help
   -V, --version       Show version
   -v, --verbose       Enable verbose/debug output
@@ -107,7 +109,7 @@ ${c.bold}OPTIONS${c.reset}
   -p, --port <port>   Proxy server port (default: 3001)
   -t, --task <text>   Run a one-shot task
 
-${c.bold}INTERACTIVE COMMANDS${c.reset}
+${C.BOLD}INTERACTIVE COMMANDS${C.RESET}
   /help               Show all commands
   /model [name|list]  Set model or list available models
   /providers          Manage AI provider API keys
@@ -140,14 +142,14 @@ ${c.bold}INTERACTIVE COMMANDS${c.reset}
   /theme              Toggle Dark Void / Inverted theme
   /exit               Exit
 
-${c.bold}EXAMPLES${c.reset}
-  ${c.dim}# Start interactive mode${c.reset}
+${C.BOLD}EXAMPLES${C.RESET}
+  ${C.SNOW4}# Start interactive mode${C.RESET}
   fixo
 
-  ${c.dim}# One-shot task${c.reset}
+  ${C.SNOW4}# One-shot task${C.RESET}
   fixo "add input validation to user.ts"
 
-  ${c.dim}# Use a specific model${c.reset}
+  ${C.SNOW4}# Use a specific model${C.RESET}
   fixo -m gemini-2.5-flash "explain this codebase"
   `);
 }
@@ -173,7 +175,7 @@ function loadProjectConfig(cwd: string): ProjectConfig | undefined {
 
     for (const key of Object.keys(doc)) {
       if (!KNOWN_CONFIG_KEYS.has(key)) {
-        console.warn(`${c.yellow}⚠ Unknown config key "${key}" in ${path.basename(configPath)}${c.reset}`);
+        console.warn(`${C.YELLOW}⚠ Unknown config key "${key}" in ${path.basename(configPath)}${C.RESET}`);
       }
     }
 
@@ -197,10 +199,14 @@ function loadProjectConfig(cwd: string): ProjectConfig | undefined {
 /* ──────────────────────── Main ──────────────────────── */
 
 async function main(): Promise<void> {
+  // ──── Step 0: Print the lava logo (the new UI is the only UI) ────
+  renderLogo();
+  renderCommandGrid();
+
   // Node version check (major >= 24)
   const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
   if (nodeMajor < 24) {
-    console.error(`${c.red}Error: FixO CLI requires Node.js version 24.0.0 or higher (current version: ${process.version}).${c.reset}`);
+    console.error(`${C.RED}Error: FixO CLI requires Node.js version 24.0.0 or higher (current version: ${process.version}).${C.RESET}`);
     process.exit(1);
   }
 
@@ -225,6 +231,24 @@ async function main(): Promise<void> {
   // ──── Step 1: Load config ────
   let config = loadConfig();
 
+  // Pillar 3 — LSP pre-flight. Run a synchronous PATH check for
+  // common language servers and warn (not block) the user if
+  // none are present. The full pre-save gate is still wired in
+  // via the `LspPreSaveGate` and falls back to a brace-balance
+  // check when `FIXO_LSP_FALLBACK=syntax-only` is set.
+  try {
+    const { checkLspSanity } = await import('./lsp/syntax-fallback.js');
+    const sanity = checkLspSanity(process.env);
+    if (!sanity.ok) {
+      console.warn(
+        `${C.YELLOW}⚠  ${sanity.reason}${C.RESET}\n` +
+        `${C.SNOW4}   Set FIXO_LSP_FALLBACK=syntax-only to enable brace-balance fallback.${C.RESET}`,
+      );
+    }
+  } catch {
+    // best-effort — never block boot on this check
+  }
+
   // ──── Step 2: First-run wizard & Validation ────
   if (!config._firstRunComplete || !config.freellmapi_api_key || !config.apiUrl) {
     config = await runSetupWizard();
@@ -240,10 +264,10 @@ async function main(): Promise<void> {
       });
       clearTimeout(timeoutId);
       if (res.status === 401 || res.status === 403) {
-        console.warn(`${c.yellow}⚠ Warning: API Key appears invalid (HTTP ${res.status}). You may need to re-run setup.${c.reset}`);
+        console.warn(`${C.YELLOW}⚠ Warning: API Key appears invalid (HTTP ${res.status}). You may need to re-run setup.${C.RESET}`);
       }
     } catch (err: unknown) {
-      console.warn(`${c.yellow}⚠ Warning: Could not validate API key (connection failed). Proceeding in offline mode or assuming temporary network issue.${c.reset}`);
+      console.warn(`${C.YELLOW}⚠ Warning: Could not validate API key (connection failed). Proceeding in offline mode or assuming temporary network issue.${C.RESET}`);
     }
   }
 
@@ -312,7 +336,7 @@ async function main(): Promise<void> {
     // Print final stats
     const modelPart = result.model ? `${result.model} · ` : '';
     console.log(
-      `\n${c.dim}${modelPart}${result.tokensUsed.total_tokens} tokens · ${result.toolCallCount} tool calls · ${(result.durationMs / 1000).toFixed(1)}s${c.reset}`,
+      `\n${C.SNOW4}${modelPart}${result.tokensUsed.total_tokens} tokens · ${result.toolCallCount} tool calls · ${(result.durationMs / 1000).toFixed(1)}s${C.RESET}`,
     );
 
     const { stopLspManager } = await import('./agent/tool-executor.js');
@@ -321,7 +345,19 @@ async function main(): Promise<void> {
     process.exit(result.success ? 0 : 1);
   }
 
-  // Interactive REPL mode
+  // Interactive REPL mode — print the session header before
+  // handing off to startREPL so the boot sequence is:
+  // logo → command grid → session header → › prompt.
+  const sessionModel = model ?? 'auto';
+  renderSessionHeader({
+    status: 'new',
+    startedAt: new Date().toISOString(),
+    provider: 'auto',
+    model: sessionModel,
+    mode: 'BUILD',
+    routing: 'auto',
+    contextWindow: '200k',
+  });
   await startREPL({
     config,
     projectConfig,
@@ -335,6 +371,6 @@ async function main(): Promise<void> {
 
 // ──── Run ────
 main().catch((error) => {
-  console.error(`${c.red}Fatal error: ${error.message ?? error}${c.reset}`);
+  console.error(`${C.RED}Fatal error: ${error.message ?? error}${C.RESET}`);
   process.exit(1);
 });

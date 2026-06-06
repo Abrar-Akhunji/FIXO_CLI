@@ -1,6 +1,29 @@
 import fs from 'fs';
 import path from 'path';
 
+/* ──────────────────────── Loop-Trap Detector Re-Exports ─────────────────── */
+
+/**
+ * Re-exported here so external callers (e.g. `SingleAgent`,
+ * telemetry sinks) can import the entire loop-trap surface from
+ * `src/planner.ts` without taking a hard dependency on the
+ * `src/runtime/` directory layout. The implementation lives in
+ * `src/runtime/loop-trap.ts`; this file is the public façade.
+ */
+export {
+  LoopTrapDetector,
+  LoopTrapAbortedError,
+  DEFAULT_LOOP_TRAP_PREFS,
+  canonicaliseArgs,
+} from './runtime/loop-trap.js';
+
+export type {
+  LoopSnapshot,
+  LoopTrapVerdict,
+  LoopTrapLayer,
+  LoopTrapPreferences,
+} from './runtime/loop-trap.js';
+
 export interface SavedPlan {
   task: string;
   createdAt: string;

@@ -1,8 +1,518 @@
+/**
+ * Fixo UI render layer.
+ *
+ * This module owns:
+ *   1. The static, line-by-line helpers used by the REPL welcome /
+ *      help screens (preserved verbatim for backwards compatibility).
+ *   2. A new type-safe, double-buffered, non-blocking dashboard
+ *      renderer used during agent execution.
+ *
+ * The dashboard is opt-in: the default {@link dashboard} singleton is
+ * shared across the tool loop and the prompt REPL, but tests / CI
+ * environments that pipe stdout can call {@link Dashboard.deactivate}
+ * to force the single-line / off modes without touching the call
+ * sites that emit events.
+ */
 import fs from "fs";
 import path from "path";
 import { colors, renderStatusLabel, themeMode } from "./colors.js";
 
 const c = { ...colors, renderStatusLabel };
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  PILLAR 1 — Static Dashboard Types (Section 1.1 of the spec)      */
+/* ────────────────────────────────────────────────────────────────── */
+
+export type ToolState = "thinking" | "executing" | "completed" | "failed";
+export type ExecutionMode = "PLAN" | "BUILD";
+/** How the renderer should display itself. */
+export type RenderMode = "dashboard" | "single-line" | "off";
+
+export interface DashboardActiveTool {
+  name: string;
+  target: string;
+  state: ToolState;
+}
+
+export interface DashboardState {
+  runId: string;
+  activeTask: string;
+  executionMode: ExecutionMode;
+  activeAgent: string;
+  modelId: string;
+  status: string;
+  elapsedTimeMs: number;
+  tokensConsumed: number;
+  estimatedCostUsd: number;
+  /** 0..100. Use -1 to indicate an indeterminate spinner. */
+  progressPercent: number;
+  activeTool: DashboardActiveTool | null;
+  /** Capped at MAX_LOG_ENTRIES. Oldest entries are evicted FIFO. */
+  logs: ReadonlyArray<string>;
+}
+
+export type DashboardEvent =
+  | { type: "turn-start"; turnIndex: number; task: string }
+  | { type: "tool-start"; tool: string; target: string; turnIndex: number }
+  | {
+      type: "tool-finish";
+      tool: string;
+      target: string;
+      state: "completed" | "failed";
+      durationMs: number;
+    }
+  | { type: "log"; level: "info" | "warn" | "error"; message: string }
+  | { type: "tokens"; prompt: number; completion: number; total: number }
+  | { type: "status"; message: string }
+  | { type: "mode"; mode: ExecutionMode }
+  | { type: "done"; success: boolean };
+
+export interface DashboardSubscriber {
+  /** Called synchronously on every event. Implementations must
+   *  not throw — errors are swallowed and counted in the
+   *  {@link Dashboard.subscriberErrors} tally. */
+  onEvent(event: DashboardEvent): void;
+}
+
+const MAX_LOG_ENTRIES = 5;
+const DEFAULT_PROMPT_COST_USD_PER_1K = 3 / 1000;
+const DEFAULT_COMPLETION_COST_USD_PER_1K = 15 / 1000;
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Dashboard — state holder + typed event fan-out                   */
+/* ────────────────────────────────────────────────────────────────── */
+
+export class Dashboard {
+  private state: DashboardState;
+  private readonly subs = new Set<DashboardSubscriber>();
+  /** Errors thrown by subscribers are counted but never propagate. */
+  public subscriberErrors = 0;
+  /** Wall-clock anchor for elapsedTimeMs. */
+  private runStartedAt = Date.now();
+
+  constructor(initial?: Partial<DashboardState>) {
+    this.state = {
+      runId: initial?.runId ?? `run-${Date.now().toString(36)}`,
+      activeTask: initial?.activeTask ?? "",
+      executionMode: initial?.executionMode ?? "BUILD",
+      activeAgent: initial?.activeAgent ?? "single-agent",
+      modelId: initial?.modelId ?? "auto",
+      status: initial?.status ?? "Idle",
+      elapsedTimeMs: 0,
+      tokensConsumed: 0,
+      estimatedCostUsd: 0,
+      progressPercent: -1,
+      activeTool: null,
+      logs: [],
+    };
+  }
+
+  /** Subscribe to the event stream. Returns an unsubscribe fn. */
+  subscribe(sub: DashboardSubscriber): () => void {
+    this.subs.add(sub);
+    return () => {
+      this.subs.delete(sub);
+    };
+  }
+
+  /** Number of active subscribers. Useful for tests. */
+  subscriberCount(): number {
+    return this.subs.size;
+  }
+
+  /** Type-safe accessor for the current frame. */
+  snapshot(): Readonly<DashboardState> {
+    return { ...this.state, logs: [...this.state.logs] };
+  }
+
+  /** Wipe state and start a fresh run with the given task. */
+  reset(task: string, mode: ExecutionMode, modelId: string, agentName = "single-agent"): void {
+    this.runStartedAt = Date.now();
+    this.state = {
+      runId: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      activeTask: task,
+      executionMode: mode,
+      activeAgent: agentName,
+      modelId,
+      status: "Starting",
+      elapsedTimeMs: 0,
+      tokensConsumed: 0,
+      estimatedCostUsd: 0,
+      progressPercent: -1,
+      activeTool: null,
+      logs: [],
+    };
+    this.notify({ type: "turn-start", turnIndex: 0, task });
+  }
+
+  /** Apply a typed event, mutating the state. Pure — never throws. */
+  emit(event: DashboardEvent): void {
+    try {
+      switch (event.type) {
+        case "turn-start":
+          this.state.activeTask = event.task;
+          this.state.status = `Thinking (turn ${event.turnIndex + 1})`;
+          this.state.activeTool = null;
+          this.state.progressPercent = -1;
+          break;
+        case "tool-start":
+          this.state.activeTool = {
+            name: event.tool,
+            target: event.target,
+            state: "executing",
+          };
+          this.state.status = `Running ${event.tool}`;
+          this.pushLog(`${event.tool} → ${event.target}`);
+          break;
+        case "tool-finish":
+          if (
+            this.state.activeTool &&
+            this.state.activeTool.name === event.tool
+          ) {
+            this.state.activeTool = { ...this.state.activeTool, state: event.state };
+          }
+          this.state.status = event.state === "failed" ? `Failed ${event.tool}` : `Idle`;
+          break;
+        case "log":
+          this.pushLog(`[${event.level}] ${event.message}`);
+          break;
+        case "tokens":
+          this.state.tokensConsumed = event.total;
+          this.state.estimatedCostUsd =
+            (event.prompt / 1000) * DEFAULT_PROMPT_COST_USD_PER_1K +
+            (event.completion / 1000) * DEFAULT_COMPLETION_COST_USD_PER_1K;
+          break;
+        case "status":
+          this.state.status = event.message;
+          break;
+        case "mode":
+          this.state.executionMode = event.mode;
+          break;
+        case "done":
+          this.state.status = event.success ? "Completed" : "Failed";
+          this.state.activeTool = null;
+          this.state.progressPercent = event.success ? 100 : this.state.progressPercent;
+          break;
+      }
+      this.state.elapsedTimeMs = Date.now() - this.runStartedAt;
+    } catch {
+      // Defensive — never let a state-mutation error crash the agent.
+    }
+    this.notify(event);
+  }
+
+  /** Same as {@link emit} but synchronous and silent — for hot paths. */
+  emitSilent(event: DashboardEvent): void {
+    this.emit(event);
+  }
+
+  private pushLog(line: string): void {
+    const sanitized = line.length > 200 ? `${line.slice(0, 197)}…` : line;
+    const next = [...this.state.logs, sanitized];
+    this.state.logs =
+      next.length > MAX_LOG_ENTRIES ? next.slice(next.length - MAX_LOG_ENTRIES) : next;
+  }
+
+  private notify(event: DashboardEvent): void {
+    for (const sub of this.subs) {
+      try {
+        sub.onEvent(event);
+      } catch {
+        this.subscriberErrors += 1;
+      }
+    }
+  }
+}
+
+/** Process-wide default. All call sites emit to this instance. */
+export const dashboard = new Dashboard();
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  AnsiRenderer — pure double-buffered screen math                   */
+/* ────────────────────────────────────────────────────────────────── */
+
+const HIDE_CURSOR = "\x1b[?25l";
+const SHOW_CURSOR = "\x1b[?25h";
+const SAVE_CURSOR = "\x1b[s";
+const RESTORE_CURSOR = "\x1b[u";
+const CURSOR_HOME = "\x1b[H";
+const CLEAR_DOWN = "\x1b[J";
+const CLEAR_LINE = "\x1b[K";
+const RESET = "\x1b[0m";
+
+/** Pick the active render mode based on TTY + terminal size. */
+export function selectRenderMode(
+  isTTY: boolean,
+  columns: number,
+  rows: number
+): RenderMode {
+  if (!isTTY) return "off";
+  if (columns < 80 || rows < 24) return "single-line";
+  return "dashboard";
+}
+
+function pad(line: string, width: number): string {
+  const visible = stripAnsi(line).length;
+  if (visible >= width) return line;
+  return line + " ".repeat(width - visible);
+}
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
+function shortStatus(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s - m * 60);
+  return `${m}m${r}s`;
+}
+
+function fmtUsd(usd: number): string {
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+export class AnsiRenderer {
+  private mode: RenderMode = "off";
+  private lastRenderedHeight = 0;
+  private lastEventLine = "";
+  private mounted = false;
+  private readonly exitHandlers: Array<() => void> = [];
+
+  constructor(
+    private readonly isTTY: () => boolean = () => Boolean(process.stdout.isTTY),
+    private readonly columns: () => number = () => process.stdout.columns ?? 80,
+    private readonly rows: () => number = () => process.stdout.rows ?? 24
+  ) {}
+
+  setMode(mode: RenderMode): void {
+    if (this.mode === mode) return;
+    // Wipe any prior dashboard surface so the new mode starts clean.
+    this.wipePrevious();
+    this.mode = mode;
+  }
+
+  getMode(): RenderMode {
+    return this.mode;
+  }
+
+  /** Draw a single frame from the given dashboard state. */
+  render(state: Readonly<DashboardState>): void {
+    this.mode = selectRenderMode(this.isTTY(), this.columns(), this.rows());
+    if (this.mode === "off") {
+      // Emit nothing — stdout is being captured (CI, tests, pipes).
+      this.lastRenderedHeight = 0;
+      return;
+    }
+    if (this.mode === "single-line") {
+      this.renderSingleLine(state);
+      return;
+    }
+    this.renderDashboard(state);
+  }
+
+  /** Render a transient event line (e.g. tool call progress) without
+   *  re-painting the full dashboard. */
+  renderEventLine(line: string): void {
+    if (this.mode === "off" || !this.isTTY()) return;
+    const trimmed = shortStatus(stripAnsi(line).replace(/\n/g, " ⏎ "), 200);
+    this.lastEventLine = trimmed;
+    if (this.mode === "single-line") {
+      this.write(`${HIDE_CURSOR}${SAVE_CURSOR}${trimmed}${RESET}${RESTORE_CURSOR}${SHOW_CURSOR}`);
+    }
+  }
+
+  /** Mount: install exit hooks that restore the cursor. Idempotent. */
+  mount(): void {
+    if (this.mounted) return;
+    this.mounted = true;
+    const restore = (): void => {
+      try {
+        process.stdout.write(`${SHOW_CURSOR}${RESET}`);
+      } catch {
+        // ignore — process may already be tearing down
+      }
+    };
+    this.exitHandlers.push(restore);
+    process.on("exit", restore);
+    process.on("SIGINT", () => {
+      restore();
+      process.exit(130);
+    });
+    process.on("SIGTERM", () => {
+      restore();
+      process.exit(143);
+    });
+  }
+
+  /** Unmount: remove the exit hooks we installed and reset the
+   *  `mounted` flag. Idempotent — safe to call twice. Primarily
+   *  useful in tests so process.on() listeners don't pile up. */
+  unmount(): void {
+    if (!this.mounted) return;
+    this.mounted = false;
+    for (const handler of this.exitHandlers) {
+      process.removeListener("exit", handler);
+    }
+    this.exitHandlers.length = 0;
+  }
+
+  /** Force-clear whatever was previously painted (e.g. on shutdown). */
+  wipePrevious(): void {
+    if (this.lastRenderedHeight === 0 || !this.isTTY()) return;
+    const out: string[] = [SAVE_CURSOR];
+    for (let i = 0; i < this.lastRenderedHeight; i++) {
+      out.push("\x1b[1A", CLEAR_LINE);
+    }
+    out.push(RESTORE_CURSOR, SHOW_CURSOR);
+    this.write(out.join(""));
+    this.lastRenderedHeight = 0;
+  }
+
+  /* ── private renderers ──────────────────────────────────────── */
+
+  private renderSingleLine(state: Readonly<DashboardState>): void {
+    const tool = state.activeTool
+      ? `[${state.activeTool.name}:${state.activeTool.state}] ${state.activeTool.target}`
+      : "—";
+    const tokens =
+      state.tokensConsumed > 0 ? `${state.tokensConsumed} tok` : "—";
+    const line = `${colors.cyan}[${state.executionMode}]${RESET} ` +
+      `${colors.bold}${shortStatus(state.activeTask, 60)}${RESET} ` +
+      `${colors.dim}${state.modelId}${RESET} · ${state.status} · ${tool} · ` +
+      `${tokens} · ${fmtMs(state.elapsedTimeMs)}`;
+    this.write(`${SAVE_CURSOR}${CLEAR_LINE}${line}${RESET}${RESTORE_CURSOR}`);
+    this.lastRenderedHeight = 1;
+  }
+
+  private renderDashboard(state: Readonly<DashboardState>): void {
+    const cols = Math.max(80, this.columns());
+    const width = Math.min(cols, 110);
+    const inner = width - 2; // for the two box characters
+    const out: string[] = [];
+    out.push(HIDE_CURSOR, SAVE_CURSOR, CURSOR_HOME, CLEAR_DOWN);
+    out.push(this.box(width, "─", "─", "─"));
+    out.push(
+      `${colors.cyan}│${RESET}` +
+        ` ${this.modeBadge(state.executionMode)} ` +
+        `${colors.bold}${shortStatus(state.activeTask, inner - 30)}${RESET}` +
+        ` ${colors.dim}· run ${state.runId.slice(-8)} · ${state.modelId}${RESET}` +
+        `${" ".repeat(Math.max(0, inner - 50 - state.activeTask.length))}` +
+        `${colors.cyan}│${RESET}\n`
+    );
+    out.push(this.box(width, "─", "─", "─"));
+
+    // Diagnostic metrics
+    out.push(
+      `${colors.cyan}│${RESET}  ${colors.dim}tokens${RESET}  ${bold(
+        String(state.tokensConsumed)
+      )}` +
+        `   ${colors.dim}cost${RESET}  ${bold(fmtUsd(state.estimatedCostUsd))}` +
+        `   ${colors.dim}elapsed${RESET}  ${bold(fmtMs(state.elapsedTimeMs))}` +
+        `   ${colors.dim}progress${RESET}  ${bold(this.progressLabel(state.progressPercent))}` +
+        `${" ".repeat(Math.max(0, inner - 65))}` +
+        `${colors.cyan}│${RESET}\n`
+    );
+
+    // Action stream (single dynamic spinner line)
+    const tool = state.activeTool;
+    const actionText = tool
+      ? `${spinnerFor(tool.state)} ${colors.cyan}[${tool.name.toUpperCase()}]${RESET} ` +
+        `${shortStatus(tool.target, inner - 24)} ${colors.dim}(${tool.state})${RESET}`
+      : `${colors.dim}${spinnerFor("thinking")} ${state.status}${RESET}`;
+    out.push(
+      `${colors.cyan}│${RESET}  ${actionText}` +
+        `${" ".repeat(Math.max(0, inner - stripAnsi(actionText).length - 2))}` +
+        `${colors.cyan}│${RESET}\n`
+    );
+    out.push(this.box(width, "─", "─", "─"));
+
+    // Recent events box (5 entries)
+    out.push(
+      `${colors.cyan}│${RESET}  ${colors.dim}Recent events${RESET}` +
+        `${" ".repeat(Math.max(0, inner - 15))}` +
+        `${colors.cyan}│${RESET}\n`
+    );
+    const logs = state.logs;
+    for (let i = 0; i < MAX_LOG_ENTRIES; i++) {
+      const line = logs[i] ?? "";
+      out.push(
+        `${colors.cyan}│${RESET}  ${pad(
+          line ? `${colors.dim}•${RESET} ${shortStatus(line, inner - 4)}` : "",
+          inner - 2
+        )}  ${colors.cyan}│${RESET}\n`
+      );
+    }
+    out.push(this.box(width, "─", "─", "─"));
+    out.push(RESTORE_CURSOR, SHOW_CURSOR);
+    this.write(out.join(""));
+    this.lastRenderedHeight = 7 + MAX_LOG_ENTRIES;
+  }
+
+  private modeBadge(mode: ExecutionMode): string {
+    return mode === "BUILD"
+      ? `${colors.bgCyan}${colors.bold} ${mode} ${RESET}`
+      : `${colors.bgLiquidLava}${colors.bold} ${mode} ${RESET}`;
+  }
+
+  private progressLabel(p: number): string {
+    if (p < 0) return "—";
+    if (p > 100) return "100%";
+    return `${p}%`;
+  }
+
+  private box(width: number, _l: string, _m: string, _r: string): string {
+    return `${colors.cyan}┌${"─".repeat(width - 2)}┐${RESET}\n`;
+  }
+
+  private write(buf: string): void {
+    try {
+      process.stdout.write(buf);
+    } catch {
+      // pipe closed mid-write — nothing we can do
+    }
+  }
+}
+
+function bold(s: string): string {
+  return `${colors.bold}${s}${RESET}`;
+}
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+let spinnerTick = 0;
+function spinnerFor(state: ToolState | "thinking"): string {
+  spinnerTick = (spinnerTick + 1) % SPINNER_FRAMES.length;
+  const frame = SPINNER_FRAMES[spinnerTick] ?? "*";
+  switch (state) {
+    case "executing":
+      return `${colors.cyan}${frame}${RESET}`;
+    case "completed":
+      return `${colors.green}✓${RESET}`;
+    case "failed":
+      return `${colors.red}✗${RESET}`;
+    case "thinking":
+    default:
+      return `${colors.dim}${frame}${RESET}`;
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Default renderer instance + auto-mount                            */
+/* ────────────────────────────────────────────────────────────────── */
+
+export const renderer = new AnsiRenderer();
+renderer.mount();
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Backwards-compatible exports (originals preserved verbatim)      */
+/* ────────────────────────────────────────────────────────────────── */
 
 export const COMMANDS_WITH_DESC = [
   // Core
@@ -29,12 +539,12 @@ export const COMMANDS_WITH_DESC = [
   { cmd: '/run-plan', desc: 'Execute the last generated plan' },
   // Git
   { cmd: '/diff', desc: 'Show git diff of workspace' },
-  { cmd: '/undo', desc: 'Undo last auto-committed change' },
+  { cmd: '/undo', desc: 'Undo last AI change' },
   { cmd: '/log', desc: 'Show recent git commits' },
-  { cmd: '/snapshot', desc: 'Create a named git snapshot commit' },
+  { cmd: '/snapshot', desc: 'Create a named git snapshot' },
   // Quality & review
   { cmd: '/review', desc: 'Review the current workspace diff' },
-  { cmd: '/test', desc: 'Run detected project tests' },
+  { cmd: '/test', desc: 'Run detected project checks' },
   { cmd: '/fix-tests', desc: 'Run tests and auto-fix failures' },
   { cmd: '/fix-ci', desc: 'Fix CI failures (paste logs)' },
   // Runs & memory
@@ -52,172 +562,6 @@ export const COMMANDS_WITH_DESC = [
   { cmd: '/theme', desc: 'Toggle Dark Void / Inverted theme' },
   { cmd: '/variant', desc: 'Toggle theme color variant' },
 ];
-
-export function getLogoString(pad = ''): string {
-  const glyphs = {
-    left: [
-      "                  ",
-      "█▀▀▀ ██  █  █ █▀▀█",
-      "█__  ██   ▀▀  █__█",
-      "▀    ▀▀  ▀  ▀ ▀~~▀"
-    ],
-    right: [
-      "            ▄",
-      "█▀▀▀ █    ██",
-      "█___ █    ██",
-      "▀▀▀▀ ▀▀▀▀ ▀▀"
-    ]
-  };
-
-  const reset = "\x1b[0m";
-  const isDark = themeMode === 'dark';
-  const leftColors = {
-    fg: "\x1b[38;2;56;189;248m", // Cyan / OpenCode left brand color
-    shadow: isDark ? "\x1b[38;2;51;65;85m" : "\x1b[38;2;148;163;184m", // Slate shadow
-    bg: isDark ? "\x1b[48;2;30;41;59m" : "\x1b[48;2;226;232;240m", // Slate bg
-  };
-  const rightColors = {
-    fg: isDark ? "\x1b[38;2;251;251;251m" : "\x1b[38;2;21;20;25m", // Snow / OpenCode right brand color
-    shadow: isDark ? "\x1b[38;2;71;85;105m" : "\x1b[38;2;100;116;139m", // Slate shadow light
-    bg: isDark ? "\x1b[48;2;51;65;85m" : "\x1b[48;2;203;213;225m", // Slate bg light
-  };
-
-  const draw = (line: string, fg: string, shadow: string, bg: string) => {
-    const parts: string[] = [];
-    for (const char of line) {
-      if (char === "_") {
-        parts.push(bg, " ", reset);
-        continue;
-      }
-      if (char === "^") {
-        parts.push(fg, bg, "▀", reset);
-        continue;
-      }
-      if (char === "~") {
-        parts.push(shadow, "▀", reset);
-        continue;
-      }
-      if (char === " ") {
-        parts.push(" ");
-        continue;
-      }
-      parts.push(fg, char, reset);
-    }
-    return parts.join("");
-  };
-
-  const result: string[] = [];
-  const gap = " ";
-  glyphs.left.forEach((row, index) => {
-    if (pad) result.push(pad);
-    result.push(draw(row, leftColors.fg, leftColors.shadow, leftColors.bg));
-    result.push(gap);
-    const other = glyphs.right[index] ?? "";
-    result.push(draw(other, rightColors.fg, rightColors.shadow, rightColors.bg));
-    result.push("\n");
-  });
-
-  return result.join("").trimEnd();
-}
-
-export function printWelcome(): void {
-  console.log('');
-  console.log(getLogoString('  '));
-  console.log('');
-  console.log(`  \x1b[38;2;56;189;248m──────────────────────────────────────────────────\x1b[0m`);
-  console.log('');
-
-  const terminalWidth = process.stdout.columns || 94;
-  
-  let numCols = 3;
-  let colWidth = 29;
-  let width = 94;
-
-  if (terminalWidth < 68) {
-    numCols = 1;
-    width = 34;
-  } else if (terminalWidth < 96) {
-    numCols = 2;
-    width = 64;
-  }
-
-  const borderTop = '┌' + '─'.repeat(width) + '┐';
-  const borderBottom = '└' + '─'.repeat(width) + '┘';
-
-  interface ColItem { cmd: string; desc: string; }
-
-  const flatCommands: ColItem[] = [
-    { cmd: '/help',      desc: 'Show all commands' },
-    { cmd: '/providers', desc: 'Manage API keys'   },
-    { cmd: '/model',     desc: 'Pick model'        },
-    { cmd: '/mode',      desc: 'PLAN/BUILD toggle' },
-    { cmd: '/plan',      desc: 'Create plan'       },
-    { cmd: '/run-plan',  desc: 'Execute plan'      },
-    { cmd: '/compact',   desc: 'Compress context'  },
-    { cmd: '/session',   desc: 'Sessions'          },
-    { cmd: '/skills',    desc: 'List skills'       },
-    { cmd: '/exit',      desc: 'Exit FixO CLI'     },
-    { cmd: '/select',   desc: 'Pin file'           },
-    { cmd: '/unselect', desc: 'Clear pinned'       },
-    { cmd: '/index',    desc: 'Build index'        },
-    { cmd: '/find',     desc: 'Search index'       },
-    { cmd: '/explain',  desc: 'Explain target'     },
-    { cmd: '/review',   desc: 'Review diff'        },
-    { cmd: '/test',     desc: 'Run tests'          },
-    { cmd: '/fix-ci',   desc: 'Fix CI failures'    },
-    { cmd: '/doctor',   desc: 'Doctor checks'      },
-    { cmd: '/diff',     desc: 'Git diff'           },
-    { cmd: '/log',      desc: 'Git log'            },
-    { cmd: '/undo',     desc: 'Undo last commit'   },
-    { cmd: '/snapshot', desc: 'Git snapshot'       },
-    { cmd: '/memory',   desc: 'Show memory'        },
-    { cmd: '/remember', desc: 'Add memory fact'    },
-    { cmd: '/forget',   desc: 'Clear memory'       },
-    { cmd: '/runs',     desc: 'List runs'          },
-    { cmd: '/telemetry',desc: 'Toggle telemetry'   },
-    { cmd: '/theme',    desc: 'Toggle theme'       },
-  ];
-
-  // Distribute flatCommands into columns
-  const numRows = Math.ceil(flatCommands.length / numCols);
-  const cols: ColItem[][] = Array.from({ length: numCols }, () => []);
-  for (let i = 0; i < flatCommands.length; i++) {
-    const colIdx = Math.floor(i / numRows);
-    cols[colIdx].push(flatCommands[i]);
-  }
-
-  console.log(`${c.cyan}${borderTop}${c.reset}`);
-  
-  // Header line padding calculation
-  const headerVisibleLength = 50; 
-  const headerPadding = Math.max(0, width - headerVisibleLength);
-  console.log(`${c.cyan}│${c.reset}  ${c.bold}Quick Command Reference${c.reset}  ${c.dim}(type /help for full docs)${c.reset}${' '.repeat(headerPadding)}${c.cyan}│${c.reset}`);
-  console.log(`${c.cyan}├${'─'.repeat(width)}┤${c.reset}`);
-
-  for (let r = 0; r < numRows; r++) {
-    let rowText = '  ';
-    for (let cIdx = 0; cIdx < numCols; cIdx++) {
-      const item = cols[cIdx][r];
-      if (item && item.cmd) {
-        rowText += `${c.cyan}${item.cmd.padEnd(11)}${c.reset}${item.desc.padEnd(18)}`;
-      } else {
-        rowText += ' '.repeat(colWidth);
-      }
-    }
-    const rowVisibleLength = 2 + numCols * colWidth;
-    const rowPadding = Math.max(0, width - rowVisibleLength);
-    console.log(`${c.cyan}│${c.reset}${rowText}${' '.repeat(rowPadding)}${c.cyan}│${c.reset}`);
-  }
-
-  console.log(`${c.cyan}│${c.reset}${' '.repeat(width)}${c.cyan}│${c.reset}`);
-  
-  // Footer text length: 91
-  const footerVisibleLength = 91;
-  const footerPadding = Math.max(0, width - footerVisibleLength);
-  console.log(`${c.cyan}│${c.reset}  ${c.dim}Type @ to autocomplete files/agents · Type / to autocomplete commands · TAB to toggle mode${c.reset}${' '.repeat(footerPadding)}${c.cyan}│${c.reset}`);
-  console.log(`${c.cyan}${borderBottom}${c.reset}`);
-  console.log('');
-}
 
 export function printHelp(): void {
   const w = 72;
@@ -306,7 +650,6 @@ export function buildPromptString(cwd: string, model: string, branch: string): s
 export function formatInputPaths(input: string, cwd: string): string {
   const commands = COMMANDS_WITH_DESC.map((item) => item.cmd);
 
-  // Replace absolute/relative paths with just the filename highlighted
   return input.replace(/(?:\/[\w.-]+)+/g, (match) => {
     if (match.startsWith('/')) {
       const commandName = match.split(/\s+/)[0];

@@ -9,12 +9,18 @@
 import type { ChatMessage, TokenUsage } from '../shared/types.js';
 import { AgentClient, type ChatResult, type StreamChunk } from './agent-client.js';
 import { ConversationManager } from './conversation.js';
-import { getActiveTools, TOOL_DEFINITIONS, executeTool, type ToolCallEvent } from './tool-executor.js';
+import { getActiveTools, TOOL_DEFINITIONS, executeTool, classifyExecutionRole, type ToolCallEvent } from './tool-executor.js';
 import { isTrivialQuery } from '../planner.js';
 import { buildRepoMap } from './repo-map.js';
 import type { AgentContext, AgentResult } from '../types.js';
 import { loadConfig } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
+import {
+  SemanticLoopDetector,
+  SemanticLoopAbortedError,
+  toSafetyAlertDirective,
+} from '../runtime/loop-trap.js';
+import { dashboard } from '../ui/render.js';
 import * as p from '@clack/prompts';
 export const promptsWrapper = {
   select: p.select,
@@ -75,6 +81,40 @@ export function evaluateInputIntent(task: string): 'CHAT_ONLY' | 'MUTATION' {
     return 'CHAT_ONLY';
   }
   return 'MUTATION';
+}
+
+/* ──────────────────────── Permission helpers ──────────────────────── */
+
+function formatPermissionPrompt(
+  name: string,
+  args: Record<string, string>,
+): string {
+  switch (name) {
+    case 'write_file':
+      return `Allow write to ${colors.cyan}${colors.bold}${args.path || 'unknown path'}${colors.reset}?`;
+    case 'run_command':
+      return `Allow command execution: ${colors.yellow}${colors.bold}${args.command || 'unknown command'}${colors.reset}?`;
+    case 'apply_patch':
+      return `Allow apply_patch (unified diff, ${(args.patch ?? '').length} chars)?`;
+    case 'replace_range':
+      return `Allow replace_range on ${colors.cyan}${args.path}${colors.reset} lines ${args.startLine}..${args.endLine}?`;
+    case 'insert_after':
+      return `Allow insert_after on ${colors.cyan}${args.path}${colors.reset}?`;
+    case 'rename_file':
+      return `Allow rename ${colors.cyan}${args.from}${colors.reset} → ${colors.cyan}${args.to}${colors.reset}?`;
+    case 'delete_file':
+      return `Allow ${colors.red}delete${colors.reset} ${colors.cyan}${args.path}${colors.reset}?`;
+    case 'create_branch':
+      return `Allow create git branch "${args.branchName}"?`;
+    case 'commit_changes':
+      return `Allow git commit: "${(args.message ?? '').slice(0, 80)}"?`;
+    case 'push_branch':
+      return `Allow git push to ${args.remote || 'origin'}?`;
+    case 'create_pull_request':
+      return `Allow create pull request (base: ${args.baseBranch || 'main'})?`;
+    default:
+      return `Allow ${name}?`;
+  }
 }
 
 /* ──────────────────────── System Prompt ──────────────────────── */
@@ -225,6 +265,25 @@ export class SingleAgent {
       { role: 'user', content: context.task },
     ];
 
+    /**
+     * Helper to inject a safety directive into the system message at the
+     * head of the messages array. The directive is prepended (rather than
+     * appended) so the LLM sees it before the conversation history,
+     * which maximises the chance it changes its strategy on the next
+     * turn. The base system prompt is preserved untouched.
+     */
+    const injectSafetyDirective = (directive: string): void => {
+      if (messages.length === 0 || messages[0]?.role !== 'system') {
+        messages.unshift({ role: 'system', content: directive });
+        return;
+      }
+      const first = messages[0]!;
+      messages[0] = {
+        role: 'system',
+        content: `${directive}\n\n${first.content}`,
+      };
+    };
+
     const taskSession = new TaskSession({
       cwd: context.cwd,
       task: context.task,
@@ -232,16 +291,51 @@ export class SingleAgent {
       policy: context.policy,
     });
 
+    // Pillar 2 — auto-collect any expired staged writes at the
+    // start of every run. Stale staged writes from previous
+    // sessions are quarantined to a single TTL-bounded folder
+    // and removed here. Safe to run on every run start.
+    try {
+      const { AtomicStagingManager } = await import('../runtime/staging.js');
+      AtomicStagingManager.garbageCollectAll(context.cwd);
+    } catch {
+      // Staging is best-effort cleanup; never block the run.
+    }
+
+    // Pillar 5 / Protection 2 — classify the task and gate
+    // mutation tools. Read-only / review / analysis tasks run
+    // without write_file, apply_patch, etc. visible to the LLM.
+    const role = classifyExecutionRole(context.task);
+    const activeTools = getActiveTools(role === 'READ_ONLY' ? 'READ_ONLY' : context.mode);
+    if (role === 'READ_ONLY') {
+      console.log(`${colors.dim}🛡  Read-only role — mutation tools hidden.${colors.reset}`);
+    }
+    const safety = loadConfig().preferences.safety;
+
+    // Pillar 2 — semantic loop detector. Tracks per-file frequency so
+    // an LLM which varies its search arguments but keeps hammering
+    // the same file still trips. The composite LoopTrapDetector is
+    // still wired in (callers may pass safety.loopTrap) so the two
+    // detectors run in parallel; the semantic one covers the most
+    // common accidental "stare at one file" failure mode.
+    const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
+    let pendingSafetyDirective: string | null = null;
+
     console.log(`\n${colors.cyan}${colors.bold}🤖 Agent working...${colors.reset}`);
 
     try {
       while (toolCallCount < MAX_TOOL_CALLS) {
         const spinner = promptsWrapper.spinner();
         spinner.start(`🤖 Agent thinking (turn ${toolCallCount + 1})...`);
+        dashboard.emit({
+          type: 'turn-start',
+          turnIndex: toolCallCount + 1,
+          task: context.task,
+        });
         let result;
         try {
           result = await this.client.chat(messages, context.model, {
-            tools: getActiveTools(context.mode),
+            tools: activeTools,
             tool_choice: 'auto',
           });
           resolvedModel = result.model;
@@ -267,6 +361,10 @@ export class SingleAgent {
           throw err;
         } finally {
           spinner.stop('🤖 Thought completed');
+          dashboard.emit({
+            type: 'status',
+            message: `Turn ${toolCallCount + 1} complete`,
+          });
         }
 
         totalUsage.prompt_tokens += result.usage.prompt_tokens;
@@ -316,11 +414,63 @@ export class SingleAgent {
             parsedArgs = { error: 'Failed to parse tool arguments' };
           }
 
+          // Pillar 2 — semantic loop detection. Records the tool
+          // call *before* execution so even a permission-denied
+          // tool still counts as a hit on the file. The verdict is
+          // inspected *after* execution so a warn can be staged as
+          // a system-prompt directive on the *next* LLM call.
+          if (semanticLoopDetector.preference.enabled) {
+            const verdict = semanticLoopDetector.record(
+              toolCallCount,
+              toolCall.function.name,
+              parsedArgs,
+              context.cwd,
+            );
+            if (verdict.state === 'warn') {
+              pendingSafetyDirective = toSafetyAlertDirective(verdict);
+              console.log(
+                `${colors.yellow}⚠  Semantic loop warning: ${verdict.target} ` +
+                `accessed ${verdict.count}× in the last ${verdict.windowSize} turns.${colors.reset}`,
+              );
+            } else if (verdict.state === 'hard-abort') {
+              // Rollback any staged writes from this run before
+              // throwing, so a runaway agent doesn't leave a
+              // half-edited workspace behind.
+              try {
+                const { AtomicStagingManager } = await import('../runtime/staging.js');
+                AtomicStagingManager.rollbackAll(context.cwd, taskSession.id);
+              } catch {
+                // best-effort; never mask the abort error
+              }
+              throw new SemanticLoopAbortedError(
+                verdict.target,
+                verdict.count,
+                verdict.windowSize,
+              );
+            }
+          }
+
+          // Apply any staged directive at the *start* of the next
+          // LLM call, not after the current iteration's tools have
+          // run. This keeps the conversation aligned with the model
+          // that produced the warning.
+          if (pendingSafetyDirective) {
+            injectSafetyDirective(pendingSafetyDirective);
+            pendingSafetyDirective = null;
+          }
+
           const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl, context.yes);
 
           let event: ToolCallEvent;
           if (!allowed) {
             console.log(`  ${colors.red}✗ Permission denied for ${toolCall.function.name}${colors.reset}`);
+            dashboard.emit({
+              type: 'tool-finish',
+              tool: toolCall.function.name,
+              target: parsedArgs.path ?? parsedArgs.from ?? '',
+              state: 'failed',
+              durationMs: 0,
+            });
             event = {
               tool: toolCall.function.name,
               args: parsedArgs,
@@ -328,6 +478,13 @@ export class SingleAgent {
               isWrite: false,
             };
           } else {
+            const toolStart = Date.now();
+            dashboard.emit({
+              type: 'tool-start',
+              tool: toolCall.function.name,
+              target: parsedArgs.path ?? parsedArgs.from ?? '',
+              turnIndex: toolCallCount + 1,
+            });
             event = await executeTool(
               toolCall.function.name,
               parsedArgs,
@@ -337,8 +494,16 @@ export class SingleAgent {
                 session: taskSession,
                 policy: context.policy,
                 allowWithoutPrompt: context.yes,
+                safety,
               },
             );
+            dashboard.emit({
+              type: 'tool-finish',
+              tool: toolCall.function.name,
+              target: parsedArgs.path ?? parsedArgs.from ?? '',
+              state: event.result.startsWith('Error:') ? 'failed' : 'completed',
+              durationMs: Date.now() - toolStart,
+            });
           }
 
           if (event.isWrite && event.affectedPath) {
@@ -394,7 +559,12 @@ export class SingleAgent {
 
   /**
    * Ask the user for permission to execute a tool.
-   * Prompts for write_file and run_command.
+   * Prompts for every state-mutating tool: write_file,
+   * run_command, apply_patch, replace_range, insert_after,
+   * rename_file, delete_file, create_branch, commit_changes,
+   * push_branch, create_pull_request. Read-only tools (read_file,
+   * search_code, list_dir, extract_symbols, extract_imports)
+   * are auto-allowed.
    */
   private async askPermission(
     name: string,
@@ -402,7 +572,20 @@ export class SingleAgent {
     rl?: readline.Interface,
     allowWithoutPrompt?: boolean,
   ): Promise<boolean> {
-    if (name !== 'write_file' && name !== 'run_command') {
+    const MUTATING_TOOLS = new Set([
+      'write_file',
+      'run_command',
+      'apply_patch',
+      'replace_range',
+      'insert_after',
+      'rename_file',
+      'delete_file',
+      'create_branch',
+      'commit_changes',
+      'push_branch',
+      'create_pull_request',
+    ]);
+    if (!MUTATING_TOOLS.has(name)) {
       return true;
     }
 
@@ -413,14 +596,7 @@ export class SingleAgent {
     if (rl) rl.pause();
 
     try {
-      let message = '';
-      if (name === 'write_file') {
-        const filepath = args.path || 'unknown path';
-        message = `Allow write to ${colors.cyan}${colors.bold}${filepath}${colors.reset}?`;
-      } else if (name === 'run_command') {
-        const command = args.command || 'unknown command';
-        message = `Allow command execution: ${colors.yellow}${colors.bold}${command}${colors.reset}?`;
-      }
+      const message = formatPermissionPrompt(name, args);
 
       const choice = await promptsWrapper.select({
         message,

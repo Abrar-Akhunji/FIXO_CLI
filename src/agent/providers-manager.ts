@@ -5,10 +5,23 @@
  *
  * When a direct key exists for a provider, FixO bypasses the
  * FreeLLMAPI SaaS proxy and calls the provider's API natively.
+ *
+ * Pillar 4: the legacy `getDirectConfig(name)` method is now
+ * a thin wrapper around the {@link ProviderKeyVault} singleton.
+ * New code should use `withDirectCredential(name, fn)` instead,
+ * which exposes the credential exclusively inside a scoped
+ * callback so the raw key never escapes into a wider stack
+ * frame, an error message, or a log line.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {
+  getProviderKeyVault,
+  resetProviderKeyVault,
+  ProviderNotInVaultError,
+  type ProviderCredential,
+} from '../runtime/credential-vault.js';
 
 /* ──────────────────────── Provider Registry ──────────────────────── */
 
@@ -229,6 +242,18 @@ export const ProvidersManager = {
       ...(note ? { note } : {}),
     };
     saveStore(store);
+    // Keep the vault in sync so callers using withDirectCredential
+    // see the new key without having to wait for the next
+    // hydration.
+    const def = PROVIDER_REGISTRY.find((p) => p.name === name);
+    if (def) {
+      getProviderKeyVault().ingest(
+        name,
+        apiKey.trim(),
+        def.baseUrl,
+        def.displayName,
+      );
+    }
   },
 
   /** Remove a provider key. Returns true if removed, false if not found. */
@@ -237,6 +262,7 @@ export const ProvidersManager = {
     if (!store[name]) return false;
     delete store[name];
     saveStore(store);
+    getProviderKeyVault().evict(name);
     return true;
   },
 
@@ -248,16 +274,73 @@ export const ProvidersManager = {
 
   /** Get the base URL and key for a provider — for direct bypass. */
   getDirectConfig(name: string): { apiKey: string; baseUrl: string; displayName: string } | null {
+    // Lazily hydrate the vault on first access.
+    this.hydrateVault();
     const store = loadStore();
     const entry = store[name];
     if (!entry) return null;
     const def = PROVIDER_REGISTRY.find(p => p.name === name);
     if (!def) return null;
+    // Re-ingest in case the on-disk key was added since the last
+    // hydration. Idempotent: ingest() overwrites by name.
+    getProviderKeyVault().ingest(name, entry.apiKey, def.baseUrl, def.displayName);
     return {
       apiKey: entry.apiKey,
       baseUrl: def.baseUrl,
       displayName: def.displayName,
     };
+  },
+
+  /**
+   * Run `fn` with a direct provider's full credential
+   * ({@link ProviderCredential}) handed in via a scoped
+   * callback. The credential is sourced from the in-memory
+   * {@link ProviderKeyVault} and is only reachable inside `fn`.
+   *
+   * Use this in preference to `getDirectConfig(name)` whenever
+   * possible — it keeps the raw API key out of return values,
+   * error stacks, and exception payloads.
+   */
+  async withDirectCredential<T>(
+    name: string,
+    fn: (cred: ProviderCredential & { openAICompat: boolean }) => Promise<T> | T,
+  ): Promise<T | null> {
+    if (!this.has(name)) return null;
+    // Make sure the vault is hydrated.
+    this.hydrateVault();
+    const def = this.getDefinition(name);
+    const vault = getProviderKeyVault();
+    return await vault.withCredential(name, (cred) =>
+      fn({ ...cred, openAICompat: def ? def.openAICompat : true }),
+    );
+  },
+
+  /**
+   * Populate the {@link ProviderKeyVault} from the on-disk
+   * providers store. Idempotent: re-running it is safe and
+   * only refreshes entries for providers that have keys on
+   * disk. Called automatically on first direct-config access.
+   */
+  hydrateVault(): void {
+    const store = loadStore();
+    const vault = getProviderKeyVault();
+    for (const [name, entry] of Object.entries(store)) {
+      const def = PROVIDER_REGISTRY.find((p) => p.name === name);
+      vault.ingest(
+        name,
+        entry.apiKey,
+        def ? def.baseUrl : '',
+        def ? def.displayName : name,
+      );
+    }
+  },
+
+  /**
+   * Drop the cached vault singleton. Used by the
+   * `/fixo providers:reset` slash command and by tests.
+   */
+  resetVault(): void {
+    resetProviderKeyVault();
   },
 
   /** Check if a provider key is configured. */

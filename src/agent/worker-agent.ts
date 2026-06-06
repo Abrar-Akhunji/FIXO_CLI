@@ -13,6 +13,11 @@ import { colors } from '../ui/colors.js';
 import { workspaceLockManager } from '../workspace-lock.js';
 import { logTelemetry } from './telemetry.js';
 import { decidePolicy } from '../runtime/policy.js';
+import {
+  SemanticLoopDetector,
+  SemanticLoopAbortedError,
+  toSafetyAlertDirective,
+} from '../runtime/loop-trap.js';
 import * as p from '@clack/prompts';
 
 function getPatchPaths(patch: string): string[] {
@@ -324,6 +329,31 @@ export class WorkerAgent {
     let toolCallCount = 0;
     const maxLocalToolCalls = 15;
 
+    // Pillar 2 — semantic loop detector for the worker. Mirrors
+    // the wiring in single-agent.ts. The worker does not maintain
+    // a TaskSession (it executes inside the parent session), so we
+    // skip the staged-write rollback on hard-abort and let the
+    // parent session's normal cleanup handle it.
+    const safety = loadConfig().preferences.safety;
+    const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
+    let pendingSafetyDirective: string | null = null;
+
+    /**
+     * Prepend a safety directive to the system message at the head
+     * of the messages array.
+     */
+    const injectSafetyDirective = (directive: string): void => {
+      if (messages.length === 0 || messages[0]?.role !== 'system') {
+        messages.unshift({ role: 'system', content: directive });
+        return;
+      }
+      const first = messages[0]!;
+      messages[0] = {
+        role: 'system',
+        content: `${directive}\n\n${first.content}`,
+      };
+    };
+
     while (toolCallCount < maxLocalToolCalls) {
       const spinner = p.spinner();
       spinner.start(`🤖 Worker agent thinking (turn ${toolCallCount + 1})...`);
@@ -366,6 +396,41 @@ export class WorkerAgent {
           parsedArgs = JSON.parse(toolCall.function.arguments);
         } catch {
           parsedArgs = { error: 'Failed to parse tool arguments' };
+        }
+
+        // Pillar 2 — semantic loop detection. Records the tool
+        // call *before* execution so a permission-denied tool
+        // still counts. Hard-abort terminates the worker; the
+        // parent session will see a non-success SubtaskResult
+        // and decide what to do.
+        if (semanticLoopDetector.preference.enabled) {
+          const verdict = semanticLoopDetector.record(
+            toolCallCount,
+            toolCall.function.name,
+            parsedArgs,
+            context.cwd,
+          );
+          if (verdict.state === 'warn') {
+            pendingSafetyDirective = toSafetyAlertDirective(verdict);
+            console.log(
+              `${colors.yellow}⚠  [Worker] Semantic loop warning: ` +
+              `${verdict.target} accessed ${verdict.count}× ` +
+              `in the last ${verdict.windowSize} turns.${colors.reset}`,
+            );
+          } else if (verdict.state === 'hard-abort') {
+            throw new SemanticLoopAbortedError(
+              verdict.target,
+              verdict.count,
+              verdict.windowSize,
+            );
+          }
+        }
+
+        // Stage any pending directive at the top of the messages
+        // array so the next LLM call sees it first.
+        if (pendingSafetyDirective) {
+          injectSafetyDirective(pendingSafetyDirective);
+          pendingSafetyDirective = null;
         }
 
         const toolCallId = toolCall.id;

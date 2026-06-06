@@ -26,8 +26,9 @@ import { loadPlan, renderPlan, savePlan, classifyComplexityHeuristic } from '../
 import { mcpManager, mcpBridgeManager } from '../agent/tool-executor.js';
 import { ProvidersManager, PROVIDER_REGISTRY } from '../agent/providers-manager.js';
 
-import { colors, renderStatusLabel } from './colors.js';
-import { COMMANDS_WITH_DESC, printWelcome, printHelp, buildPromptString, formatInputPaths } from './render.js';
+import { C, colors, renderStatusLabel } from './colors.js';
+import { COMMANDS_WITH_DESC, printHelp, buildPromptString, formatInputPaths } from './render.js';
+import { renderStatusBar, type CLIState } from './render-primitives.js';
 
 const c = {
   ...colors,
@@ -122,8 +123,9 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     totalDurationMs: 0,
   };
 
-  // ──── Print welcome ────
-  printWelcome();
+  // The welcome screen (lava logo + command grid) is printed by
+  // `src/index.ts` before the REPL starts; the startREPL entry
+  // point jumps straight into the prompt loop.
 
   if (projectConfig?.systemPrompt) {
     console.log(`${c.dim}📋 Project config loaded (.freellmapi.yml)${c.reset}`);
@@ -157,6 +159,60 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       return [[], line];
     },
   });
+
+  // ──── Lava status bar ────
+  // The new lava-redesign status bar lives directly above the REPL
+  // prompt. It re-renders on every mode change and every model
+  // change, plus whenever the user starts a new turn (via
+  // `promptForInput` below).
+  //
+  // We map our internal 4-mode enum onto the 3-mode `CLIState`
+  // contract that the renderer expects: EXPLORE/SCOUT collapse to
+  // BUILD (the default lava-coloured pill). This keeps the
+  // existing /mode command semantics intact while still letting
+  // the new bar visualise the live mode.
+  const buildLavaStatusState = (): CLIState => {
+    const modeForState: CLIState['mode'] =
+      currentMode === 'PLAN' ? 'PLAN' :
+      currentMode === 'BUILD' ? 'BUILD' :
+      'BUILD';
+    let contextPercent = 0;
+    try {
+      const used = conversation.getTotalTokens();
+      const limit = conversation.getContextLimit();
+      if (limit > 0) {
+        contextPercent = Math.min(100, Math.round((used / limit) * 100));
+      }
+    } catch {
+      // Conversation not yet hydrated — show 0% rather than NaN.
+    }
+    let providersCount = 0;
+    try {
+      providersCount = ProvidersManager.list().length;
+    } catch {
+      // Vault not yet available — show 0.
+    }
+    const currentBranch = git.isGitRepo() ? git.getCurrentBranch() : '';
+    return {
+      mode: modeForState,
+      routing: 'auto',
+      model: currentModel,
+      branch: currentBranch || 'detached',
+      contextPercent,
+      providersCount,
+      transport: 'freellmapi',
+    };
+  };
+
+  const drawLavaStatusBar = (): void => {
+    // renderStatusBar writes a single `\r` line (no newline) so the
+    // REPL prompt can sit on the same row as a redo. For the
+    // normal "above the prompt" layout we want a full line of its
+    // own, so we manually append a newline after the renderer
+    // returns.
+    renderStatusBar(buildLavaStatusState());
+    process.stdout.write('\n');
+  };
 
   // ──── Mouse Reporting Helpers ────
   function enableMouseReporting() {
@@ -201,6 +257,16 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     disableMouseReportingSync();
     mcpManager.shutdown();
     mcpBridgeManager.shutdown();
+    // Restore the original `process.stdin.emit` so a Ctrl-C or
+    // uncaught-exit doesn't leave the monkey-patch installed.
+    // Previously this was only done on `/exit`, so SIGINT and
+    // SIGTERM corrupted subsequent stdin listeners.
+    try {
+      (process.stdin as { emit: unknown }).emit = originalEmit;
+      process.stdin.off('keypress', keypressHandler);
+    } catch {
+      // ignore — process may already be tearing down
+    }
   };
   process.on('exit', exitCleanup);
 
@@ -563,17 +629,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
         // Clear current prompt line:
         process.stdout.write('\r\x1b[K');
-        
-        // Re-display updated status line:
-        const currentBranch = git.isGitRepo() ? git.getCurrentBranch() : '';
-        const dirName = path.basename(cwd);
-        const dirLabel = c.renderStatusLabel(`📂 ${dirName}`);
-        const branchLabel = currentBranch ? ` ${c.renderStatusLabel(`🌳 ${currentBranch}`)}` : '';
-        const modelLabel = ` ${c.renderStatusLabel(`🤖 ${currentModel}`)}`;
-        const modeLabel = ` ${c.renderStatusLabel(`⚙️ ${currentMode}`)}`;
-        
-        process.stdout.write(`\n${dirLabel}${branchLabel}${modelLabel}${modeLabel}\n`);
-        process.stdout.write(`${c.cyan}❯${c.reset} `);
+
+        // Re-draw the lava status bar with the new mode. The
+        // legacy dirLabel/branchLabel/modelLabel/modeLabel row
+        // is gone — the new bar carries all of that information.
+        drawLavaStatusBar();
+        process.stdout.write(`${C.LAVA}›${C.RESET} `);
         return true; // swallow keypress
       }
     }
@@ -589,17 +650,15 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     process.stdin.resume();
     rl.resume();
 
-    const currentBranch = git.isGitRepo() ? git.getCurrentBranch() : '';
-    const dirName = path.basename(cwd);
-    const dirLabel = c.renderStatusLabel(`📂 ${dirName}`);
-    const branchLabel = currentBranch ? ` ${c.renderStatusLabel(`🌳 ${currentBranch}`)}` : '';
-    const modelLabel = ` ${c.renderStatusLabel(`🤖 ${currentModel}`)}`;
-    const modeLabel = ` ${c.renderStatusLabel(`⚙️ ${currentMode}`)}`;
-    console.log(`\n${dirLabel}${branchLabel}${modelLabel}${modeLabel}`);
+    // The new lava status bar is the ONLY status surface — it
+    // replaces the legacy dirLabel/branchLabel/modelLabel/modeLabel
+    // row entirely. Mode + model + branch + context usage are all
+    // visible in the bar; the prompt itself is the lava `›` glyph.
+    drawLavaStatusBar();
 
     isPrompting = true;
     rl.question(
-      `${c.cyan}❯${c.reset} `,
+      `${C.LAVA}›${C.RESET} `,
       async (input) => {
         isPrompting = false;
         disableMouseReporting();
@@ -1407,7 +1466,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     if (displayInput !== input) {
       // Re-display with highlighted paths
       process.stdout.write(`\x1b[1A\x1b[2K`); // Move up and clear line
-      console.log(`${c.cyan}❯${c.reset} ${displayInput}`);
+      console.log(`${C.LAVA}›${C.RESET} ${displayInput}`);
     }
 
     // Extract any file paths from input for automatic pinning
