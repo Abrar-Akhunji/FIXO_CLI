@@ -24,6 +24,7 @@ import {
   summariseTodoList,
 } from '../context/todo.js';
 import { C } from '../ui/colors.js';
+import { MarkdownStreamRenderer, renderMarkdown } from '../ui/markdown-stream.js';
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
@@ -473,7 +474,7 @@ export class SingleAgent {
 
           // Print the response (already received in non-streaming mode)
           if (response) {
-            console.log(`\n${response}`);
+            renderMarkdown(response);
           }
 
           conversation.addTurn(context.task, response);
@@ -740,9 +741,11 @@ export class SingleAgent {
       ? this.client.chatStreamWithResume(messages, model, {}, maxResumeAttempts)
       : this.client.chatStream(messages, model);
 
+    const renderer = new MarkdownStreamRenderer();
+
     for await (const chunk of stream) {
       if (chunk.type === 'content' && chunk.content) {
-        process.stdout.write(chunk.content);
+        renderer.write(chunk.content);
         fullText += chunk.content;
       }
       if (chunk.type === 'done') {
@@ -758,7 +761,8 @@ export class SingleAgent {
     }
 
     if (fullText) {
-      process.stdout.write('\n');
+      if (!fullText.endsWith('\n')) renderer.write('\n');
+      renderer.flush();
     }
 
     return { responseText: fullText, resolvedModel };
