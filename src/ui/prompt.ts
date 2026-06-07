@@ -12,11 +12,13 @@ import { SingleAgent } from '../agent/single-agent.js';
 import { ConversationManager } from '../agent/conversation.js';
 import { GitManager } from '../git/git-manager.js';
 import type { AgentContext, ProjectConfig } from '../types.js';
+import type { ChatContentBlock } from '../shared/types.js';
+import { loadImageAsBlock } from './image-attach.js';
 import type { FreeLLMConfig } from '../config.js';
 import { saveConfig } from '../config.js';
 import { WorkspaceGuard } from '../workspace-guard.js';
 import { listRuns, showRun, undoRun } from '../runtime/task-session.js';
-import { decidePolicy } from '../runtime/policy.js';
+import { checkPermission } from '../agent/permissions.js';
 import { redactedEnv, redactSecrets } from '../runtime/redaction.js';
 import { appendMemory, doctor, forgetMemory, readMemory } from '../project-memory.js';
 import { buildIndex, explainIndexedTarget, findInIndex } from '../indexer.js';
@@ -26,13 +28,21 @@ import { loadPlan, renderPlan, savePlan, classifyComplexityHeuristic } from '../
 import { mcpManager, mcpBridgeManager } from '../agent/tool-executor.js';
 import { ProvidersManager, PROVIDER_REGISTRY } from '../agent/providers-manager.js';
 
-import { C, colors, renderStatusLabel } from './colors.js';
+import { C, colors } from './colors.js';
 import { COMMANDS_WITH_DESC, printHelp, buildPromptString, formatInputPaths } from './render.js';
+import {
+  addItem,
+  loadTodoList,
+  removeItem,
+  renderTodoList,
+  saveTodoList,
+  setItemStatus,
+  summariseTodoList,
+} from '../context/todo.js';
 import { renderStatusBar, type CLIState } from './render-primitives.js';
 
 const c = {
   ...colors,
-  renderStatusLabel,
 };
 
 
@@ -68,10 +78,11 @@ export interface PromptOptions {
   projectConfig?: ProjectConfig;
   cwd: string;
   verbose: boolean;
+  resume?: string;
 }
 
 export async function startREPL(options: PromptOptions): Promise<void> {
-  const { config, projectConfig, cwd, verbose } = options;
+  const { config, projectConfig, cwd, verbose, resume } = options;
 
   // ──── Initialize components ────
   const agent = new SingleAgent(verbose);
@@ -93,6 +104,48 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let currentModel = projectConfig?.model ?? config.defaultModel ?? 'auto';
   conversation.setContextLimit(currentModel);
   let selectedFiles: string[] = [];
+  // Image (or future non-text) blocks the user has queued with
+  // `/image`. Drained into AgentContext.pendingAttachments on the
+  // next non-slash input, then cleared.
+  let pendingAttachments: ChatContentBlock[] = [];
+
+  // ──── --resume <id> ────
+  if (resume) {
+    try {
+      const { loadSnapshot, listSnapshots } = await import('../runtime/session-snapshots.js');
+      const result = loadSnapshot(cwd, resume);
+      if (!result.ok || !result.snapshot) {
+        console.log(`\n${c.red}✗ Resume failed: ${result.error ?? 'unknown error'}${c.reset}`);
+        const available = listSnapshots(cwd);
+        if (available.length > 0) {
+          console.log(`\n${c.dim}Available snapshots for this workspace:${c.reset}`);
+          for (const s of available.slice(0, 5)) {
+            console.log(`  ${c.cyan}${s.id}${c.reset}  ${c.dim}(${s.items} items, ${s.tokens} tokens)${c.reset}`);
+          }
+        }
+        process.exit(1);
+      }
+      const snap = result.snapshot;
+      conversation.restoreFromSnapshot(
+        snap.conversation.map((m) => ({ role: m.role, content: m.content, name: m.name })),
+        snap.summary ?? '',
+        snap.tokens,
+      );
+      currentModel = snap.model;
+      conversation.setContextLimit(currentModel);
+      currentMode = snap.mode;
+      selectedFiles = [...snap.selectedFiles];
+      console.log(`\n${c.green}✓ Resumed session${c.reset} ${c.dim}${snap.id}${c.reset}`);
+      console.log(`  ${c.dim}messages=${snap.conversation.length} tokens=${snap.tokens} model=${snap.model} mode=${snap.mode}${c.reset}`);
+      if (snap.summary) {
+        console.log(`  ${c.dim}summary: ${snap.summary}${c.reset}`);
+      }
+    } catch (err) {
+      console.log(`\n${c.red}✗ Resume failed: ${(err as Error).message}${c.reset}`);
+      process.exit(1);
+    }
+  }
+
   let isPrompting = false;
   let activeSuggestionsCount = 0;
   interface AutocompleteOption {
@@ -902,8 +955,248 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
         case '/clear':
           conversation.clear();
+          pendingAttachments = [];
           console.log(`\n${c.green}✓ Conversation cleared${c.reset}`);
           return;
+
+        case '/image': {
+          // `/image <path>` — queue a local image for the next turn.
+          // `/image clear` — drop the queue.
+          // `/image list` — show what's queued.
+          const sub = args[0];
+          if (sub === 'clear') {
+            const n = pendingAttachments.length;
+            pendingAttachments = [];
+            console.log(`\n${c.green}✓ Cleared ${n} pending image(s)${c.reset}`);
+            return;
+          }
+          if (sub === 'list') {
+            if (pendingAttachments.length === 0) {
+              console.log(`\n${c.dim}No pending images.${c.reset}`);
+              return;
+            }
+            console.log(`\n${c.bold}Pending images (sent on next prompt):${c.reset}`);
+            for (const [i, block] of pendingAttachments.entries()) {
+              if (block.type === 'image' && block.source.kind === 'base64') {
+                const approxBytes = Math.floor((block.source.data.length * 3) / 4);
+                console.log(`  ${i + 1}. ${block.source.mediaType} (~${approxBytes} bytes)`);
+              }
+            }
+            return;
+          }
+          if (!sub) {
+            console.log(`\n${c.yellow}Usage: /image <path> | /image list | /image clear${c.reset}`);
+            return;
+          }
+          const result = loadImageAsBlock(sub, cwd);
+          if (!result.ok) {
+            console.log(`\n${c.red}✗ /image: ${result.error}${c.reset}`);
+            return;
+          }
+          pendingAttachments.push(result.block);
+          console.log(
+            `\n${c.green}✓ Attached${c.reset} ${c.dim}${result.mediaType}, ${result.bytes} bytes — will be sent with your next prompt${c.reset}`,
+          );
+          return;
+        }
+
+        case '/mcp': {
+          const sub = args[0]?.toLowerCase();
+          if (!sub || sub === 'list') {
+            const { listAllMcpSources, mergedMcpServers } = await import('../agent/mcp-registry.js');
+            const view = listAllMcpSources(cwd);
+            console.log(`\n${c.bold}${c.cyan}MCP Servers${c.reset} ${c.dim}(project-wins precedence: local > project > global)${c.reset}`);
+            console.log(`${c.dim}${'─'.repeat(60)}${c.reset}`);
+            const renderSource = (label: string, s: { configPath: string | null; servers: Record<string, unknown> }) => {
+              const names = Object.keys(s.servers);
+              if (names.length === 0) {
+                console.log(`  ${c.dim}${label}: (empty)${s.configPath ? ` ${c.dim}${s.configPath}${c.reset}` : ''}`);
+                return;
+              }
+              console.log(`  ${c.bold}${label}${c.reset}${s.configPath ? ` ${c.dim}${s.configPath}${c.reset}` : ''}`);
+              for (const n of names) {
+                console.log(`    ${c.cyan}•${c.reset} ${n}`);
+              }
+            };
+            renderSource('global', view.global);
+            renderSource('project', view.project);
+            renderSource('local', view.local);
+            const merged = mergedMcpServers(cwd);
+            const mergedCount = Object.keys(merged).length;
+            console.log(`\n${c.dim}merged total: ${mergedCount} server(s)${c.reset}`);
+            return;
+          }
+          if (sub === 'add') {
+            const name = args[1];
+            if (!name || args.length < 3) {
+              console.log(`\n${c.yellow}Usage: /mcp add <name> <command> [args...]${c.reset}`);
+              return;
+            }
+            const cmd = args[2];
+            const cmdArgs = args.slice(3);
+            const { addLocalMcpServer } = await import('../agent/mcp-registry.js');
+            addLocalMcpServer(cwd, name, { command: cmd, args: cmdArgs, type: 'stdio' });
+            console.log(`\n${c.green}✓ Added local MCP server:${c.reset} ${name} ${c.dim}(command=${cmd} args=${JSON.stringify(cmdArgs)})${c.reset}`);
+            return;
+          }
+          if (sub === 'remove' || sub === 'rm') {
+            const name = args[1];
+            if (!name) {
+              console.log(`\n${c.yellow}Usage: /mcp remove <name>${c.reset}`);
+              return;
+            }
+            const { removeLocalMcpServer } = await import('../agent/mcp-registry.js');
+            const removed = removeLocalMcpServer(cwd, name);
+            if (removed) {
+              console.log(`\n${c.green}✓ Removed local MCP server:${c.reset} ${name}`);
+            } else {
+              console.log(`\n${c.yellow}No local MCP server named ${name}${c.reset}`);
+            }
+            return;
+          }
+          if (sub === 'test') {
+            const name = args[1];
+            if (!name) {
+              console.log(`\n${c.yellow}Usage: /mcp test <name>${c.reset}`);
+              return;
+            }
+            const { mergedMcpServers } = await import('../agent/mcp-registry.js');
+            const all = mergedMcpServers(cwd);
+            const cfg = all[name];
+            if (!cfg) {
+              console.log(`\n${c.yellow}No MCP server named ${name} (in any source)${c.reset}`);
+              return;
+            }
+            const hasCommand = typeof (cfg as { command?: string }).command === 'string';
+            const hasUrl = typeof (cfg as { url?: string }).url === 'string';
+            if (hasCommand || hasUrl) {
+              console.log(`\n${c.green}✓ ${name}${c.reset} — config looks valid (${hasCommand ? 'stdio' : 'sse'})`);
+            } else {
+              console.log(`\n${c.red}✗ ${name}${c.reset} — missing 'command' or 'url'`);
+            }
+            return;
+          }
+          console.log(`\n${c.yellow}Unknown /mcp subcommand: ${sub}. Use: list | add | remove | test${c.reset}`);
+          return;
+        }
+
+        case '/todo': {
+          const sub = args[0]?.toLowerCase();
+          if (!sub || sub === 'list' || sub === 'ls') {
+            const list = loadTodoList(cwd);
+            const summary = summariseTodoList(list);
+            console.log('');
+            console.log(renderTodoList(list));
+            if (summary.length > 0) {
+              console.log(`\n${c.dim}(${summary})${c.reset}`);
+            }
+            return;
+          }
+          if (sub === 'add') {
+            const text = args.slice(1).join(' ').trim();
+            if (text.length === 0) {
+              console.log(`\n${c.yellow}Usage: /todo add <text>${c.reset}`);
+              return;
+            }
+            const list = addItem(loadTodoList(cwd), { content: text });
+            const result = saveTodoList(cwd, list);
+            if (!result.ok) {
+              console.log(`\n${c.red}✗ Failed to save todo: ${result.error}${c.reset}`);
+              return;
+            }
+            console.log(`\n${c.green}✓ Added todo:${c.reset} ${text}`);
+            return;
+          }
+          if (sub === 'done' || sub === 'complete' || sub === 'cancel') {
+            const id = args[1];
+            if (!id) {
+              console.log(`\n${c.yellow}Usage: /todo ${sub} <id>${c.reset}`);
+              return;
+            }
+            const status = sub === 'cancel' ? 'cancelled' : 'done';
+            let list = loadTodoList(cwd);
+            const exists = list.items.some((it) => it.id === id);
+            if (!exists) {
+              console.log(`\n${c.red}✗ No todo with id "${id}"${c.reset}`);
+              return;
+            }
+            list = setItemStatus(list, { id, status });
+            const result = saveTodoList(cwd, list);
+            if (!result.ok) {
+              console.log(`\n${c.red}✗ Failed to save todo: ${result.error}${c.reset}`);
+              return;
+            }
+            console.log(`\n${c.green}✓ Marked ${status}${c.reset}`);
+            return;
+          }
+          if (sub === 'start' || sub === 'progress') {
+            const id = args[1];
+            if (!id) {
+              console.log(`\n${c.yellow}Usage: /todo ${sub} <id>${c.reset}`);
+              return;
+            }
+            let list = loadTodoList(cwd);
+            const exists = list.items.some((it) => it.id === id);
+            if (!exists) {
+              console.log(`\n${c.red}✗ No todo with id "${id}"${c.reset}`);
+              return;
+            }
+            list = setItemStatus(list, { id, status: 'in_progress' });
+            const result = saveTodoList(cwd, list);
+            if (!result.ok) {
+              console.log(`\n${c.red}✗ Failed to save todo: ${result.error}${c.reset}`);
+              return;
+            }
+            console.log(`\n${c.green}✓ Marked in_progress${c.reset}`);
+            return;
+          }
+          if (sub === 'remove' || sub === 'rm' || sub === 'delete') {
+            const id = args[1];
+            if (!id) {
+              console.log(`\n${c.yellow}Usage: /todo remove <id>${c.reset}`);
+              return;
+            }
+            let list = loadTodoList(cwd);
+            const exists = list.items.some((it) => it.id === id);
+            if (!exists) {
+              console.log(`\n${c.red}✗ No todo with id "${id}"${c.reset}`);
+              return;
+            }
+            list = removeItem(list, { id });
+            const result = saveTodoList(cwd, list);
+            if (!result.ok) {
+              console.log(`\n${c.red}✗ Failed to save todo: ${result.error}${c.reset}`);
+              return;
+            }
+            console.log(`\n${c.green}✓ Removed todo${c.reset}`);
+            return;
+          }
+          if (sub === 'clear') {
+            const list = loadTodoList(cwd);
+            const kept = list.items.filter((it) => it.status !== 'done' && it.status !== 'cancelled');
+            const result = saveTodoList(cwd, { ...list, items: kept, updatedAt: Date.now() });
+            if (!result.ok) {
+              console.log(`\n${c.red}✗ Failed to save todo: ${result.error}${c.reset}`);
+              return;
+            }
+            const cleared = list.items.length - kept.length;
+            console.log(`\n${c.green}✓ Cleared ${cleared} completed todo(s)${c.reset}`);
+            return;
+          }
+          if (sub === 'help' || sub === '-h' || sub === '--help') {
+            console.log(`\n${c.bold}Usage: /todo <subcommand>${c.reset}`);
+            console.log(`  list                  List all todo items`);
+            console.log(`  add <text>            Add a new todo`);
+            console.log(`  start <id>            Mark a todo as in-progress`);
+            console.log(`  done <id>             Mark a todo as done`);
+            console.log(`  cancel <id>           Cancel a todo`);
+            console.log(`  remove <id>           Remove a todo entirely`);
+            console.log(`  clear                 Remove all done/cancelled todos`);
+            return;
+          }
+          console.log(`\n${c.yellow}Unknown /todo subcommand "${sub}". Try /todo help.${c.reset}`);
+          return;
+        }
 
         case '/log':
           console.log(`\n${git.getRecentCommits(10)}`);
@@ -1425,20 +1718,22 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     if (input.startsWith('!')) {
       const cmd = input.slice(1).trim();
       if (!cmd) return;
-      const decision = decidePolicy(config.preferences.policy ?? 'shell-confirm', 'command', cmd);
-      if (!decision.allowed) {
-        console.log(`\n${c.red}✗ ${decision.reason}${c.reset}`);
+      const check = checkPermission('run_command', { command: cmd }, process.cwd(), config.preferences.policy ?? 'shell-confirm');
+      if (check.decision === 'deny') {
+        console.log(`\n${c.red}✗ ${check.reason}${c.reset}`);
         return;
       }
-      rl.pause();
-      const confirmed = await p.confirm({
-        message: `Allow execution of local shell command: ${c.cyan}${cmd}${c.reset}? (${decision.reason})`,
-        initialValue: false,
-      });
-      rl.resume();
-      if (p.isCancel(confirmed) || !confirmed) {
-        console.log(`\n${c.cyan}  ⚠ Execution cancelled.${c.reset}`);
-        return;
+      if (check.decision === 'ask') {
+        rl.pause();
+        const confirmed = await p.confirm({
+          message: `Allow execution of local shell command: ${c.cyan}${cmd}${c.reset}? (${check.reason})`,
+          initialValue: false,
+        });
+        rl.resume();
+        if (p.isCancel(confirmed) || !confirmed) {
+          console.log(`\n${c.cyan}  ⚠ Execution cancelled.${c.reset}`);
+          return;
+        }
       }
       console.log(`${c.dim}⚙️ Running: ${cmd}${c.reset}`);
       try {
@@ -1484,7 +1779,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       checkCommand: projectConfig?.checkCommand,
       policy: projectConfig?.policy ?? config.preferences.policy,
       mode: currentMode,
+      pendingAttachments: pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
     };
+    // Drain the queue — attachments are one-shot. The agent has its
+    // own copy via context above.
+    pendingAttachments = [];
 
     const classification = classifyComplexityHeuristic(input);
     let result;

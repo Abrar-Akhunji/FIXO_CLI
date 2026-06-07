@@ -61,7 +61,10 @@ test('enforce — large tool outputs get pruned first (tier 1)', () => {
   // The tool message (index 2) was non-tail and should have been pruned.
   const tool = out[2];
   assert.ok(tool, `out[2] is undefined; out has ${out.length} elements`);
-  assert.ok(tool.content!.includes('[pruned:'));
+  // After Phase 2 the content union widened to allow content blocks;
+  // pruned tool messages are always plain strings.
+  assert.equal(typeof tool.content, 'string');
+  assert.ok((tool.content as string).includes('[pruned:'));
 });
 
 test('enforce — oldest turns are dropped if pruning is insufficient (tier 2)', () => {

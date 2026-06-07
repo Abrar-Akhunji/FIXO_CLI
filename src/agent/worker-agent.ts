@@ -12,7 +12,7 @@ import { executeTool, getActiveTools, type ToolCallEvent } from './tool-executor
 import { colors } from '../ui/colors.js';
 import { workspaceLockManager } from '../workspace-lock.js';
 import { logTelemetry } from './telemetry.js';
-import { decidePolicy } from '../runtime/policy.js';
+import { checkPermission } from './permissions.js';
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
@@ -569,10 +569,10 @@ export class WorkerAgent {
           ? 'delete'
           : 'write';
     
-    const decision = decidePolicy(context?.policy ?? 'shell-confirm', action, args.command ?? args.path ?? '');
-    if (!decision.allowed) return false;
+    const check = checkPermission(name, args as Record<string, unknown>, context?.cwd ?? process.cwd(), context?.policy ?? 'shell-confirm');
+    if (check.decision === 'deny') return false;
     if (context?.yes) return true;
-    if (!decision.needsConfirmation) return true;
+    if (check.decision === 'allow') return true;
     if (action === 'read') return true;
 
     if (!rl) return false; // If needs confirmation but no interactive RL, deny.

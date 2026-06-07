@@ -7,3 +7,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .fixo/
+
+# Local smoke-test artifacts (do not commit)
+/image.png
+/FIXO.md
+/temp/

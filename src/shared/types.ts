@@ -108,9 +108,29 @@ export type ChatToolChoice =
     };
   };
 
+export type ChatImageMediaType =
+  | 'image/png'
+  | 'image/jpeg'
+  | 'image/webp'
+  | 'image/gif';
+
+export type ChatImageSource =
+  | { kind: 'base64'; mediaType: ChatImageMediaType; data: string }
+  | { kind: 'url'; url: string };
+
+export type ChatContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: ChatImageSource };
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  /**
+   * Either a plain string (the historical shape — text-only) or an
+   * ordered array of content blocks. Mixed text+image inputs MUST
+   * use the array form; assistant tool-call turns and tool-result
+   * messages remain string-shaped.
+   */
+  content: string | ChatContentBlock[] | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: ChatToolCall[];

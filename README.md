@@ -74,6 +74,42 @@ sequenceDiagram
 
 ---
 
+## 🛠 Tool Reference (Phase 1–3 + Phase 4)
+
+The agent dispatches the following tools through the unified
+`executeTool()` entrypoint in `src/agent/tool-executor.ts`.
+Every call is gated by the granular permission engine
+(`checkPermission`) before any side effect runs. `Mode`
+indicates which execution modes the tool is callable from
+(`PLAN`, `BUILD`, `EXPLORE`, `SCOUT`); tools that mutate the
+workspace are blocked outside `BUILD`.
+
+| Tool | Phase | Description | Required args | Mode | Pillar gates | Default permission |
+| :--- | :---: | :--- | :--- | :--- | :--- | :--- |
+| `str_replace` | 1 | Surgical line-level edit with uniqueness check on `find`. Atomic via `applySurgicalReplace`. | `path`, `find`, `replace` | BUILD | Staging + LSP pre-save + workspace guard | `ask` (default-ask) |
+| `glob_files` | 1 | Pattern-based file finder (e.g. `src/**/*.ts`). | `pattern` | EXPLORE, SCOUT, BUILD | Workspace guard | `ask` (default-ask) |
+| `todo_write` / `todo_read` | 2 | Mutable task checklist persisted under `.fixo/`. | `items?` (write) / — (read) | PLAN, BUILD | Workspace guard + staging | `ask` / `allow` |
+| `run_command_async` | 3 | Non-blocking shell execution; returns a job id. | `command`, `cwd?` | BUILD | Command-parser AST + permissions | `ask` (default-ask) |
+| `poll_command_status` | 3 | Poll a previously-spawned async job for status + ring-buffered stdout/stderr. | `id` | BUILD, EXPLORE | n/a (read-only metadata) | `ask` (default-ask) |
+| `kill_command` | 3 | Send `SIGTERM` to a running async job. | `id` | BUILD | Command-parser invariants | `ask` (default-ask) |
+| `spawn_subagent` | 3 | Context-isolated sub-orchestrator with its own conversation budget; inherits parent policy + vault. | `prompt`, `tools?` | PLAN, BUILD | Inherits all four pillars | `ask` |
+| `/mcp` console | 3 | Slash command (`/mcp list`, `/mcp add`, `/mcp restart`) for MCP server management. | — | EXPLORE, BUILD | Config-only (no workspace touch) | n/a |
+| Worktree annotations | 3 | Parsed from assistant text (`[worktree:create branch=x]`, `[worktree:merge branch=x]`, `[worktree:remove path=...]`). Not a tool — a capability the executor extracts post-stream. | n/a (annotation in text) | BUILD | `execFileSync('git', …)` — no shell expansion | `ask` (parsed by the single-agent loop) |
+
+### Predictive Context-Budget Gate (Phase 4)
+
+A token-aware predictive gate sits in front of `read_file`. Before
+the byte gate runs, the gate projects the file's token cost via
+`gpt-tokenizer`, adds the current conversation token count, and
+defers the read with a `[Context-Budget Guard]` directive if the
+projected total would exceed `predictiveBudgetPct` of the model's
+input window (default `0.85`). The directive routes the model to
+`extract_symbols` / `extract_imports` / `str_replace` instead of
+reading the full file. Configurable via `preferences.safety.predictiveBudgetPct` —
+set to `1.0` to disable.
+
+---
+
 ## 🛡 Resilience
 
 Fixo CLI is built for hostile environments: free-tier rate limits, dropped SSE streams, providers that 502 mid-response, and codebases larger than any single context window. The resilience stack is organised into four independent pillars, each of which can be tuned or disabled individually via `~/.fixocli/config.json`.

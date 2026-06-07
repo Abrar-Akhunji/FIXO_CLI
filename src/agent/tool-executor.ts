@@ -10,9 +10,11 @@ import { colors } from '../ui/colors.js';
 import { renderToolCall } from '../ui/render-primitives.js';
 import { WorkspaceGuard } from '../workspace-guard.js';
 import type { TaskSession } from '../runtime/task-session.js';
-import { decidePolicy, type PolicyProfile } from '../runtime/policy.js';
+import { classifyCommand, type PolicyProfile, type RiskLevel } from '../runtime/policy.js';
+import { checkPermission, type PermissionCheckResult } from './permissions.js';
 import { redactedEnv, redactSecrets } from '../runtime/redaction.js';
 import { McpManager } from './mcp-manager.js';
+import { estimateReadCost, shouldDeferRead, formatPredictiveGateDirective, DEFAULT_PREDICTIVE_BUDGET_PCT } from './predictive-gate.js';
 import type { AgentClient } from './agent-client.js';
 import { createBranch, commitChanges, pushBranch, createPullRequest } from '../git/git-ops.js';
 import { pathToFileURL } from 'url';
@@ -26,6 +28,21 @@ import { PlatformPathLockedError } from '../workspace-guard.js';
 import { McpBridgeManager } from './mcp-bridge.js';
 import { LspManager } from '../lsp/lsp-manager.js';
 import { webFetch, webSearch } from './web.js';
+import {
+  loadTodoList,
+  saveTodoList,
+  addItem,
+  setItemStatus,
+  removeItem,
+  clearDoneItems,
+  renderTodoList,
+  summariseTodoList,
+  type TodoList,
+  type TodoStatus,
+} from '../context/todo.js';
+import { recordTelemetry, telemetry } from './telemetry.js';
+import { applyModifiedArgs, fireHooks } from './hooks.js';
+import { BackgroundJobRegistry, type JobSnapshot } from '../runtime/background-jobs.js';
 import {
   ParserFactory,
   languageIdFromExtension,
@@ -153,6 +170,9 @@ export const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
   'push_branch',
   'create_pull_request',
   'run_command',
+  'str_replace',
+  'todo_write',
+  'run_command_async',
 ]);
 
 /**
@@ -343,7 +363,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'write_file',
       description:
-        'Write content to a file. Creates the file and any parent directories if they do not exist. Overwrites existing content entirely.',
+        'Write a complete file to disk. Use ONLY for new files or full rewrites where the prior content is irrelevant. For ANY change to an existing file (single-region edit, symbol rename, line tweak, multi-line refactor) you MUST use `str_replace` (single hunk) or `apply_patch` (multi-region) instead — both go through the same atomic staging pipeline but preserve the rest of the file. Rewriting an existing file with write_file when str_replace would do is an error: it wastes tokens, defeats LSP pre-save gating granularity, and risks losing concurrent edits. Creates parent directories if missing.',
       parameters: {
         type: 'object',
         properties: {
@@ -381,6 +401,61 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
           },
         },
         required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command_async',
+      description:
+        'Spawn a long-running command in the background and return immediately with a jobId. Use poll_command_status to retrieve output and kill_command to terminate. Output streams cap at 64 KiB each; the larger totalByte counters survive the cap. Rejected in PLAN mode. Workspace-escape and sensitive-file commands are blocked at spawn time by the same command-parser used by run_command.',
+      parameters: {
+        type: 'object',
+        properties: {
+          cmd: { type: 'string', description: 'The binary to spawn.' },
+          args: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Argument vector.',
+          },
+          cwd: {
+            type: 'string',
+            description: 'Working directory (defaults to workspace root).',
+          },
+        },
+        required: ['cmd'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'poll_command_status',
+      description:
+        'Read a snapshot of a background job. The snapshot includes status, exitCode, startedAt/exitedAt, and the (capped) stdout and stderr streams. tailLines truncates each stream to its last N lines; sinceBytes returns only the bytes after the given offset on stdout/stderr (delta fields).',
+      parameters: {
+        type: 'object',
+        properties: {
+          jobId: { type: 'string', description: 'The jobId returned by run_command_async.' },
+          tailLines: { type: 'integer', description: 'Truncate each stream to last N lines.' },
+          sinceBytes: { type: 'integer', description: 'Return only bytes after this offset.' },
+        },
+        required: ['jobId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kill_command',
+      description: 'Send SIGTERM to a background job. No-op if the job has already exited.',
+      parameters: {
+        type: 'object',
+        properties: {
+          jobId: { type: 'string', description: 'The jobId to terminate.' },
+        },
+        required: ['jobId'],
       },
     },
   },
@@ -580,6 +655,131 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'str_replace',
+      description:
+        'Use this tool by default for any in-place edit to an existing file. Performs a surgical, atomic replacement of oldString with newString. By default, oldString must be unique within the file (expectUnique=true) — non-unique matches are rejected with a clear error so the caller can narrow the snippet. Pass replaceAll=true to substitute every occurrence. Rejected in PLAN mode. Refused for platform-locked paths. Goes through the same atomic staging pipeline as write_file and the LSP pre-save gate before any disk mutation.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'The file path to edit, relative to the workspace root or absolute.',
+          },
+          oldString: {
+            type: 'string',
+            description: 'The exact substring to replace. Must appear in the file.',
+          },
+          newString: {
+            type: 'string',
+            description: 'The replacement content.',
+          },
+          replaceAll: {
+            type: 'boolean',
+            description: 'If true, replace every occurrence. Default false.',
+          },
+          expectUnique: {
+            type: 'boolean',
+            description:
+              'If true (default), the operation aborts when oldString is not unique. Set to false to allow non-unique matches with the first occurrence replaced.',
+          },
+        },
+        required: ['path', 'oldString', 'newString'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'todo_read',
+      description:
+        'Read the current project todo list from <cwd>/.fixo/todo_list.json. Returns a human-readable rendering of all items grouped into Open and Completed. A missing or unreadable file yields an empty list — by design.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'todo_write',
+      description:
+        'Mutate the project todo list. Operations: add (content+blockedBy optional), set_status (id+status), remove (id), clear_done. Persisted atomically to <cwd>/.fixo/todo_list.json. Rejected in PLAN mode.',
+      parameters: {
+        type: 'object',
+        properties: {
+          op: {
+            type: 'string',
+            enum: ['add', 'set_status', 'remove', 'clear_done'],
+            description: 'The mutation to apply.',
+          },
+          content: {
+            type: 'string',
+            description: 'Item content (op=add only).',
+          },
+          id: {
+            type: 'string',
+            description: 'Item id (op=set_status, op=remove).',
+          },
+          status: {
+            type: 'string',
+            enum: ['pending', 'in_progress', 'done', 'cancelled'],
+            description: 'New status (op=set_status only).',
+          },
+          blockedBy: {
+            type: 'string',
+            description: 'Optional blocker description (op=add only).',
+          },
+        },
+        required: ['op'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'glob_files',
+      description:
+        'High-performance filesystem pattern matcher. Returns paths matching the given glob pattern, relative to the workspace root. Built on Node 22+ native fs.promises.glob. By default, common build/VCS directories (node_modules, .git, dist, .fixo, .fixocli) are excluded. Symlinks are not followed and hidden files are excluded unless explicitly enabled. Capped at maxResults (default 1000, hard cap 5000).',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: 'Glob pattern, e.g. "src/**/*.ts" or "**/package.json".',
+          },
+          cwd: {
+            type: 'string',
+            description:
+              'Optional directory to scope the glob. Must resolve inside the workspace. Defaults to the workspace root.',
+          },
+          ignore: {
+            type: 'string',
+            description:
+              'Optional extra glob pattern (or comma-separated patterns) to add to the default skip set.',
+          },
+          maxResults: {
+            type: 'integer',
+            description: 'Maximum number of results to return. Default 1000, hard cap 5000.',
+          },
+          includeHidden: {
+            type: 'boolean',
+            description: 'If true, do not exclude dotfile entries from the match. Default false.',
+          },
+          followSymlinks: {
+            type: 'boolean',
+            description:
+              'If true, follow symbolic links during traversal. Default false (safer).',
+          },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
 ];
 
 /* ──────────────────────── Tool Executor ──────────────────────── */
@@ -606,6 +806,22 @@ export interface ToolExecutionOptions {
    * direct-write path is used.
    */
   safety?: SafetyConfig;
+  /**
+   * Execution mode (`'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT'`).
+   * Surfaced to the executor so mutating tools can refuse to
+   * run under read-only modes. Optional — when omitted, mutating
+   * tools default to allowing execution.
+   */
+  mode?: 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT';
+  /**
+   * Callback returning the current conversation token count.
+   * Used by the predictive context-budget gate (Phase 4) to
+   * decide whether a `read_file` would push the next request
+   * over the model's input window. When omitted, the gate
+   * treats conversation pressure as 0 and only considers the
+   * file's own projected cost.
+   */
+  getConversationTokens?: () => number;
 }
 
 /* ──────────────────────── Per-process Run ID (Pillar 2) ──────────── */
@@ -652,6 +868,54 @@ export function getOrCreateLspGate(cwd: string, safety: SafetyConfig): LspPreSav
 /** Test/utility hook — reset the cached gate. */
 export function resetLspGate(): void {
   cachedLspGate = null;
+}
+
+type GateAction = 'read' | 'write' | 'delete' | 'command';
+
+function riskOf(action: GateAction, detail: string): RiskLevel {
+  if (action === 'command') return classifyCommand(detail);
+  if (action === 'delete') return 'high';
+  if (action === 'write') return 'medium';
+  return 'low';
+}
+
+interface GateOutcome {
+  allowed: boolean;
+  needsConfirmation: boolean;
+  reason: string;
+  risk: RiskLevel;
+  source: PermissionCheckResult['source'];
+  matchedRule: string | null;
+}
+
+function evaluateToolGate(
+  toolName: string,
+  args: Record<string, unknown>,
+  cwd: string,
+  policy: PolicyProfile,
+  action: GateAction,
+  detail: string,
+): GateOutcome {
+  const check = checkPermission(toolName, args, cwd, policy);
+  const risk = riskOf(action, detail);
+  if (check.decision === 'deny') {
+    return {
+      allowed: false,
+      needsConfirmation: false,
+      reason: check.reason,
+      risk,
+      source: check.source,
+      matchedRule: check.matchedRule,
+    };
+  }
+  return {
+    allowed: true,
+    needsConfirmation: check.decision === 'ask',
+    reason: check.reason,
+    risk,
+    source: check.source,
+    matchedRule: check.matchedRule,
+  };
 }
 
 /* ──────────────────────── Atomic Write Helper (Pillar 2) ─────────── */
@@ -785,16 +1049,53 @@ export async function executeTool(
   try {
     const policy = options.policy ?? options.session?.policy ?? 'shell-confirm';
 
-    const plugin = loadedPlugins.find(p => p.tools.some(t => t.function.name === name));
-    if (plugin) {
-      const action = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
-      const decision = decidePolicy(policy, action, name);
-      if (!decision.allowed) {
-        event.result = `Error: ${decision.reason}`;
-        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args });
+    // ──── PreToolUse hooks (§3.4) ────
+    // Run any user-defined pre-tool hooks. A `deny` decision
+    // short-circuits the call; a `modify` decision replaces
+    // args after a `WorkspaceGuard` re-check.
+    const sessionId = options.session?.id ?? 'no-session';
+    const preHook = fireHooks(cwd, 'PreToolUse', {
+      tool: name,
+      args: args as Record<string, unknown>,
+      sessionId,
+    });
+    if (preHook.fired && preHook.decision === 'deny') {
+      const reason = preHook.reason ?? 'pre-tool hook denied';
+      event.result = `Error: hook denied (${preHook.hookId ?? 'unknown'}): ${reason}`;
+      options.session?.record('tool_denied', { tool: name, reason, args });
+      renderToolCall({ kind: 'error', name, detail: `hook denied: ${reason}` });
+      return event;
+    }
+    if (preHook.fired && preHook.decision === 'modify' && preHook.modifiedArgs) {
+      const applied = applyModifiedArgs(
+        cwd,
+        args as Record<string, unknown>,
+        preHook.modifiedArgs,
+      );
+      if (!applied.ok) {
+        const reason = applied.reason ?? 'pre-hook modify rejected';
+        event.result = `Error: hook modify rejected: ${reason}`;
+        options.session?.record('tool_denied', { tool: name, reason, args });
+        renderToolCall({ kind: 'error', name, detail: `hook modify rejected: ${reason}` });
         return event;
       }
-      options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
+      for (const [k, v] of Object.entries(applied.args)) {
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+          args[k] = String(v);
+        }
+      }
+    }
+
+    const plugin = loadedPlugins.find(p => p.tools.some(t => t.function.name === name));
+    if (plugin) {
+      const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
+      const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
+      if (!decision.allowed) {
+        event.result = `Error: ${decision.reason}`;
+        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
+        return event;
+      }
+      options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
       console.log(`  ${colors.dim}🔌 Plugin: ${name}${colors.reset}`);
       try {
         event.result = await plugin.execute(name, args, { cwd, verbose, policy, options });
@@ -809,14 +1110,14 @@ export async function executeTool(
     }
 
     if (mcpManager.hasTool(name)) {
-      const action = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
-      const decision = decidePolicy(policy, action, name);
+      const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
+      const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
       if (!decision.allowed) {
         event.result = `Error: ${decision.reason}`;
-        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args });
+        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
         return event;
       }
-      options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
+      options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
       console.log(`  ${colors.dim}🔌 MCP: ${name}${colors.reset}`);
       try {
         event.result = await mcpManager.executeTool(name, args);
@@ -831,14 +1132,14 @@ export async function executeTool(
     }
 
     if (mcpBridgeManager.hasTool(name)) {
-      const action = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
-      const decision = decidePolicy(policy, action, name);
+      const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
+      const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
       if (!decision.allowed) {
         event.result = `Error: ${decision.reason}`;
-        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args });
+        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
         return event;
       }
-      options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
+      options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
       console.log(`  ${colors.dim}🔌 Local MCP: ${name}${colors.reset}`);
       try {
         event.result = await mcpBridgeManager.executeTool(name, args);
@@ -852,23 +1153,47 @@ export async function executeTool(
       return event;
     }
 
-    const action = name === 'run_command'
+    const action: GateAction = name === 'run_command'
       ? 'command'
       : name === 'read_file' || name === 'search_code' || name === 'list_dir' || name === 'web_fetch' || name === 'web_search'
         ? 'read'
         : name === 'delete_file'
           ? 'delete'
           : 'write';
-    const policyTarget = name === 'web_fetch' ? args.url : name === 'web_search' ? args.query : (args.command ?? args.path ?? '');
-    const decision = decidePolicy(policy, action, policyTarget);
+    const policyTargetRaw = name === 'web_fetch' ? args.url : name === 'web_search' ? args.query : (args.command ?? args.path ?? '');
+    const policyTarget = typeof policyTargetRaw === 'string' ? policyTargetRaw : String(policyTargetRaw ?? '');
+    const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, policyTarget);
     if (!decision.allowed) {
       event.result = `Error: ${decision.reason}`;
-      options.session?.record('tool_denied', { tool: name, reason: decision.reason, args });
+      options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
       return event;
     }
-    options.session?.record('tool_started', { tool: name, args, risk: decision.risk });
+    options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
     switch (name) {
-      case 'read_file':
+      case 'read_file': {
+        const guard = new WorkspaceGuard(cwd);
+        const resolved = guard.resolve(args.path, 'file');
+        const budgetPct = options.safety?.predictiveBudgetPct ?? DEFAULT_PREDICTIVE_BUDGET_PCT;
+        // Skip the predictive gate when it is explicitly disabled
+        // (>=1.0) or when no model is configured (we cannot map
+        // model → context window without one).
+        if (budgetPct < 1 && options.model) {
+          const estimate = estimateReadCost(resolved, options.model);
+          const convoTokens = options.getConversationTokens?.() ?? 0;
+          const deferDecision = shouldDeferRead(estimate, convoTokens, options.model, budgetPct);
+          if (deferDecision.defer) {
+            event.result = formatPredictiveGateDirective(args.path, estimate, deferDecision);
+            event.affectedPath = resolved;
+            renderToolCall({ kind: 'read', name: 'Read', detail: `${shortenPath(args.path, cwd)} (deferred — predictive gate)` });
+            options.session?.record('predictive_gate_fired', {
+              path: args.path,
+              projectedTokens: estimate.projectedTokens,
+              projectedTotal: deferDecision.projectedTotal,
+              hardCap: deferDecision.hardCap,
+            });
+            break;
+          }
+        }
         event.result = executeReadFile(
           args.path,
           cwd,
@@ -876,9 +1201,10 @@ export async function executeTool(
           options.safety?.largeFileGateBytes,
           options.safety?.largeFileGateLines,
         );
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = resolved;
         renderToolCall({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });
         break;
+      }
 
       case 'extract_symbols':
         event.result = await executeExtractSymbols(args.path, cwd, options.session);
@@ -1059,6 +1385,44 @@ export async function executeTool(
         event.result = await webSearch(args.query);
         break;
 
+      case 'str_replace':
+        renderToolCall({ kind: 'write', name: 'Surgical', detail: shortenPath(args.path, cwd) });
+        event.result = await executeStrReplace(args as unknown as StrReplaceArgs, cwd, options);
+        event.isWrite = true;
+        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        break;
+
+      case 'glob_files':
+        renderToolCall({ kind: 'search', name: 'Glob', detail: truncate(args.pattern, 60) });
+        event.result = await executeGlobFiles(args as unknown as GlobArgs, cwd, options);
+        break;
+
+      case 'todo_read':
+        renderToolCall({ kind: 'search', name: 'Todo', detail: 'read' });
+        event.result = executeTodoRead(cwd);
+        break;
+
+      case 'todo_write':
+        renderToolCall({ kind: 'write', name: 'Todo', detail: String((args as { op?: string }).op ?? 'add') });
+        event.result = await executeTodoWrite(args as unknown as TodoWriteArgs, cwd, options);
+        event.isWrite = true;
+        break;
+
+      case 'run_command_async':
+        renderToolCall({ kind: 'bash', name: 'Async', detail: truncate(args.cmd, 30) });
+        event.result = await executeRunCommandAsync(args as unknown as RunCommandAsyncArgs, cwd, options);
+        break;
+
+      case 'poll_command_status':
+        renderToolCall({ kind: 'bash', name: 'Poll', detail: String((args as { jobId?: string }).jobId ?? '?') });
+        event.result = executePollCommandStatus(args as unknown as PollCommandStatusArgs, cwd);
+        break;
+
+      case 'kill_command':
+        renderToolCall({ kind: 'bash', name: 'Kill', detail: String((args as { jobId?: string }).jobId ?? '?') });
+        event.result = executeKillCommand(args as unknown as KillCommandArgs, cwd);
+        break;
+
       default:
         event.result = `Error: Unknown tool "${name}"`;
     }
@@ -1068,6 +1432,21 @@ export async function executeTool(
     renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
   }
   options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
+
+  // ──── PostToolUse hooks (§3.4) ────
+  // Fire any user-defined post-tool hooks. The tool has
+  // already executed; we only emit telemetry + honour a
+  // `deny` decision by appending a marker to the result so
+  // the caller knows the post-hook flagged it.
+  const postHook = fireHooks(cwd, 'PostToolUse', {
+    tool: name,
+    args: args as Record<string, unknown>,
+    sessionId: options.session?.id ?? 'no-session',
+  });
+  if (postHook.fired && postHook.decision === 'deny') {
+    const reason = postHook.reason ?? 'post-tool hook denied';
+    event.result = `${event.result}\n[post-hook denied: ${reason}]`;
+  }
 
   return event;
 }
@@ -1611,3 +1990,1037 @@ function filesFromPatch(patch: string): string[] {
   }
   return Array.from(files).filter(file => file !== '/dev/null');
 }
+
+/* ──────────────────── Strict Generic Tool Specification (Phase 1) ──────────────────── */
+
+/**
+ * Runtime execution context shared by every {@link ToolSpecification}.
+ * Replaces the loose `any`-typed context that previously lived in
+ * `LoadedPlugin.execute` so the type system enforces a uniform
+ * contract across the registry.
+ */
+export interface ToolExecutionContext {
+  readonly cwd: string;
+  readonly verbose: boolean;
+  readonly options: ToolExecutionOptions;
+}
+
+/**
+ * Compile-time type for an individual tool. Each new tool added to
+ * {@link TOOL_REGISTRY} must satisfy this contract: a strongly-typed
+ * `args` payload (`TArgs`) and a strongly-typed `execute` callback
+ * returning `TResult` (default `string` to match the existing
+ * `executeTool` surface).
+ *
+ * The `parameters` field is the JSON-Schema description that is sent
+ * to the LLM — it mirrors {@link ChatToolDefinition.function.parameters}
+ * so the existing `TOOL_DEFINITIONS` array and the registry stay in
+ * lock-step. Two tools must agree on `name` and `parameters` to be
+ * safely exposed to the LLM.
+ */
+export interface ToolSpecification<
+  TArgs extends Record<string, any> = Record<string, any>,
+  TResult = string,
+> {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: {
+    readonly type: 'object';
+    readonly properties: Record<string, any>;
+    readonly required: string[];
+  };
+  execute(args: TArgs, context: ToolExecutionContext): Promise<TResult>;
+}
+
+/* ──────────────────── str_replace payload contract ──────────────────── */
+
+export interface StrReplaceArgs {
+  /** File path, relative to workspace root or absolute. */
+  path: string;
+  /** Substring to hunt down inside the file. */
+  oldString: string;
+  /** Replacement content. */
+  newString: string;
+  /** When true, substitute every occurrence. Default false. */
+  replaceAll?: boolean;
+  /** When true (default), abort on non-unique matches. */
+  expectUnique?: boolean;
+}
+
+/* ──────────────────── glob_files payload contract ──────────────────── */
+
+export interface GlobArgs {
+  /** Glob pattern, e.g. `src` followed by `**` then `*.ts`. */
+  pattern: string;
+  /** Optional scope; must resolve inside the workspace. */
+  cwd?: string;
+  /** Optional extra ignore pattern (single string or comma-separated). */
+  ignore?: string;
+  /** Default 1000, hard cap 5000. */
+  maxResults?: number;
+  /** Default false. */
+  includeHidden?: boolean;
+  /** Default false. */
+  followSymlinks?: boolean;
+}
+
+/* ──────────────────── Typed errors ──────────────────── */
+
+/**
+ * Thrown by the `str_replace` tool when the replacement cannot be
+ * applied. The error is surfaced to the model as a structured tool
+ * result so the next turn can react to the precise reason.
+ */
+export class SurgicalReplaceError extends Error {
+  public readonly code:
+    | 'old_string_not_found'
+    | 'old_string_ambiguous'
+    | 'plan_mode_rejected'
+    | 'platform_path_locked'
+    | 'workspace_escape'
+    | 'binary_file'
+    | 'invalid_args';
+  public readonly details: Readonly<Record<string, unknown>>;
+  constructor(
+    message: string,
+    code: SurgicalReplaceError['code'],
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message);
+    this.name = 'SurgicalReplaceError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/**
+ * Thrown by the `glob_files` tool for any non-recoverable traversal
+ * failure (workspace escape, invalid pattern, etc.).
+ */
+export class GlobFilesError extends Error {
+  public readonly code: 'invalid_pattern' | 'workspace_escape' | 'traversal_failed';
+  public readonly details: Readonly<Record<string, unknown>>;
+  constructor(
+    message: string,
+    code: GlobFilesError['code'],
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message);
+    this.name = 'GlobFilesError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/* ──────────────────── todo_write / todo_read payload contract ──────────────────── */
+
+export interface TodoWriteArgs {
+  /** Mutation kind. */
+  op: 'add' | 'set_status' | 'remove' | 'clear_done';
+  /** Required for `add`. */
+  content?: string;
+  /** Required for `set_status` and `remove`. */
+  id?: string;
+  /** Required for `set_status`. */
+  status?: TodoStatus;
+  /** Optional blocker description (add only). */
+  blockedBy?: string;
+}
+
+export class TodoWriteError extends Error {
+  public readonly code: 'plan_mode_rejected' | 'invalid_args' | 'not_found' | 'io_failure';
+  public readonly details: Readonly<Record<string, unknown>>;
+  constructor(
+    message: string,
+    code: TodoWriteError['code'],
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message);
+    this.name = 'TodoWriteError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/* ──────────────────── todo_read implementation ──────────────────── */
+
+/**
+ * Read the current todo list from `<cwd>/.fixo/todo_list.json`.
+ * Always succeeds — a missing or unreadable file returns an
+ * empty list (the loader is fault-tolerant by design).
+ */
+export function executeTodoRead(cwd: string): string {
+  const list = loadTodoList(cwd);
+  return renderTodoList(list);
+}
+
+/* ──────────────────── todo_write implementation ──────────────────── */
+
+const VALID_TODO_STATUSES: ReadonlySet<TodoStatus> = new Set<TodoStatus>([
+  'pending',
+  'in_progress',
+  'done',
+  'cancelled',
+]);
+
+/**
+ * Apply a todo mutation and persist the result. Rejected in
+ * `PLAN` mode (Pillar 1) — todo state is project-level
+ * metadata, not conversation state, so even an `add` would
+ * leak a write to disk.
+ */
+export async function executeTodoWrite(
+  args: TodoWriteArgs,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
+  if (options.mode === 'PLAN') {
+    return `Error: todo_write: rejected in PLAN mode (no on-disk mutations).`;
+  }
+  const op = args.op;
+  if (op !== 'add' && op !== 'set_status' && op !== 'remove' && op !== 'clear_done') {
+    throw new TodoWriteError(
+      `todo_write: unknown op "${String(op)}"`,
+      'invalid_args',
+      { op: String(op) },
+    );
+  }
+  let list = loadTodoList(cwd);
+  switch (op) {
+    case 'add': {
+      if (typeof args.content !== 'string' || args.content.trim().length === 0) {
+        throw new TodoWriteError('todo_write: "content" is required for op=add', 'invalid_args');
+      }
+      list = addItem(list, { content: args.content, blockedBy: args.blockedBy });
+      break;
+    }
+    case 'set_status': {
+      if (typeof args.id !== 'string' || args.id.length === 0) {
+        throw new TodoWriteError('todo_write: "id" is required for op=set_status', 'invalid_args');
+      }
+      if (!args.status || !VALID_TODO_STATUSES.has(args.status)) {
+        throw new TodoWriteError(
+          `todo_write: "status" must be one of pending|in_progress|done|cancelled (got "${String(args.status)}")`,
+          'invalid_args',
+        );
+      }
+      const exists = list.items.some((it) => it.id === args.id);
+      if (!exists) {
+        throw new TodoWriteError(`todo_write: item id "${args.id}" not found`, 'not_found');
+      }
+      list = setItemStatus(list, { id: args.id, status: args.status });
+      break;
+    }
+    case 'remove': {
+      if (typeof args.id !== 'string' || args.id.length === 0) {
+        throw new TodoWriteError('todo_write: "id" is required for op=remove', 'invalid_args');
+      }
+      const exists = list.items.some((it) => it.id === args.id);
+      if (!exists) {
+        throw new TodoWriteError(`todo_write: item id "${args.id}" not found`, 'not_found');
+      }
+      list = removeItem(list, { id: args.id });
+      break;
+    }
+    case 'clear_done': {
+      list = clearDoneItems(list);
+      break;
+    }
+  }
+  const save = saveTodoList(cwd, list);
+  if (!save.ok) {
+    throw new TodoWriteError(`todo_write: failed to persist: ${save.error ?? 'unknown'}`, 'io_failure', {
+      path: save.path,
+    });
+  }
+  const summary = summariseTodoList(list);
+  recordTelemetry(
+    telemetry.todoMutation({
+      op,
+      items: list.items.length,
+      id: typeof args.id === 'string' ? args.id : undefined,
+    }),
+  );
+  // Echo the rendered list back so the LLM can confirm
+  // its mutation took effect in the same turn.
+  return `${renderTodoList(list)}\n\n(summary: ${summary})`;
+}
+
+/* ──────────────────── run_command_async / poll_command_status / kill_command ────────── */
+
+/**
+ * Process-global registry of background jobs. Lazily created on
+ * the first call to `getBackgroundJobRegistry` so the tool
+ * dispatch is hot-path-friendly and test-friendly (tests inject
+ * a custom registry via {@link setBackgroundJobRegistry}).
+ */
+let globalBackgroundRegistry: BackgroundJobRegistry | null = null;
+const backgroundRegistries = new Map<string, BackgroundJobRegistry>();
+
+export function getBackgroundJobRegistry(cwd: string): BackgroundJobRegistry {
+  let reg = backgroundRegistries.get(cwd);
+  if (!reg) {
+    reg = new BackgroundJobRegistry(cwd);
+    backgroundRegistries.set(cwd, reg);
+  }
+  return reg;
+}
+
+/** Test-only: inject a custom registry. */
+export function setBackgroundJobRegistry(cwd: string, reg: BackgroundJobRegistry | null): void {
+  if (reg === null) {
+    const existing = backgroundRegistries.get(cwd);
+    if (existing) existing.shutdown();
+    backgroundRegistries.delete(cwd);
+    return;
+  }
+  const previous = backgroundRegistries.get(cwd);
+  if (previous) previous.shutdown();
+  backgroundRegistries.set(cwd, reg);
+}
+
+export interface RunCommandAsyncArgs {
+  cmd: string;
+  args?: string[];
+  cwd?: string;
+}
+
+export interface PollCommandStatusArgs {
+  jobId: string;
+  tailLines?: number;
+  sinceBytes?: number;
+}
+
+export interface KillCommandArgs {
+  jobId: string;
+}
+
+export class BackgroundCommandError extends Error {
+  public readonly code: 'plan_mode_rejected' | 'invalid_args' | 'spawn_failed' | 'no_such_job';
+  constructor(message: string, code: BackgroundCommandError['code']) {
+    super(message);
+    this.name = 'BackgroundCommandError';
+    this.code = code;
+  }
+}
+
+/**
+ * Spawn a long-running command and return its jobId without
+ * blocking. The tail buffers cap at 64 KiB per stream and the
+ * snapshot is fsynced to `<cwd>/.fixo/jobs/<jobId>.json` every
+ * 5 s so a crash does not lose the recent output.
+ */
+export async function executeRunCommandAsync(
+  args: RunCommandAsyncArgs,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
+  if (options.mode === 'PLAN') {
+    return `Error: run_command_async: rejected in PLAN mode.`;
+  }
+  if (typeof args.cmd !== 'string' || args.cmd.trim().length === 0) {
+    throw new BackgroundCommandError('run_command_async: "cmd" is required', 'invalid_args');
+  }
+  const cmdArgs = Array.isArray(args.args) ? args.args.filter((a) => typeof a === 'string') : [];
+  const reg = getBackgroundJobRegistry(cwd);
+  const result = await reg.register({
+    cmd: args.cmd,
+    args: cmdArgs,
+    cwd: args.cwd ?? cwd,
+  });
+  if (!result.ok) {
+    throw new BackgroundCommandError(
+      `run_command_async: ${result.error ?? 'unknown'}`,
+      'spawn_failed',
+    );
+  }
+  return JSON.stringify({
+    ok: true,
+    jobId: result.jobId,
+    pid: result.pid,
+    note: 'poll_command_status to retrieve output; kill_command to terminate',
+  });
+}
+
+export function executePollCommandStatus(
+  args: PollCommandStatusArgs,
+  cwd: string,
+): string {
+  if (typeof args.jobId !== 'string' || args.jobId.length === 0) {
+    throw new BackgroundCommandError('poll_command_status: "jobId" is required', 'invalid_args');
+  }
+  const reg = getBackgroundJobRegistry(cwd);
+  const snap = reg.poll({
+    jobId: args.jobId,
+    tailLines: args.tailLines,
+    sinceBytes: args.sinceBytes,
+  });
+  if (!snap) {
+    throw new BackgroundCommandError(
+      `poll_command_status: no such job "${args.jobId}"`,
+      'no_such_job',
+    );
+  }
+  return JSON.stringify(snap, null, 2);
+}
+
+export function executeKillCommand(
+  args: KillCommandArgs,
+  cwd: string,
+): string {
+  if (typeof args.jobId !== 'string' || args.jobId.length === 0) {
+    throw new BackgroundCommandError('kill_command: "jobId" is required', 'invalid_args');
+  }
+  const reg = getBackgroundJobRegistry(cwd);
+  const out = reg.kill(args.jobId);
+  if (!out.ok) {
+    throw new BackgroundCommandError(
+      `kill_command: ${out.error ?? 'unknown'}`,
+      'no_such_job',
+    );
+  }
+  return JSON.stringify({ ok: true, jobId: args.jobId });
+}
+
+/** Helper exported for tests + subagent use. */
+export function shutdownAllBackgroundRegistries(): void {
+  for (const reg of backgroundRegistries.values()) reg.shutdown();
+  backgroundRegistries.clear();
+}
+
+/** Helper exported for `/jobs` slash command. */
+export function listAllBackgroundJobs(cwd: string): JobSnapshot[] {
+  const reg = backgroundRegistries.get(cwd);
+  if (!reg) return [];
+  return reg.list().map((j) => ({
+    id: j.id,
+    status: j.status,
+    exitCode: j.exitCode,
+    startedAt: j.startedAt,
+    exitedAt: j.exitedAt,
+    cmd: j.cmd,
+    args: j.args,
+    cwd: j.cwd,
+    stdout: j.stdoutTruncated ? `${j.stdout}\n...[truncated]` : j.stdout,
+    stderr: j.stderrTruncated ? `${j.stderr}\n...[truncated]` : j.stderr,
+    totalStdoutBytes: j.totalStdoutBytes,
+    totalStderrBytes: j.totalStderrBytes,
+    stdoutTruncated: j.stdoutTruncated,
+    stderrTruncated: j.stderrTruncated,
+  }));
+}
+
+/* ──────────────────── str_replace implementation ──────────────────── */
+
+/**
+ * Count non-overlapping occurrences of `needle` inside `haystack`.
+ * Linear scan with a moving cursor — no regex, no allocation.
+ */
+function countOccurrences(haystack: string, needle: string): number {
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let from = 0;
+  while (true) {
+    const idx = haystack.indexOf(needle, from);
+    if (idx === -1) return count;
+    count += 1;
+    from = idx + needle.length;
+  }
+}
+
+/**
+ * Apply a single in-place string replacement. Either replaces the
+ * first match (default) or every match (when `replaceAll` is true).
+ */
+function applyReplacement(
+  content: string,
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+): string {
+  if (replaceAll) {
+    // Manual split/join is faster than String.prototype.replaceAll
+    // for large strings under V8 (avoids the internal RegExp).
+    return content.split(oldString).join(newString);
+  }
+  return content.replace(oldString, newString);
+}
+
+/**
+ * Implementation of the `str_replace` tool. Strictly typed and
+ * gated by all four safety pillars:
+ *
+ *   - Pillar 1 (Sandbox): `ctx.mode === 'PLAN'` is rejected.
+ *   - Pillar 5 (Self-Protection): platform-locked paths are
+ *     refused by `WorkspaceGuard.assertNotPlatformPath`.
+ *   - Pillar 2 (Atomic Staging): the final commit is funneled
+ *     through {@link AtomicStagingManager.applySurgicalReplace},
+ *     not a direct `fs.writeFileSync`.
+ *   - Pillar 3 (LSP pre-save): the staged content is checked by
+ *     the gate before commit. In `block` mode a syntax error
+ *     causes the edit to abort with the diagnostic reported back
+ *     to the model.
+ */
+export async function executeStrReplace(
+  args: StrReplaceArgs,
+  cwd: string,
+  options: ToolExecutionOptions = {},
+): Promise<string> {
+  const guard = new WorkspaceGuard(cwd);
+
+  // Validate the input.
+  if (typeof args.path !== 'string' || args.path.length === 0) {
+    return `Error: str_replace: "path" is required.`;
+  }
+  if (typeof args.oldString !== 'string') {
+    return `Error: str_replace: "oldString" is required.`;
+  }
+  if (typeof args.newString !== 'string') {
+    return `Error: str_replace: "newString" is required.`;
+  }
+
+  // Pillar 1 — refuse in PLAN mode.
+  if (options.mode === 'PLAN') {
+    const err = new SurgicalReplaceError(
+      `str_replace is not allowed in PLAN mode (read-only). Switch to BUILD mode and retry.`,
+      'plan_mode_rejected',
+      { mode: options.mode },
+    );
+    return `Error: ${err.message}`;
+  }
+
+  // Workspace boundary check.
+  let resolved: string;
+  try {
+    resolved = guard.resolve(args.path, 'str_replace target');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: str_replace: ${msg}`;
+  }
+
+  // Pillar 5 — refuse platform-locked paths.
+  try {
+    guard.assertNotPlatformPath(resolved);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: ${msg}`;
+  }
+
+  if (!fs.existsSync(resolved)) {
+    return `Error: str_replace: file not found: ${args.path}`;
+  }
+
+  if (guard.isBinaryFile(resolved)) {
+    return `Error: str_replace: file appears to be binary: ${args.path}`;
+  }
+
+  // Load the current content.
+  const content = fs.readFileSync(resolved, 'utf-8');
+  const occurrences = countOccurrences(content, args.oldString);
+  const replaceAll = args.replaceAll === true;
+  // The uniqueness gate only fires when the caller has not already
+  // opted in to non-unique semantics via `replaceAll` or by
+  // explicitly setting `expectUnique: false`.
+  const expectUnique = !replaceAll && args.expectUnique !== false;
+
+  if (occurrences === 0) {
+    return `Error: str_replace: oldString not found in ${args.path}.`;
+  }
+  if (occurrences > 1 && expectUnique) {
+    return `Error: str_replace: oldString appears ${occurrences} times in ${args.path}. ` +
+      `Pass replaceAll=true or expectUnique=false to proceed.`;
+  }
+
+  const newContent = applyReplacement(content, args.oldString, args.newString, replaceAll);
+  const bytes = Buffer.byteLength(newContent, 'utf-8');
+
+  // Pillar 3 — LSP pre-save compilation gate. The gate's
+  // `enforce` throws on `block`-mode failures; we surface the
+  // diagnostics to the LLM as a structured error.
+  if (options.safety?.lspPreSave && options.safety.lspPreSave !== 'off') {
+    try {
+      const gate = getOrCreateLspGate(cwd, options.safety);
+      const synthetic = {
+        id: 'surgical-' + Date.now().toString(36),
+        targetPath: resolved,
+        pendingPath: '<surgical>',
+        metaPath: '<surgical>',
+        createdAt: Date.now(),
+        mode: 0o644,
+      } as const;
+      const result = await gate.check(synthetic);
+      gate.enforce(result, synthetic);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `Error: str_replace: ${msg}`;
+    }
+  }
+
+  // Pillar 2 — atomic staging. Route the new content through the
+  // staging manager's new surgical-replace method.
+  try {
+    const mgr = new AtomicStagingManager(cwd, getOrCreateRunId());
+    const result = await mgr.applySurgicalReplace(resolved, newContent, {
+      runId: mgr.runId,
+      reason: 'str_replace',
+      actorId: options.session?.id ?? 'tool-executor',
+    });
+
+    // Telemetry.
+    try {
+      const { recordTelemetry, telemetry } = await import('./telemetry.js');
+      recordTelemetry(
+        telemetry.surgicalEdit({
+          path: args.path,
+          occurrences: replaceAll ? occurrences : 1,
+          mode: options.safety?.lspPreSave ?? 'off',
+          bytes: result.bytes,
+        }),
+      );
+    } catch {
+      // Telemetry must never break a tool call.
+    }
+
+    options.session?.noteChange(resolved);
+    return JSON.stringify({
+      ok: true,
+      path: args.path,
+      occurrences: replaceAll ? occurrences : 1,
+      mode: options.safety?.lspPreSave ?? 'off',
+      bytes: result.bytes,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: str_replace: ${msg}`;
+  }
+}
+
+/* ──────────────────── glob_files implementation ──────────────────── */
+
+const GLOB_DEFAULT_MAX_RESULTS = 1000;
+const GLOB_HARD_MAX_RESULTS = 5000;
+const GLOB_DEFAULT_SKIP_DIRS: ReadonlyArray<string> = [
+  'node_modules',
+  '.git',
+  'dist',
+  '.fixo',
+  '.fixocli',
+];
+
+/**
+ * Split a comma-separated ignore spec into an array. Tolerates
+ * stray whitespace and empty entries.
+ */
+function splitIgnoreSpec(spec: string | undefined): string[] {
+  if (!spec) return [];
+  return spec
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Implementation of the `glob_files` tool. Strictly typed,
+ * workspace-bounded, and capped.
+ *
+ * Uses Node 22+ native `fs.promises.glob` for performance. Falls
+ * back to a manual recursive walker on Node < 22 (which the
+ * project's `package.json` already requires) so the tool is
+ * always functional.
+ */
+export async function executeGlobFiles(
+  args: GlobArgs,
+  cwd: string,
+  _options: ToolExecutionOptions = {},
+): Promise<string> {
+  if (typeof args.pattern !== 'string' || args.pattern.length === 0) {
+    return `Error: glob_files: "pattern" is required.`;
+  }
+
+  const guard = new WorkspaceGuard(cwd);
+  let scope: string;
+  try {
+    scope = args.cwd ? guard.resolve(args.cwd, 'glob scope') : cwd;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: glob_files: ${msg}`;
+  }
+
+  const maxResults = Math.min(
+    Math.max(args.maxResults ?? GLOB_DEFAULT_MAX_RESULTS, 1),
+    GLOB_HARD_MAX_RESULTS,
+  );
+  const skipDirs = new Set<string>(GLOB_DEFAULT_SKIP_DIRS);
+  for (const extra of splitIgnoreSpec(args.ignore)) {
+    skipDirs.add(extra);
+  }
+  const includeHidden = args.includeHidden === true;
+  const followSymlinks = args.followSymlinks === true;
+
+  // Collect matching paths.
+  let matches: string[];
+  try {
+    matches = await collectGlobMatches({
+      pattern: args.pattern,
+      scope,
+      skipDirs,
+      includeHidden,
+      followSymlinks,
+      maxResults: maxResults + 1,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: glob_files: ${msg}`;
+  }
+
+  const truncated = matches.length > maxResults;
+  const returned = truncated ? matches.slice(0, maxResults) : matches;
+  const total = matches.length;
+
+  // Telemetry.
+  try {
+    const { recordTelemetry, telemetry } = await import('./telemetry.js');
+    recordTelemetry(
+      telemetry.glob({
+        pattern: args.pattern,
+        returned: returned.length,
+        truncated,
+      }),
+    );
+  } catch {
+    // Telemetry must never break a tool call.
+  }
+
+  if (returned.length === 0) {
+    return JSON.stringify({ pattern: args.pattern, matches: [], total: 0, truncated: false });
+  }
+
+  return JSON.stringify({
+    pattern: args.pattern,
+    matches: returned.map((p) => path.relative(cwd, p) || p),
+    total,
+    truncated,
+  });
+}
+
+interface CollectOptions {
+  pattern: string;
+  scope: string;
+  skipDirs: ReadonlySet<string>;
+  includeHidden: boolean;
+  followSymlinks: boolean;
+  maxResults: number;
+}
+
+/**
+ * Collect paths matching `pattern` under `scope`. Prefers Node 22+
+ * native `fs.promises.glob`; falls back to a manual recursive
+ * walker on older runtimes. Both branches honour the skip set
+ * and hidden-file policy.
+ */
+async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
+  const { pattern, scope, skipDirs, includeHidden, followSymlinks, maxResults } = opts;
+  const results: string[] = [];
+
+  // Try native fs.promises.glob first.
+  const fsPromises = fs.promises as typeof fs.promises & {
+    glob?: (
+      pattern: string,
+      options?: { cwd?: string; exclude?: string[]; withFileTypes?: boolean },
+    ) => Promise<unknown>;
+  };
+
+  if (typeof fsPromises.glob === 'function') {
+    const exclude = Array.from(skipDirs).map((d) => `**/${d}/**`);
+    const out = (await fsPromises.glob(pattern, {
+      cwd: scope,
+      exclude,
+      withFileTypes: false,
+    })) as unknown;
+    if (Array.isArray(out)) {
+      for (const entry of out) {
+        if (typeof entry !== 'string') continue;
+        const absolute = path.resolve(scope, entry);
+        if (results.length >= maxResults) break;
+        // The native glob does not surface whether symlinks were
+        // followed; perform a defensive lstat and skip dotfiles if
+        // the user did not opt in.
+        try {
+          if (!includeHidden && path.basename(absolute).startsWith('.')) continue;
+        } catch {
+          continue;
+        }
+        results.push(absolute);
+      }
+      return results;
+    }
+  }
+
+  // Manual fallback — recursive walker with built-in pattern
+  // matcher. Supports `**`, `*`, and literal segments.
+  const matcher = compileGlob(pattern);
+  const walk = async (dir: string): Promise<void> => {
+    if (results.length >= maxResults) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (results.length >= maxResults) return;
+      if (!includeHidden && entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue;
+        if (!followSymlinks) {
+          try {
+            const lst = await fs.promises.lstat(full);
+            if (lst.isSymbolicLink()) continue;
+          } catch {
+            continue;
+          }
+        }
+        await walk(full);
+      } else if (entry.isFile()) {
+        if (!includeHidden && entry.name.startsWith('.')) continue;
+        if (skipDirs.has(entry.name)) continue;
+        if (!followSymlinks) {
+          try {
+            const lst = await fs.promises.lstat(full);
+            if (lst.isSymbolicLink()) continue;
+          } catch {
+            continue;
+          }
+        }
+        if (matcher(path.relative(scope, full) || entry.name)) {
+          results.push(full);
+        }
+      }
+    }
+  };
+  await walk(scope);
+  return results;
+}
+
+/**
+ * Compile a small subset of glob syntax into a predicate. Supports:
+ *   - `**`  → any number of path segments
+ *   - `*`   → any characters within a single segment
+ *   - `?`   → any single character
+ *   - everything else is a literal
+ *
+ * The matcher operates on forward-slash paths regardless of host
+ * platform. This is intentionally tiny — Node 22+'s native
+ * `fs.promises.glob` covers the common case; the fallback exists
+ * for environments where the native API is unavailable.
+ */
+function compileGlob(pattern: string): (relPath: string) => boolean {
+  // Normalise separators.
+  const normalised = pattern.replace(/\\/g, '/');
+  const re = globToRegExp(normalised);
+  return (rel: string) => re.test(rel.replace(/\\/g, '/'));
+}
+
+/**
+ * Convert a glob pattern to a regular expression. Faithful to the
+ * small subset documented on {@link compileGlob}.
+ */
+function globToRegExp(pattern: string): RegExp {
+  let body = '';
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') {
+        body += '.*';
+        i += 2;
+        // Consume an optional following slash so `**/foo` works.
+        if (pattern[i] === '/') i += 1;
+      } else {
+        body += '[^/]*';
+        i += 1;
+      }
+    } else if (ch === '?') {
+      body += '[^/]';
+      i += 1;
+    } else if ('\\^$.|+()[]{}'.includes(ch)) {
+      body += '\\' + ch;
+      i += 1;
+    } else {
+      body += ch;
+      i += 1;
+    }
+  }
+  return new RegExp('^' + body + '$');
+}
+
+/* ──────────────────── Tool Specification Registry ──────────────────── */
+
+/**
+ * Process-global registry of typed tool specifications. New tools
+ * register themselves here; the existing `TOOL_DEFINITIONS` array
+ * remains the LLM-facing JSON-Schema surface. Both surfaces are
+ * kept in lock-step by the executor's dispatch path.
+ *
+ * The registry stores entries as `ToolSpecification<Record<string, any>, string>`
+ * for compatibility with the existing switch dispatch. Strongly-typed
+ * callers can cast at the call site.
+ */
+const toolRegistry = new Map<string, ToolSpecification<Record<string, any>, string>>();
+
+/** Register a typed tool specification. Throws on duplicate. */
+export function registerTool<TArgs extends Record<string, any>, TResult = string>(
+  spec: ToolSpecification<TArgs, TResult>,
+): void {
+  if (toolRegistry.has(spec.name)) {
+    throw new Error(`Tool "${spec.name}" is already registered.`);
+  }
+  toolRegistry.set(
+    spec.name,
+    spec as unknown as ToolSpecification<Record<string, any>, string>,
+  );
+}
+
+/** Look up a registered tool specification. */
+export function getToolSpecification(
+  name: string,
+): ToolSpecification<Record<string, any>, string> | undefined {
+  return toolRegistry.get(name);
+}
+
+/** List the names of all registered typed tools. */
+export function listRegisteredToolNames(): string[] {
+  return Array.from(toolRegistry.keys()).sort();
+}
+
+/* ──────────────────── Built-in Typed Registrations ──────────────────── */
+
+registerTool<StrReplaceArgs>({
+  name: 'str_replace',
+  description:
+    'Use this tool by default for any in-place edit to an existing file. Performs a surgical, atomic replacement of oldString with newString. By default, oldString must be unique within the file (expectUnique=true) — non-unique matches are rejected with a clear error so the caller can narrow the snippet. Pass replaceAll=true to substitute every occurrence. Rejected in PLAN mode. Refused for platform-locked paths. Goes through the same atomic staging pipeline as write_file and the LSP pre-save gate before any disk mutation.',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'The file path to edit.' },
+      oldString: { type: 'string', description: 'The substring to replace.' },
+      newString: { type: 'string', description: 'The replacement content.' },
+      replaceAll: { type: 'boolean', description: 'Replace every occurrence.' },
+      expectUnique: {
+        type: 'boolean',
+        description: 'Abort when oldString is not unique.',
+      },
+    },
+    required: ['path', 'oldString', 'newString'],
+  },
+  async execute(args, ctx) {
+    return executeStrReplace(args, ctx.cwd, ctx.options);
+  },
+});
+
+registerTool<GlobArgs>({
+  name: 'glob_files',
+  description:
+    'High-performance filesystem pattern matcher. Returns paths matching the given glob pattern, relative to the workspace root. Built on Node 22+ native fs.promises.glob. By default, common build/VCS directories (node_modules, .git, dist, .fixo, .fixocli) are excluded. Symlinks are not followed and hidden files are excluded unless explicitly enabled. Capped at maxResults (default 1000, hard cap 5000).',
+  parameters: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string', description: 'Glob pattern, e.g. "src/**/*.ts"' },
+      cwd: { type: 'string', description: 'Optional scope directory.' },
+      ignore: { type: 'string', description: 'Optional extra ignore patterns.' },
+      maxResults: { type: 'integer', description: 'Cap on returned matches.' },
+      includeHidden: { type: 'boolean', description: 'Include dotfile entries.' },
+      followSymlinks: { type: 'boolean', description: 'Follow symbolic links.' },
+    },
+    required: ['pattern'],
+  },
+  async execute(args, ctx) {
+    return executeGlobFiles(args, ctx.cwd, ctx.options);
+  },
+});
+
+registerTool({
+  name: 'todo_read',
+  description:
+    'Read the current project todo list from <cwd>/.fixo/todo_list.json. Returns a human-readable rendering of all items, grouped into Open and Completed. Missing or unreadable files yield an empty list — this is by design so the agent can always inspect todo state.',
+  parameters: {
+    type: 'object',
+    properties: {},
+    required: [],
+  },
+  async execute(_args, ctx) {
+    return executeTodoRead(ctx.cwd);
+  },
+});
+
+registerTool<TodoWriteArgs>({
+  name: 'todo_write',
+  description:
+    'Mutate the project todo list. Operations: add (content+blockedBy optional), set_status (id+status), remove (id), clear_done. Persisted atomically to <cwd>/.fixo/todo_list.json. Rejected in PLAN mode. Status values: pending | in_progress | done | cancelled.',
+  parameters: {
+    type: 'object',
+    properties: {
+      op: { type: 'string', enum: ['add', 'set_status', 'remove', 'clear_done'] },
+      content: { type: 'string', description: 'Item content (op=add only).' },
+      id: { type: 'string', description: 'Item id (op=set_status, op=remove).' },
+      status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'cancelled'] },
+      blockedBy: { type: 'string', description: 'Optional blocker (op=add).' },
+    },
+    required: ['op'],
+  },
+  async execute(args, ctx) {
+    return executeTodoWrite(args, ctx.cwd, ctx.options);
+  },
+});
+
+registerTool<RunCommandAsyncArgs>({
+  name: 'run_command_async',
+  description:
+    'Spawn a long-running command in the background. Returns a jobId. Streams cap at 64 KiB; tail buffers survive a crash via the .fixo/jobs/<jobId>.json snapshot. Rejected in PLAN mode. Workspace-escape and sensitive-file commands are blocked at spawn time.',
+  parameters: {
+    type: 'object',
+    properties: {
+      cmd: { type: 'string', description: 'The binary to spawn.' },
+      args: { type: 'array', items: { type: 'string' } },
+      cwd: { type: 'string' },
+    },
+    required: ['cmd'],
+  },
+  async execute(args, ctx) {
+    return executeRunCommandAsync(args, ctx.cwd, ctx.options);
+  },
+});
+
+registerTool<PollCommandStatusArgs>({
+  name: 'poll_command_status',
+  description:
+    'Read a snapshot of a background job. Honours tailLines (last N lines per stream) and sinceBytes (return only the bytes after this offset on stdout/stderr).',
+  parameters: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string' },
+      tailLines: { type: 'integer' },
+      sinceBytes: { type: 'integer' },
+    },
+    required: ['jobId'],
+  },
+  async execute(args, ctx) {
+    return executePollCommandStatus(args, ctx.cwd);
+  },
+});
+
+registerTool<KillCommandArgs>({
+  name: 'kill_command',
+  description: 'SIGTERM a background job by jobId.',
+  parameters: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string' },
+    },
+    required: ['jobId'],
+  },
+  async execute(args, ctx) {
+    return executeKillCommand(args, ctx.cwd);
+  },
+});

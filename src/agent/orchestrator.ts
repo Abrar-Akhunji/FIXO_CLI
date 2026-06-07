@@ -1,6 +1,7 @@
 import type { AgentContext, Subtask, TaskDAG } from '../types.js';
 import { AgentClient } from './agent-client.js';
 import { loadConfig } from '../config.js';
+import { C } from '../ui/colors.js';
 
 export class Orchestrator {
   private client: AgentClient;
@@ -80,7 +81,7 @@ JSON Schema:
       attempt++;
     }
 
-    console.warn('\x1b[33m[Orchestrator] Warning: Failed to generate plan. Falling back to SingleAgent execution...\x1b[0m');
+    console.warn(`${C.YELLOW}[Orchestrator] Warning: Failed to generate plan. Falling back to SingleAgent execution...${C.RESET}`);
     return {
       subtasks: [
         {

@@ -431,6 +431,109 @@ export class AtomicStagingManager {
   }
 
   /**
+   * Apply a surgical in-place edit to an existing file. The new
+   * content is staged under the same `.fixo/staging/<runId>/<id>.pending`
+   * layout and the commit step mirrors `commit()`: backup the
+   * target, atomic rename, clear the backup, clear the meta.
+   *
+   * This is functionally `stage() + commit()` collapsed into a
+   * single call, but the on-disk layout, backup semantics, and
+   * rollback path are identical. Provided so `str_replace` (and
+   * future surgical-edit tools) can route their edits through the
+   * same atomic staging pipeline as `write_file` without touching
+   * the existing `stage()` / `commit()` flow.
+   *
+   * The optional `meta` argument is recorded into `.meta.json` so
+   * the audit trail records the originator of the edit (e.g. a
+   * `str_replace` tool call vs. a `subagent`). The method never
+   * weakens the Pillar 2 atomicity guarantee: if the rename
+   * swap fails, the backup is restored and the original file is
+   * preserved byte-for-byte.
+   */
+  public async applySurgicalReplace(
+    target: string,
+    newContent: string,
+    meta: { runId: string; reason: 'str_replace' | 'todo_write' | 'subagent'; actorId: string },
+  ): Promise<{ ok: true; path: string; bytes: number }> {
+    const resolved = this.resolveTarget(target);
+    const id = sha256(resolved);
+    this.ensureStagingDir();
+
+    const pendingPath = path.join(this.stagingDir, `${id}${PENDING_SUFFIX}`);
+    const metaPath = path.join(this.stagingDir, `${id}${META_SUFFIX}`);
+    const backup = `${resolved}${BACKUP_SUFFIX}`;
+    const existed = fs.existsSync(resolved);
+
+    // 1. Write the new content to the .pending file (atomic via temp+rename).
+    const tmpPath = `${pendingPath}.tmp`;
+    fs.writeFileSync(tmpPath, newContent, { encoding: 'utf-8', mode: 0o600 });
+    chmodSafe(tmpPath, 0o600);
+    fs.renameSync(tmpPath, pendingPath);
+
+    // 2. Write the sidecar meta with audit trail.
+    const metaPayload = {
+      targetPath: resolved,
+      mode: 0o644,
+      createdAt: Date.now(),
+      reason: meta.reason,
+      actorId: meta.actorId,
+      runId: meta.runId,
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(metaPayload), {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodSafe(metaPath, 0o600);
+
+    // 3. Ensure parent dir exists.
+    const parent = path.dirname(resolved);
+    fs.mkdirSync(parent, { recursive: true });
+
+    try {
+      // 4. Back up the existing file (if any).
+      if (existed) {
+        // Clear any stale backup from a previous failed commit.
+        rmSafe(backup);
+        fs.renameSync(resolved, backup);
+      }
+
+      // 5. Atomic swap of the pending file into the target.
+      fs.renameSync(pendingPath, resolved);
+
+      // 6. Apply file mode (best-effort across platforms).
+      try {
+        fs.chmodSync(resolved, 0o644);
+      } catch {
+        // ignore
+      }
+
+      // 7. Clear backup and meta sidecar.
+      if (existed) rmSafe(backup);
+      rmSafe(metaPath);
+
+      const bytes = Buffer.byteLength(fs.readFileSync(resolved, 'utf-8'), 'utf-8');
+      return { ok: true, path: resolved, bytes };
+    } catch (err) {
+      // Rollback: restore the backup, clean up the .pending if any.
+      try {
+        if (existed && fs.existsSync(backup)) {
+          if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+          fs.renameSync(backup, resolved);
+        } else if (!existed && fs.existsSync(resolved)) {
+          // We created the file but the rename to target itself
+          // succeeded — only reached if chmod fails. Target is
+          // already correct; nothing to undo.
+        }
+      } catch {
+        // Last-ditch: leave the backup in place so a human can
+        // recover. The next GC pass will clean it up.
+      }
+      // Pending may have been consumed; if not, leave it.
+      throw err;
+    }
+  }
+
+  /**
    * Remove any staged write older than `ttlMs`. Returns the number
    * of entries removed. Designed to be cheap at run start
    * (typically <2ms for a few hundred entries).

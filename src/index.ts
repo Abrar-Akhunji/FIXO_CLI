@@ -32,6 +32,7 @@ function parseArgs(): {
   model?: string;
   port?: number;
   task?: string;
+  resume?: string;
 } {
   const args = process.argv.slice(2);
   const result = {
@@ -42,6 +43,7 @@ function parseArgs(): {
     model: undefined as string | undefined,
     port: undefined as number | undefined,
     task: undefined as string | undefined,
+    resume: undefined as string | undefined,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -70,6 +72,10 @@ function parseArgs(): {
       case '--port':
       case '-p':
         if (i + 1 < args.length) result.port = parseInt(args[++i], 10);
+        break;
+      case '--resume':
+      case '-r':
+        if (i + 1 < args.length) result.resume = args[++i];
         break;
       case '--task':
       case '-t':
@@ -108,6 +114,7 @@ ${C.BOLD}OPTIONS${C.RESET}
   -m, --model <name>  Set the model (default: auto)
   -p, --port <port>   Proxy server port (default: 3001)
   -t, --task <text>   Run a one-shot task
+  -r, --resume <id>   Resume a previous session snapshot by id
 
 ${C.BOLD}INTERACTIVE COMMANDS${C.RESET}
   /help               Show all commands
@@ -363,6 +370,7 @@ async function main(): Promise<void> {
     projectConfig,
     cwd,
     verbose,
+    resume: args.resume,
   });
 
   const { stopLspManager } = await import('./agent/tool-executor.js');

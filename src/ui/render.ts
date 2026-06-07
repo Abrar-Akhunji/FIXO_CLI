@@ -533,6 +533,8 @@ export const COMMANDS_WITH_DESC = [
   { cmd: '/compact', desc: 'Summarise & compress conversation (frees context tokens)' },
   { cmd: '/stats', desc: 'Show session token usage statistics' },
   { cmd: '/session', desc: 'Manage sessions: list | load <uuid> | new' },
+  { cmd: '/todo', desc: 'Manage todo list: list | add <text> | done <id> | remove <id> | clear' },
+  { cmd: '/mcp', desc: 'Manage MCP servers: list | add <name> <cmd> [args] | remove <name> | test <name>' },
   // Agent modes & plans
   { cmd: '/mode', desc: 'Toggle or set PLAN / BUILD execution mode' },
   { cmd: '/plan', desc: 'Generate a task execution plan' },

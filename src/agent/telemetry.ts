@@ -45,7 +45,16 @@ export type TelemetryEventType =
   | 'stream_resume'
   | 'stream_resume_exhausted'
   | 'context_budget'
-  | 'provider_error';
+  | 'provider_error'
+  | 'tool_surgical_edit'
+  | 'tool_glob'
+  | 'tool_async_spawn'
+  | 'subagent_summary'
+  | 'fixo_md_loaded'
+  | 'todo_mutation'
+  | 'session_snapshot'
+  | 'hook_fired'
+  | 'permission_decision';
 
 export interface TelemetryEvent {
   /** ISO timestamp the event was recorded. */
@@ -107,6 +116,33 @@ export const telemetry = {
   },
   sessionEnd(fields: { durationMs: number; toolCalls: number; totalTokens: number }): TelemetryEvent {
     return makeEvent('session_end', fields);
+  },
+  surgicalEdit(fields: { path: string; occurrences: number; mode: string; bytes: number }): TelemetryEvent {
+    return makeEvent('tool_surgical_edit', fields);
+  },
+  glob(fields: { pattern: string; returned: number; truncated: boolean }): TelemetryEvent {
+    return makeEvent('tool_glob', fields);
+  },
+  fixoMdLoaded(fields: { source: string; bytes: number }): TelemetryEvent {
+    return makeEvent('fixo_md_loaded', fields);
+  },
+  todoMutation(fields: { op: string; items: number; id?: string }): TelemetryEvent {
+    return makeEvent('todo_mutation', fields);
+  },
+  sessionSnapshot(fields: { id: string; op: 'save' | 'load'; tokens: number; items: number }): TelemetryEvent {
+    return makeEvent('session_snapshot', fields);
+  },
+  asyncSpawn(fields: { jobId: string; cmd: string; pid?: number }): TelemetryEvent {
+    return makeEvent('tool_async_spawn', fields);
+  },
+  subagentSummary(fields: { taskType: string; inputTokens: number; outputTokens: number; durationMs: number }): TelemetryEvent {
+    return makeEvent('subagent_summary', fields);
+  },
+  hookFired(fields: { hook: string; phase: 'pre' | 'post'; matched: boolean; durationMs: number }): TelemetryEvent {
+    return makeEvent('hook_fired', fields);
+  },
+  permissionDecision(fields: { tool: string; pattern: string; decision: string }): TelemetryEvent {
+    return makeEvent('permission_decision', fields);
   },
 };
 

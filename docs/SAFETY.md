@@ -944,3 +944,163 @@ node --import tsx --test src/__tests__/*.test.ts
 
 *Last updated with the Phase 2 safety refactor — 234/234 tests
 green, build clean, ready for production.*
+
+---
+
+## 12. Phase 1–3 Tool Surface (Frontier-Tool Capability Layer)
+
+Phases 1–3 extended the FixO CLI tool surface to match the
+execution capabilities of frontier coding agents. Every new
+tool runs **through the same four safety pillars**; none of
+them introduces a bypass path. The catalogue below names each
+new tool, the phase that delivered it, and the pillar(s) that
+gate it.
+
+### Phase 1 — Surgical Core
+
+| Tool | What it does | Pillar gates |
+| :--- | :--- | :--- |
+| `str_replace` | Line-level surgical edit (`find` → `replace`) with uniqueness check. Hooks into `applySurgicalReplace` in `runtime/staging.ts`. | Pillar 2 (atomic staging) + Pillar 3 (LSP pre-save) + workspace guard |
+| `glob_files` | Pattern-based file finder. | Workspace guard (paths stay inside `cwd`) |
+| Generic `ToolSpecification` refactor | All tool args are now strongly typed. No `any` in the executor dispatch. | Type-level invariant — eliminates an entire class of injection paths |
+
+### Phase 2 — Context & Continuity
+
+| Tool / capability | What it does | Pillar gates |
+| :--- | :--- | :--- |
+| Resilient search chain (`BraveSearchProvider` → `TavilySearchProvider` → DuckDuckGo) | Multi-provider web search with per-provider quality metrics. | Credential vault (API keys never leave `withCredential`) |
+| `.fixo/FIXO.md` loader | Project-specific instructions auto-loaded on every session. | Workspace guard (path is `cwd`-anchored) |
+| `todo_write` / `todo_read` | Mutable task checklist tracking. | Pillar 2 (staging) + default-ask permission |
+| `--resume` flag | Persistent session reconstitution from `.fixo/runs/<id>/`. | Workspace guard + session integrity checks |
+
+### Phase 3 — Asynchronous Integrations
+
+| Tool / capability | What it does | Pillar gates |
+| :--- | :--- | :--- |
+| `run_command_async` / `poll_command_status` / `kill_command` | Non-blocking shell execution with ring-buffered I/O caps. | Pillar 1 (command-parser AST validation) + granular permissions |
+| `spawn_subagent` | Context-isolated sub-orchestrator loops. | Inherits parent's policy, vault, and workspace guard |
+| `/mcp` console (list / add / restart) | Interactive MCP server management. | Config-only — does not touch the workspace |
+| `PreToolUse` / `PostToolUse` hooks | Synchronised local-script execution hooks. | Hook scripts run in a constrained subprocess and cannot escape `cwd` |
+| Granular permission rules (`Tool(arg-glob)`) | Pattern-matched first-match-wins permission engine. | Default-ask for any new Phase 1–3 tool with no matching rule |
+| Worktree annotations (`[worktree:create branch=x]`) | Safe parallel-branch experiments. | Git invoked shell-free via `execFileSync` — no shell expansion |
+
+### Phase 4 — Predictive Gates & Permission Wiring
+
+| Change | What it does | Pillar gates |
+| :--- | :--- | :--- |
+| Predictive context-budget gate (`agent/predictive-gate.ts`) | Before `read_file` reads a file, projects token cost against current conversation pressure and defers if `> 85%` of the model window. Returns a `[Context-Budget Guard]` directive identical in shape to the byte-gate's. | Layered on top of the existing byte gate; never reads bytes when deferred |
+| Permission engine pipe-through | All 6 legacy `decidePolicy` callsites (4 in `tool-executor.ts`, 1 in `worker-agent.ts`, 1 in `ui/prompt.ts`) now route through `checkPermission`. Rule matches fire first; legacy policy remains as the third tier inside `permissions.ts`. | Pillar 1 + Pillar 4 — no permission decision is now made without consulting `.fixo/permissions.json` first |
+
+### Zero-Regression Assertion
+
+Every Phase 1–3 tool — and every Phase 4 wire-through — routes
+through the same four pillars:
+
+1. **Command Safety** (`command-parser.ts` AST validation)
+2. **Atomic Staging** (`AtomicStagingManager`)
+3. **LSP Pre-Save** (`LspPreSaveGate.gate()`)
+4. **Sealed Vault** (`getProviderKeyVault().withCredential`)
+
+No new tool bypasses a pillar. No new tool reads the file
+system without `WorkspaceGuard.resolve()`. The granular
+permission engine added in Phase 3 *adds* a fifth checkpoint
+(rule matching) without removing any of the four pillars.
+
+Test coverage after Phase 4: **500 / 500 passing** (485
+baseline + 12 predictive-gate + 3 permission-wiring), `tsc
+--noEmit` clean, no `any` introduced in modified pathways.
+
+## 13. Agent-Loop Resilience Additions
+
+The five subsections below cover work that extends the four
+pillars without changing their contract. Each addition is
+optional from the safety standpoint (the pillars still pass
+without it) but closes a class of agent-loop failure modes the
+pillars alone do not catch — model drift, forgotten background
+work, and mid-run instruction churn.
+
+### 13.1 Edit-semantics steering (`tool-executor.ts`, `single-agent.ts`)
+
+The `write_file` and `str_replace` tool descriptions now state
+explicitly that `str_replace` is the default for in-place edits
+and that `write_file` is reserved for new files or full
+rewrites. The system prompt's `## Editing Discipline` block
+encodes the same three-tier rule (str_replace single-region /
+apply_patch multi-region / write_file new-or-rewrite). This
+steers the LLM toward surgical edits — which already route
+through Pillar 2 (AtomicStagingManager) and Pillar 3
+(LspPreSaveGate) — without changing either pillar's contract.
+Regression-guarded by `__tests__/tool-descriptions.test.ts`.
+
+### 13.2 Multi-modal content pipe (`shared/types.ts`, `shared/content.ts`, `ui/image-attach.ts`)
+
+`ChatMessage.content` is widened from `string | null` to
+`string | ChatContentBlock[] | null`. Each block is a
+discriminated union (`text` | `image`) so vision-capable
+providers can see images alongside text without any per-call
+type juggling. The `/image` slash command resolves paths
+through `WorkspaceGuard.resolve()`, sniffs the MIME type from
+the byte prefix (PNG / JPEG / WebP / GIF magic numbers, no
+external library), and caps payloads at **5 MiB pre-base64**.
+The flatten helper renders image blocks as `[image:mime]` so
+base64 never leaks to logs or token counters. Token estimator
+charges `IMAGE_TOKEN_COST = 1500` per image block. All paths
+remain inside `WorkspaceGuard`; no pillar bypass is introduced.
+Regression-guarded by `__tests__/multimodal.test.ts`.
+
+### 13.3 Background-job awareness (`agent/background-awareness.ts`)
+
+`BackgroundAwareness` injects a compact `[Background Jobs]`
+directive at the head of every `chat()` call inside the agent
+loop. Newly-finished jobs are announced exactly once (with exit
+code and up to 200 chars of stderr tail for failures);
+still-running jobs are listed each turn as a reminder so the
+model is nudged to call `poll_command_status`. Total directive
+is hard-capped at 1500 chars. Purely read-side — never
+spawns, polls, or kills jobs (that responsibility stays in
+`BackgroundJobRegistry`, which is itself gated by
+`command-parser.ts`). Wired through the same
+`injectSafetyDirective` slot already used by the semantic
+loop-trap warning. Regression-guarded by
+`__tests__/background-awareness.test.ts`.
+
+### 13.4 FIXO.md per-turn re-injection (`context/fixo-md-watcher.ts`)
+
+`FixoMdWatcher` captures a `{ path, source, mtimeMs, bytes }`
+fingerprint of the active FIXO.md at agent-loop start, then
+re-stats before each `chat()` call. When the file is created,
+updated, or deleted mid-run, the delta is surfaced as a
+`[Project Instructions]` directive through the same injection
+slot. No `fs.watch`, no subprocess — one `fs.statSync` per
+turn. The full content is read via the existing
+`loadProjectInstructions()` helper, which already enforces a
+1 MiB cap and the documented lookup-chain order. Regression-
+guarded by `__tests__/fixo-md-watcher.test.ts`.
+
+### 13.5 Predictive-gate soak coverage
+
+Four integration-soak tests added on top of the existing
+predictive-gate unit suite: (1) the `predictive_gate_fired`
+TaskSession event records `path`, `projectedTokens`,
+`projectedTotal`, and `hardCap`; (2) deferred reads still set
+`event.affectedPath` to the resolved absolute path so the agent
+loop can track them; (3) a zero-byte file never trips the gate
+even at moderate conversation pressure; (4) sequential reads
+across a 30–95% conversation-pressure sweep flip from allow to
+defer monotonically and at a deterministic point (≥80%
+pressure for a ~1.4k-token file at the default 85% budget pct).
+
+### Zero-Regression Assertion (Section 13 extension)
+
+None of the additions above introduces a new tool, new
+filesystem path outside `WorkspaceGuard`, or new credential-
+access route. Each one is observation-only or routes through
+an existing pillar. The agent-loop directives are injected via
+the same `injectSafetyDirective` slot used since Phase 2 for
+the semantic loop-trap, so the precedent for "directive at the
+head of the system prompt" already had safety review.
+
+Test coverage after Section 13 work: **527 / 527 passing**
+(523 baseline + 4 soak), `tsc --noEmit` clean, no `any`
+introduced in any modified pathway.
+

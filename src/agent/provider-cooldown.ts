@@ -102,6 +102,13 @@ interface InternalEntry {
   totalRateLimited: number;
   /** Ring buffer of 1 (success) and 0 (failure) for the success-rate window. */
   recent: number[];
+  /** Per-provider quality signal. Empty until {@link ProviderCooldownManager.recordQuality} is called. */
+  quality: {
+    samples: number;
+    avgDurationMs: number;
+    avgResultCount: number;
+    lastUpdatedAt: number;
+  };
 }
 
 const SUCCESS_WINDOW = 100;
@@ -244,6 +251,53 @@ export class ProviderCooldownManager {
     }
   }
 
+  /**
+   * Record a per-provider quality signal. The signal is a tuple of
+   * `(durationMs, resultCount)` — the search provider chain uses
+   * this to bias its next pick toward whichever provider is
+   * currently responding fastest *and* returning the most results.
+   *
+   * The implementation is deliberately minimal: a rolling
+   * per-provider EMA of `durationMs` and `resultCount`, exposed
+   * via {@link getQuality}. Future work can fold this into the
+   * `suggestNext` candidate ordering.
+   */
+  recordQuality(
+    providerId: string,
+    durationMs: number,
+    resultCount: number,
+    now: number = Date.now(),
+  ): void {
+    const entry = this.getOrCreate(providerId);
+    const prev = entry.quality;
+    const alpha = 0.4; // smoothing factor
+    const dur = Math.max(0, durationMs);
+    const count = Math.max(0, resultCount);
+    entry.quality = {
+      samples: prev.samples + 1,
+      avgDurationMs: prev.samples === 0
+        ? dur
+        : prev.avgDurationMs * (1 - alpha) + dur * alpha,
+      avgResultCount: prev.samples === 0
+        ? count
+        : prev.avgResultCount * (1 - alpha) + count * alpha,
+      lastUpdatedAt: now,
+    };
+  }
+
+  /** Read the per-provider quality snapshot, or null when no
+   *  samples have been recorded. */
+  getQuality(providerId: string): {
+    samples: number;
+    avgDurationMs: number;
+    avgResultCount: number;
+    lastUpdatedAt: number;
+  } | null {
+    const entry = this.entries.get(providerId);
+    if (!entry || entry.quality.samples === 0) return null;
+    return { ...entry.quality };
+  }
+
   // ──── internals ────────────────────────────────────────────────
 
   private getOrCreate(providerId: string): InternalEntry {
@@ -259,6 +313,7 @@ export class ProviderCooldownManager {
         totalFailures: 0,
         totalRateLimited: 0,
         recent: [],
+        quality: { samples: 0, avgDurationMs: 0, avgResultCount: 0, lastUpdatedAt: 0 },
       };
       this.entries.set(providerId, entry);
     }
@@ -305,3 +360,30 @@ export class ProviderCooldownManager {
  * invocation.
  */
 export const providerCooldown = new ProviderCooldownManager();
+
+/**
+ * Module-level helper used by the search chain. Routes a
+ * non-2xx response into the cooldown manager so the
+ * future picks avoid this provider until the cooldown
+ * expires.
+ */
+export function recordProviderError(
+  providerId: string,
+  status: number,
+  message: string,
+): void {
+  providerCooldown.recordFailure(providerId, status, message);
+}
+
+/**
+ * Module-level helper for the search chain. Records a
+ * `(durationMs, resultCount)` sample; the manager maintains
+ * a rolling EMA and exposes it via `providerCooldown.getQuality`.
+ */
+export function recordProviderQuality(
+  providerId: string,
+  durationMs: number,
+  resultCount: number,
+): void {
+  providerCooldown.recordQuality(providerId, durationMs, resultCount);
+}

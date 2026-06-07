@@ -22,6 +22,7 @@ import {
 import { DEFAULT_API_URL } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
 import { getProviderKeyVault } from '../runtime/credential-vault.js';
+import { extractTextFromContent } from '../shared/content.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -366,7 +367,7 @@ export class AgentClient {
         });
         const bodyObj: Record<string, any> = {
           model,
-          messages,
+          messages: messagesForOpenAIWire(messages),
           stream: false,
           ...options,
         };
@@ -376,7 +377,7 @@ export class AgentClient {
       const hasTools = options.tools && Array.isArray(options.tools) && options.tools.length > 0;
       const bodyObj: Record<string, any> = {
         model,
-        messages,
+        messages: messagesForOpenAIWire(messages),
         stream: false,
         ...options,
       };
@@ -438,8 +439,18 @@ export class AgentClient {
         const choice = data.choices[0];
 
         providerCooldown.recordSuccess(providerId);
+        // ChatResult.content is `string | null`. The widened
+        // ChatMessage.content union allows blocks on input, but
+        // every provider we ship returns text-only assistant
+        // messages, so we collapse to a string defensively.
+        const respContent = choice?.message?.content;
         return {
-          content: choice?.message?.content ?? null,
+          content:
+            respContent == null
+              ? null
+              : typeof respContent === 'string'
+                ? respContent
+                : extractTextFromContent(respContent),
           tool_calls: choice?.message?.tool_calls ?? null,
           usage: data.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
           model: data.model,
@@ -846,7 +857,7 @@ export class AgentClient {
         });
         const bodyObj: Record<string, any> = {
           model,
-          messages,
+          messages: messagesForOpenAIWire(messages),
           stream: true,
           ...options,
         };
@@ -856,7 +867,7 @@ export class AgentClient {
       const hasTools = options.tools && Array.isArray(options.tools) && options.tools.length > 0;
       const bodyObj: Record<string, any> = {
         model,
-        messages,
+        messages: messagesForOpenAIWire(messages),
         stream: true,
         ...options,
       };
@@ -1208,6 +1219,91 @@ function sleep(ms: number): Promise<void> {
 
 /* ──────────────────────── Translation Helpers ──────────────────────── */
 
+/**
+ * Translate a `ChatMessage.content` value to the Anthropic `user`
+ * content shape. Plain strings stay verbatim; block arrays are
+ * mapped 1:1 with image blocks rewritten to Anthropic's `source`
+ * sub-object.
+ */
+function toAnthropicUserContent(
+  content: ChatMessage['content'],
+): unknown {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  return content.map((block) => {
+    if (block.type === 'text') return { type: 'text', text: block.text };
+    // image
+    if (block.source.kind === 'base64') {
+      return {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: block.source.mediaType,
+          data: block.source.data,
+        },
+      };
+    }
+    // url — Anthropic supports url-shaped image sources as of 2024-06.
+    return {
+      type: 'image',
+      source: { type: 'url', url: block.source.url },
+    };
+  });
+}
+
+/**
+ * Translate a `ChatMessage.content` value to the OpenAI chat
+ * completions `user` content shape (string OR a block array with
+ * `image_url` blocks, per the OpenAI vision spec).
+ */
+function toOpenAIUserContent(
+  content: ChatMessage['content'],
+): unknown {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  return content.map((block) => {
+    if (block.type === 'text') return { type: 'text', text: block.text };
+    if (block.source.kind === 'base64') {
+      const dataUrl = `data:${block.source.mediaType};base64,${block.source.data}`;
+      return { type: 'image_url', image_url: { url: dataUrl } };
+    }
+    return { type: 'image_url', image_url: { url: block.source.url } };
+  });
+}
+
+/**
+ * Rewrite a `ChatMessage[]` so every user message with content
+ * blocks is translated to the OpenAI-vision wire shape. Messages
+ * with plain-string content are returned untouched; assistant
+ * and tool messages collapse to plain strings (those providers
+ * never accept image blocks in those roles).
+ *
+ * The original array is never mutated; returned as `unknown[]`
+ * because the OpenAI-vision wire shape is no longer assignable
+ * to the strict `ChatMessage` union.
+ */
+function messagesForOpenAIWire(messages: ChatMessage[]): unknown[] {
+  let needsRewrite = false;
+  for (const m of messages) {
+    if (Array.isArray(m.content)) {
+      needsRewrite = true;
+      break;
+    }
+  }
+  if (!needsRewrite) return messages as unknown as unknown[];
+  return messages.map((m) => {
+    if (m.role === 'user') {
+      return { ...m, content: toOpenAIUserContent(m.content) };
+    }
+    // Assistant / system / tool: collapse to text. We never send
+    // images on those roles to OpenAI-compat endpoints.
+    if (Array.isArray(m.content)) {
+      return { ...m, content: extractTextFromContent(m.content) };
+    }
+    return m;
+  });
+}
+
 function translateOpenAIToAnthropic(
   messages: ChatMessage[],
   model: string,
@@ -1218,17 +1314,24 @@ function translateOpenAIToAnthropic(
 
   for (const msg of messages) {
     if (msg.role === 'system') {
-      system = system ? `${system}\n${msg.content}` : (msg.content || '');
+      // System messages must be plain text. Image blocks on a
+      // system message are nonsensical; we flatten defensively.
+      const sysText = extractTextFromContent(msg.content);
+      system = system ? `${system}\n${sysText}` : sysText;
     } else if (msg.role === 'user') {
+      // User messages may carry image blocks. Translate the
+      // OpenAI-shaped block array to Anthropic's native block
+      // shape; plain strings continue to pass through verbatim.
       anthropicMessages.push({
         role: 'user',
-        content: msg.content || '',
+        content: toAnthropicUserContent(msg.content),
       });
     } else if (msg.role === 'assistant') {
+      const assistantText = extractTextFromContent(msg.content);
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         const contentBlocks: any[] = [];
-        if (msg.content) {
-          contentBlocks.push({ type: 'text', text: msg.content });
+        if (assistantText.length > 0) {
+          contentBlocks.push({ type: 'text', text: assistantText });
         }
         for (const tc of msg.tool_calls) {
           let inputObj = {};
@@ -1251,7 +1354,7 @@ function translateOpenAIToAnthropic(
       } else {
         anthropicMessages.push({
           role: 'assistant',
-          content: msg.content || '',
+          content: assistantText,
         });
       }
     } else if (msg.role === 'tool') {
@@ -1261,7 +1364,7 @@ function translateOpenAIToAnthropic(
           {
             type: 'tool_result',
             tool_use_id: msg.tool_call_id,
-            content: msg.content || '',
+            content: extractTextFromContent(msg.content),
           },
         ],
       });

@@ -1,7 +1,7 @@
 /**
  * CLI-specific type definitions extending the shared types.
  */
-import type { ChatMessage, ChatToolDefinition } from './shared/types.js';
+import type { ChatContentBlock, ChatMessage, ChatToolDefinition } from './shared/types.js';
 import type { PolicyProfile } from './runtime/policy.js';
 
 /** Runtime context for a single agent invocation. */
@@ -26,6 +26,14 @@ export interface AgentContext {
   yes?: boolean;
   /** Execution mode: PLAN (read-only), BUILD (mutating allowed), EXPLORE (read+lsp), or SCOUT (web only) */
   mode?: 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT';
+  /**
+   * Image (or future non-text) blocks attached to the next user
+   * message. Populated by the REPL's `/image` slash command. The
+   * SingleAgent merges these into the user-message content array
+   * along with `task`, so vision-capable providers can see them.
+   * Cleared after each agent run by the caller.
+   */
+  pendingAttachments?: ChatContentBlock[];
 }
 
 /** Result of a single agent run. */

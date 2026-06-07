@@ -23,6 +23,8 @@
 
 import { encode as cl100kEncode } from 'gpt-tokenizer/encoding/cl100k_base';
 import { encode as o200kEncode } from 'gpt-tokenizer/encoding/o200k_base';
+import type { ChatContentBlock } from '../shared/types.js';
+import { IMAGE_TOKEN_COST } from '../shared/content.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -84,7 +86,10 @@ export function countTokens(text: string, model?: string | null): number {
 
 /** Count tokens across a list of message-like objects. */
 export function countMessagesTokens(
-  messages: ReadonlyArray<{ content?: string | null; tool_calls?: unknown }>,
+  messages: ReadonlyArray<{
+    content?: string | ChatContentBlock[] | null;
+    tool_calls?: unknown;
+  }>,
   model?: string | null,
 ): number {
   let total = 0;
@@ -93,8 +98,18 @@ export function countMessagesTokens(
   const PER_MESSAGE_OVERHEAD = 4;
   for (const m of messages) {
     total += PER_MESSAGE_OVERHEAD;
-    if (typeof m.content === 'string' && m.content.length > 0) {
-      total += countTokens(m.content, model);
+    const c = m.content;
+    if (typeof c === 'string' && c.length > 0) {
+      total += countTokens(c, model);
+    } else if (Array.isArray(c)) {
+      for (const block of c) {
+        if (block.type === 'text' && block.text.length > 0) {
+          total += countTokens(block.text, model);
+        } else if (block.type === 'image') {
+          // Fixed estimate per the Phase 2 plan. See shared/content.ts.
+          total += IMAGE_TOKEN_COST;
+        }
+      }
     }
     if (m.tool_calls) {
       // We do not have a dedicated BPE for tool-call JSON; the per-message

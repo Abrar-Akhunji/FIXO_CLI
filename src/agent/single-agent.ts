@@ -6,7 +6,7 @@
  *   User Input → Complexity Check → Agentic Tool Loop → Result
  *   (trivial queries skip the tool loop entirely)
  */
-import type { ChatMessage, TokenUsage } from '../shared/types.js';
+import type { ChatContentBlock, ChatMessage, TokenUsage } from '../shared/types.js';
 import { AgentClient, type ChatResult, type StreamChunk } from './agent-client.js';
 import { ConversationManager } from './conversation.js';
 import { getActiveTools, TOOL_DEFINITIONS, executeTool, classifyExecutionRole, type ToolCallEvent } from './tool-executor.js';
@@ -15,6 +15,15 @@ import { buildRepoMap } from './repo-map.js';
 import type { AgentContext, AgentResult } from '../types.js';
 import { loadConfig } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
+import {
+  buildProjectInstructionsBlock,
+  recordFixoMdLoad,
+} from '../context/fixo-md.js';
+import {
+  loadTodoList,
+  summariseTodoList,
+} from '../context/todo.js';
+import { C } from '../ui/colors.js';
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
@@ -30,6 +39,13 @@ export const promptsWrapper = {
 };
 import type readline from 'readline';
 import { TaskSession } from '../runtime/task-session.js';
+import {
+  applyWorktreeAnnotations,
+  parseWorktreeAnnotations,
+  stripWorktreeAnnotations,
+} from '../runtime/worktree.js';
+import { BackgroundAwareness } from './background-awareness.js';
+import { FixoMdWatcher } from '../context/fixo-md-watcher.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -37,15 +53,15 @@ const MAX_TOOL_CALLS = 25;
 const MAX_TOOL_RESULT_LENGTH = 30_000;
 
 const colors = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  cyan: '\x1b[36m',
-  red: '\x1b[31m',
-  gray: '\x1b[90m',
-  magenta: '\x1b[35m',
+  reset: C.RESET,
+  bold: C.BOLD,
+  dim: C.SNOW4,
+  green: C.GREEN,
+  yellow: C.YELLOW,
+  cyan: C.BLUE,
+  red: C.RED,
+  gray: C.SNOW3,
+  magenta: C.PURPLE,
 };
 
 export function evaluateInputIntent(task: string): 'CHAT_ONLY' | 'MUTATION' {
@@ -119,6 +135,24 @@ function formatPermissionPrompt(
 
 /* ──────────────────────── System Prompt ──────────────────────── */
 
+/**
+ * Build the `content` for the next user message. When the caller
+ * supplied `pendingAttachments` (today: images queued via the
+ * `/image` slash command), the content is a typed block array
+ * with the task text first and the attachments after. Otherwise
+ * the historical plain-string shape is preserved so providers
+ * without vision support stay on the simple wire format.
+ */
+function buildUserContent(context: AgentContext): string | ChatContentBlock[] {
+  const attachments = context.pendingAttachments;
+  if (!attachments || attachments.length === 0) {
+    return context.task;
+  }
+  const blocks: ChatContentBlock[] = [{ type: 'text', text: context.task }];
+  for (const a of attachments) blocks.push(a);
+  return blocks;
+}
+
 function buildSystemPrompt(
   repoMap: string,
   context: AgentContext,
@@ -139,11 +173,18 @@ function buildSystemPrompt(
       ``,
       `## Guidelines`,
       `1. ALWAYS read existing files before modifying them to understand current code.`,
-      `2. Write complete file contents — never use placeholders like "// ... rest of the file".`,
+      `2. For new files, write complete contents — never use placeholders like "// ... rest of the file". For edits to existing files, follow the Editing Discipline below.`,
       `3. After making changes, run the verification command if one is configured.`,
       `4. Keep your text responses concise. Focus on what you did and why.`,
       `5. If the task is ambiguous, ask a clarifying question instead of guessing.`,
       `6. Preserve existing code comments and formatting unless asked to change them.`,
+      ``,
+      `## Editing Discipline`,
+      `Pick the narrowest tool that fits the change. Rewriting a file you only need to tweak burns tokens, defeats the LSP pre-save granularity, and risks clobbering concurrent edits.`,
+      `- **Single-region edit on an existing file** (one symbol, one block, one line) → use \`str_replace\`. It is surgical and atomic. By default it errors when the snippet is non-unique — narrow the snippet, don't disable the check.`,
+      `- **Multi-region or hunked edit on an existing file** (several non-adjacent changes, or a diff you already have) → use \`apply_patch\` with a unified diff. One tool call, all hunks atomic.`,
+      `- **New file** OR **full rewrite** where the prior content is genuinely irrelevant → use \`write_file\`. This is the only sanctioned use of \`write_file\` on an existing path.`,
+      `Never use \`write_file\` to "edit" an existing file by rewriting it whole. If the diff is small enough to describe, it is small enough for \`str_replace\` or \`apply_patch\`.`,
     );
   } else {
     parts.push(
@@ -177,8 +218,25 @@ function buildSystemPrompt(
     parts.push(``, `## Project Instructions`, context.systemPromptOverride);
   }
 
+  // Add FIXO.md block (project-local instructions from the
+  // configured lookup chain). Telemetry is emitted in a
+  // microtask so the system-prompt build remains sync.
+  const { block: fixoBlock, result: fixoResult } = buildProjectInstructionsBlock(context.cwd);
+  if (fixoBlock.length > 0) {
+    parts.push(fixoBlock);
+    void recordFixoMdLoad(fixoResult);
+  }
+
   // Add repo map
   parts.push(``, repoMap);
+
+  // Append a one-line todo summary so the LLM always knows
+  // what the current plan is without having to call
+  // todo_read on every turn.
+  const todoSummary = summariseTodoList(loadTodoList(context.cwd));
+  if (todoSummary.length > 0) {
+    parts.push(``, `## Todo`, todoSummary);
+  }
 
   return parts.join('\n');
 }
@@ -227,7 +285,7 @@ export class SingleAgent {
       const messages: ChatMessage[] = [
         { role: 'system', content: trivialSystem },
         ...conversation.getMessages(),
-        { role: 'user', content: context.task },
+        { role: 'user', content: buildUserContent(context) },
       ];
 
       const streamRes = await this.streamResponse(messages, context.model, totalUsage);
@@ -262,7 +320,7 @@ export class SingleAgent {
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...conversation.getMessages(),
-      { role: 'user', content: context.task },
+      { role: 'user', content: buildUserContent(context) },
     ];
 
     /**
@@ -321,10 +379,48 @@ export class SingleAgent {
     const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
     let pendingSafetyDirective: string | null = null;
 
+    // Pillar 5 — per-turn background-job awareness. The LLM
+    // routinely forgets jobs it spawned earlier; we counter that by
+    // injecting a compact `[Background Jobs]` directive at the head
+    // of each chat() call. New terminal statuses are announced
+    // exactly once; still-running jobs are reminded every turn.
+    const backgroundAwareness = new BackgroundAwareness(context.cwd);
+
+    // Phase 4 — FIXO.md per-turn re-injection. The watcher captures
+    // the on-disk fingerprint at run start so the first check is a
+    // no-op (file already baked into the system prompt). Any
+    // mid-run create/update/delete surfaces as a [Project
+    // Instructions] directive on the next chat().
+    const fixoMdWatcher = new FixoMdWatcher(context.cwd);
+
     console.log(`\n${colors.cyan}${colors.bold}🤖 Agent working...${colors.reset}`);
 
     try {
       while (toolCallCount < MAX_TOOL_CALLS) {
+        // Background-job awareness: surface newly-finished and
+        // still-running jobs as a directive before each chat() call.
+        // Skipped on the first iteration because no async tools have
+        // run yet — saves tokens when the user's task doesn't
+        // involve background jobs at all.
+        if (toolCallCount > 0) {
+          const bgSnap = backgroundAwareness.snapshot();
+          const bgDirective = backgroundAwareness.formatDirective(bgSnap);
+          if (bgDirective) {
+            injectSafetyDirective(bgDirective);
+            backgroundAwareness.markAnnounced(bgSnap);
+          }
+
+          // FIXO.md mid-run change detection. Stats the active path
+          // and only injects when the on-disk fingerprint differs
+          // from what was baked into the system prompt. Skipped on
+          // iter 0 for the same reason as the job-awareness check.
+          const fixoMdWatch = fixoMdWatcher.check();
+          const fixoDirective = fixoMdWatcher.formatDirective(fixoMdWatch);
+          if (fixoDirective) {
+            injectSafetyDirective(fixoDirective);
+          }
+        }
+
         const spinner = promptsWrapper.spinner();
         spinner.start(`🤖 Agent thinking (turn ${toolCallCount + 1})...`);
         dashboard.emit({
@@ -353,7 +449,7 @@ export class SingleAgent {
               messages.push(
                 { role: 'system', content: systemPrompt },
                 ...conversation.getMessages(),
-                { role: 'user', content: context.task },
+                { role: 'user', content: buildUserContent(context) },
               );
               continue; // Retry the LLM call
             }

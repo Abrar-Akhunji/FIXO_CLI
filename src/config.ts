@@ -77,6 +77,13 @@ export interface SafetyConfig {
   largeFileGateBytes: number;
   /** Maximum line count before read_file is gated. Defaults to 350. */
   largeFileGateLines: number;
+  /**
+   * Predictive context-budget gate (Phase 4). When set to a value in
+   * (0, 1], `read_file` projects the token cost of the read against
+   * the model's input window and defers if projected total exceeds
+   * this fraction. Default 0.85. Set to 1.0 to disable.
+   */
+  predictiveBudgetPct?: number;
 }
 
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */

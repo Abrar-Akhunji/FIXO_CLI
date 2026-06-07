@@ -62,6 +62,20 @@ const DEFAULT_CONTEXT_LIMIT = 120_000;
 /** Reserve this many tokens for the output response */
 const OUTPUT_TOKEN_RESERVATION = 8_000;
 
+/**
+ * Resolve the *usable input* context limit for a model identifier.
+ * The result is the model's full window minus {@link OUTPUT_TOKEN_RESERVATION}
+ * so callers that only care about how much room they have left for input
+ * tokens (predictive gate, budget planner) can use the answer directly.
+ */
+export function resolveModelContextLimit(model: string | undefined | null): number {
+  if (!model) return DEFAULT_CONTEXT_LIMIT - OUTPUT_TOKEN_RESERVATION;
+  for (const [pattern, limit] of MODEL_CONTEXT_LIMITS) {
+    if (pattern.test(model)) return limit - OUTPUT_TOKEN_RESERVATION;
+  }
+  return DEFAULT_CONTEXT_LIMIT - OUTPUT_TOKEN_RESERVATION;
+}
+
 /** Maximum token budget for conversation history (usable input space) */
 const DEFAULT_MAX_TOKEN_BUDGET = 100_000;
 
@@ -117,6 +131,12 @@ export class ConversationManager {
   private summary: string = '';
   private contextLimit: number = DEFAULT_CONTEXT_LIMIT;
   private _lastCompactionInfo: { messagesBefore: number; tokensFreed: number } | null = null;
+  /**
+   * When set (>0), `getTotalTokens()` returns this value instead of
+   * summing the history. Used by `--resume` so the restored session
+   * shows the same token count the user saw at save time.
+   */
+  private tokenOverride: number = 0;
 
   constructor(maxTokenBudget: number = DEFAULT_MAX_TOKEN_BUDGET) {
     this.maxTokenBudget = maxTokenBudget;
@@ -178,10 +198,29 @@ export class ConversationManager {
    * Calculate the total estimated token count across the entire history.
    */
   getTotalTokens(): number {
+    if (this.tokenOverride > 0) return this.tokenOverride;
     return this.history.reduce(
       (sum, msg) => sum + this.estimateMessageTokens(msg),
       0,
     );
+  }
+
+  /**
+   * Restore the conversation from a previously-saved snapshot. Replaces
+   * the entire history, summary, and token override atomically. The
+   * `tokens` argument is the value recorded at save time; subsequent
+   * reads of `getTotalTokens()` will prefer this override so the
+   * resumed session shows the same context-usage meter the user saw
+   * when they saved.
+   */
+  restoreFromSnapshot(
+    messages: ReadonlyArray<ChatMessage>,
+    summary: string,
+    tokens: number,
+  ): void {
+    this.history = [...messages];
+    this.summary = summary;
+    this.tokenOverride = Math.max(0, tokens);
   }
 
   /**
