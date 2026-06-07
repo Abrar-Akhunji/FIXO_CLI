@@ -31,6 +31,18 @@
     "claude-code-alternative"
   ],
   "license": "Apache-2.0",
+  "author": "Abrar Akhunji",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abrar-Akhunji/FIXO_CLI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Abrar-Akhunji/FIXO_CLI/issues"
+  },
+  "homepage": "https://github.com/Abrar-Akhunji/FIXO_CLI#readme",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "dependencies": {
     "@clack/prompts": "^0.9.0",
     "cheerio": "^1.2.0",
