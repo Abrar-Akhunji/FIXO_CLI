@@ -517,8 +517,7 @@ renderer.mount();
 export const COMMANDS_WITH_DESC = [
   // Core
   { cmd: '/help', desc: 'Show all commands and usage' },
-  { cmd: '/exit', desc: 'Exit FixO CLI' },
-  { cmd: '/quit', desc: 'Exit FixO CLI' },
+  { cmd: '/exit', desc: 'Exit FixO CLI (alias: /quit)' },
   // Model & Providers
   { cmd: '/model', desc: 'Interactive model picker or set model' },
   { cmd: '/providers', desc: 'Manage AI provider API keys (add/list/remove/test)' },
@@ -631,8 +630,7 @@ export function printHelp(): void {
   line('/variant',   '',              'Toggle theme color variant');
 
   console.log(`\n${c.snow}${c.bold}🚪 Exit${c.reset}`);
-  line('/exit',      '',              'Exit FixO CLI cleanly');
-  line('/quit',      '',              'Alias for /exit');
+  line('/exit',      '',              'Exit FixO CLI cleanly (alias: /quit)');
 
   console.log(`\n${c.dim}${'─'.repeat(w)}${c.reset}`);
   console.log(`${c.dim}  Shell commands   prefix with !  e.g. !npm test, !ls -la${c.reset}`);

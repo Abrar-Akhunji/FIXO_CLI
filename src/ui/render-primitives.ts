@@ -107,7 +107,11 @@ export function renderStatusBar(state: CLIState): void {
     C.VOID3,
   );
   const leftSide = ` ${modePill} ${routingPill} ${modelPill} ${branchPill}`;
-  const rightSide = `${C.SNOW4}ctx ${state.contextPercent}%${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}${state.providersCount} providers${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}${state.transport}${C.RESET} `;
+  // Clamp defensively — callers in `prompt.ts` already clamp at the
+  // source, but the renderer should not assume.
+  const usedPct = Math.max(0, Math.min(100, Math.round(state.contextPercent)));
+  const remPct = 100 - usedPct;
+  const rightSide = `${C.SNOW4}ctx: ${usedPct}% used · ${remPct}% remaining${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}${state.providersCount} providers${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}${state.transport}${C.RESET} `;
   const width = cols();
   const leftLen = visLen(leftSide);
   const rightLen = visLen(rightSide);

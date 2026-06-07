@@ -267,6 +267,29 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     process.stdout.write('\n');
   };
 
+  // Surface the result of a live model fetch as a one-line status.
+  // Invoked from /providers add and /providers test so the user
+  // immediately sees whether the live API was reachable or whether
+  // the picker will fall back to the cached / registry list.
+  const refreshModelsForProvider = async (name: string): Promise<void> => {
+    try {
+      const result = await ProvidersManager.fetchRemoteModels(name);
+      if (result.source === 'live') {
+        console.log(`${c.green}✓ Fetched ${result.models.length} models from live API.${c.reset}`);
+      } else if (result.source === 'cache') {
+        const ageHours = Math.max(
+          0,
+          Math.round((Date.now() - Date.parse(result.fetchedAt)) / (60 * 60 * 1000)),
+        );
+        console.log(`${c.yellow}⚠ Live fetch unavailable — using cached list (~${ageHours}h old).${c.reset}`);
+      } else {
+        console.log(`${c.yellow}⚠ Live fetch failed — using built-in registry list (marked [unverified] in /model).${c.reset}`);
+      }
+    } catch (err: any) {
+      console.log(`${c.dim}  (model list refresh skipped: ${err?.message ?? err})${c.reset}`);
+    }
+  };
+
   // ──── Mouse Reporting Helpers ────
   function enableMouseReporting() {
     if (process.stdout.isTTY && !mouseReportingEnabled) {
@@ -858,19 +881,28 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             const hasKey = ProvidersManager.has(def.name);
             const keyStatus = hasKey ? `${c.green}[key ✓]${c.reset}` : `${c.red}[no key]${c.reset}`;
 
+            // Prefer the cached live model list; fall back to the
+            // registry list (tagged `[unverified]`) when no fresh
+            // cache exists. Drops the synthetic "(free)" suffix
+            // since we no longer know that without provider
+            // metadata.
+            const cached = ProvidersManager.getCachedModels(def.name);
+            const modelList: string[] = cached?.models?.length ? cached.models : def.models;
+            const sourceSuffix = cached?.source === 'live'
+              ? ''
+              : ` ${c.dim}[unverified]${c.reset}`;
+
             rl.pause();
             const picked = await p.select({
-              message: `Select a model from ${c.bold}${def.displayName}${c.reset} ${keyStatus}:`,
-              options: def.models.map(m => {
-                const isFree = m.includes('free') || m.includes('chat') || def.name === 'zen';
-                const label = isFree ? `${m} (free)` : m;
+              message: `Select a model from ${c.bold}${def.displayName}${c.reset} ${keyStatus}${sourceSuffix}:`,
+              options: modelList.map(m => {
                 return {
                   value: m,
-                  label,
+                  label: m,
                   hint: m === currentModel ? 'currently selected' : ''
                 };
               }),
-              initialValue: def.models.includes(currentModel) ? currentModel : undefined,
+              initialValue: modelList.includes(currentModel) ? currentModel : undefined,
             });
             rl.resume();
 
@@ -1511,7 +1543,103 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
         case '/providers': {
           const sub = args[0];
-          if (!sub || sub === 'list') {
+
+          // ── Interactive flow (bare `/providers`): mirrors the
+          // /model picker shape. The user picks a provider, then
+          // an action, then enters a masked API key via p.password
+          // when the action is add/update. The legacy text routes
+          // below remain unchanged for muscle-memory + scripting.
+          if (!sub) {
+            rl.pause();
+            const pickedProvider = await p.select({
+              message: 'Select an AI provider:',
+              options: PROVIDER_REGISTRY.map(def => ({
+                value: def.name,
+                label: def.displayName,
+                hint: ProvidersManager.has(def.name) ? '[key ✓]' : '[no key]',
+              })),
+            });
+            rl.resume();
+            if (p.isCancel(pickedProvider)) {
+              console.log(`\n${c.dim}/providers cancelled.${c.reset}`);
+              return;
+            }
+
+            const def = ProvidersManager.getDefinition(pickedProvider as string);
+            if (!def) {
+              console.log(`\n${c.red}✗ Unknown provider: ${pickedProvider}${c.reset}`);
+              return;
+            }
+            const hasKey = ProvidersManager.has(def.name);
+
+            rl.pause();
+            const action = await p.select({
+              message: `${def.displayName} — choose an action:`,
+              options: [
+                { value: 'add',    label: hasKey ? 'Update API key'      : 'Add API key' },
+                { value: 'test',   label: 'Test connection',                hint: hasKey ? '' : 'requires a key' },
+                { value: 'remove', label: 'Remove API key',                 hint: hasKey ? '' : 'no key configured' },
+                { value: 'cancel', label: 'Cancel' },
+              ],
+            });
+            rl.resume();
+            if (p.isCancel(action) || action === 'cancel') {
+              console.log(`\n${c.dim}/providers cancelled.${c.reset}`);
+              return;
+            }
+
+            if (action === 'add') {
+              console.log(`${c.dim}  Get your API key at: ${def.docsUrl}${c.reset}`);
+              rl.pause();
+              const key = await p.password({
+                message: `Enter your ${def.displayName} API key:`,
+                validate: v => !v?.trim() ? 'API key is required' : undefined,
+              });
+              rl.resume();
+              if (p.isCancel(key)) {
+                console.log(`\n${c.dim}/providers cancelled.${c.reset}`);
+                return;
+              }
+              ProvidersManager.add(def.name, key as string);
+              console.log(`\n${c.green}✓ ${def.displayName} API key saved securely to ~/.fixocli/providers.json${c.reset}`);
+              await refreshModelsForProvider(def.name);
+              return;
+            }
+
+            if (action === 'remove') {
+              if (!hasKey) {
+                console.log(`\n${c.yellow}No key configured for ${def.displayName}.${c.reset}`);
+                return;
+              }
+              rl.pause();
+              const confirmed = await p.confirm({
+                message: `Remove API key for ${def.displayName}?`,
+                initialValue: false,
+              });
+              rl.resume();
+              if (!p.isCancel(confirmed) && confirmed) {
+                const removed = ProvidersManager.remove(def.name);
+                console.log(removed
+                  ? `\n${c.green}✓ Removed API key for ${def.displayName}.${c.reset}`
+                  : `\n${c.yellow}No key found for provider: ${def.name}${c.reset}`);
+              }
+              return;
+            }
+
+            if (action === 'test') {
+              if (!hasKey) {
+                console.log(`\n${c.yellow}No key configured for ${def.displayName}. Add one first.${c.reset}`);
+                return;
+              }
+              console.log(`\n${c.dim}Testing connection to ${def.displayName} via live /models fetch…${c.reset}`);
+              await refreshModelsForProvider(def.name);
+              return;
+            }
+
+            return;
+          }
+
+          if (sub === 'list') {
             const list = ProvidersManager.list();
             if (list.length === 0) {
               console.log(`\n${c.yellow}No providers configured.${c.reset}`);
@@ -1559,7 +1687,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             ProvidersManager.add(name, apiKeyInput as string);
             console.log(`\n${c.green}✓ ${def.displayName} API key saved securely to ~/.fixocli/providers.json${c.reset}`);
             console.log(`${c.dim}  FixO will now route ${def.displayName} requests directly (bypassing the SaaS proxy).${c.reset}`);
-            console.log(`${c.dim}  Use /model list to see available ${def.displayName} models.${c.reset}`);
+            await refreshModelsForProvider(name);
             return;
           }
 
@@ -1614,6 +1742,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               });
               if (resp.ok) {
                 console.log(`${c.green}✓ Connection to ${directConf.displayName} successful! (HTTP ${resp.status})${c.reset}`);
+                // Warm the cache so /model picker shows live IDs.
+                await refreshModelsForProvider(name);
               } else {
                 const text = await resp.text().catch(() => '');
                 console.log(`${c.red}✗ ${directConf.displayName} returned HTTP ${resp.status}${text ? ': ' + text.slice(0, 100) : ''}${c.reset}`);

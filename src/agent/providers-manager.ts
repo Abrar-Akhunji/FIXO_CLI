@@ -218,6 +218,91 @@ function maskKey(key: string): string {
   return key.slice(0, 6) + '••••••' + key.slice(-4);
 }
 
+/* ──────────────────────── Models Cache ──────────────────────── */
+
+/**
+ * On-disk cache of the live model list returned by each provider's
+ * `/models` endpoint. The cache is per-provider and bounded by
+ * `MODELS_CACHE_TTL_MS`. Live fetches refresh the entry; stale or
+ * missing entries fall back to the registry `models[]` array with
+ * a `registry-fallback` source tag so the UI can show an
+ * `[unverified]` hint.
+ */
+export interface ProviderModelsCacheEntry {
+  models: string[];
+  fetchedAt: string; // ISO timestamp
+  source: 'live' | 'registry-fallback';
+}
+
+type ProviderModelsCacheStore = Record<string, ProviderModelsCacheEntry>;
+
+const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function getModelsCachePath(): string {
+  return path.join(os.homedir(), '.fixocli', 'models-cache.json');
+}
+
+function loadModelsCache(): ProviderModelsCacheStore {
+  const filePath = getModelsCachePath();
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw) as ProviderModelsCacheStore;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveModelsCache(store: ProviderModelsCacheStore): void {
+  const dir = path.join(os.homedir(), '.fixocli');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const filePath = getModelsCachePath();
+  fs.writeFileSync(filePath, JSON.stringify(store, null, 2) + '\n', {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  try { fs.chmodSync(filePath, 0o600); } catch { /* ignore */ }
+}
+
+/**
+ * Build the same provider-specific headers that the existing
+ * `/providers test` flow uses. Kept here so the live-fetch path
+ * and the legacy test path can share one source of truth.
+ */
+function buildModelsRequestHeaders(name: string, apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${apiKey}`,
+  };
+  if (name === 'zen' || name === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://opencode.ai/';
+    headers['X-Title'] = 'opencode';
+  } else if (name === 'nvidia') {
+    headers['HTTP-Referer'] = 'https://opencode.ai/';
+    headers['X-Title'] = 'opencode';
+    headers['X-BILLING-INVOKE-ORIGIN'] = 'OpenCode';
+  } else if (name === 'cerebras') {
+    headers['X-Cerebras-3rd-Party-Integration'] = 'opencode';
+  }
+  return headers;
+}
+
+interface OpenAIModelsResponse {
+  data?: Array<{ id?: unknown }>;
+}
+
+function parseModelsResponse(payload: unknown): string[] | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const data = (payload as OpenAIModelsResponse).data;
+  if (!Array.isArray(data)) return null;
+  const ids = data
+    .map(m => (m && typeof m === 'object' && typeof m.id === 'string') ? m.id : null)
+    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+  return ids.length > 0 ? ids : null;
+}
+
 export const ProvidersManager = {
   /** List all connected providers with masked keys. */
   list(): Array<{ name: string; displayName: string; maskedKey: string; addedAt: string }> {
@@ -357,5 +442,98 @@ export const ProvidersManager = {
   /** Get all registered provider definitions. */
   getAllDefinitions(): ProviderDefinition[] {
     return PROVIDER_REGISTRY;
+  },
+
+  /**
+   * Read the cached model list for `name`. Returns `null` when no
+   * entry exists or when the entry is stale (older than
+   * {@link MODELS_CACHE_TTL_MS}). Synchronous + read-only so the
+   * `/model` picker can call it inline without awaiting.
+   */
+  getCachedModels(name: string): ProviderModelsCacheEntry | null {
+    const store = loadModelsCache();
+    const entry = store[name];
+    if (!entry) return null;
+    const fetchedAtMs = Date.parse(entry.fetchedAt);
+    if (!Number.isFinite(fetchedAtMs)) return null;
+    if (Date.now() - fetchedAtMs > MODELS_CACHE_TTL_MS) return null;
+    return entry;
+  },
+
+  /**
+   * Fetch the live model list from the provider's `/models`
+   * endpoint and persist it to the on-disk cache. Routes through
+   * the credential vault so the raw API key never escapes into a
+   * wider stack frame.
+   *
+   * Resolution order:
+   *   1. live fetch (success → cache + return `source: 'live'`).
+   *   2. fresh cache hit (within TTL) → `source: 'cache'`.
+   *   3. registry `models[]` fallback → `source: 'registry-fallback'`.
+   *
+   * Never throws — failure modes degrade through the layers above.
+   */
+  async fetchRemoteModels(name: string): Promise<{
+    models: string[];
+    source: 'live' | 'cache' | 'registry-fallback';
+    fetchedAt: string;
+  }> {
+    const def = this.getDefinition(name);
+    if (!def) {
+      const fallback = this.getCachedModels(name);
+      if (fallback) {
+        return { models: fallback.models, source: 'cache', fetchedAt: fallback.fetchedAt };
+      }
+      return { models: [], source: 'registry-fallback', fetchedAt: new Date().toISOString() };
+    }
+
+    const registryFallback = (): { models: string[]; source: 'registry-fallback'; fetchedAt: string } => {
+      const now = new Date().toISOString();
+      // Persist a synthetic entry tagged registry-fallback so the
+      // /model picker can render the `[unverified]` hint without
+      // having to know whether a live fetch was ever attempted.
+      const store = loadModelsCache();
+      store[name] = { models: def.models.slice(), fetchedAt: now, source: 'registry-fallback' };
+      try { saveModelsCache(store); } catch { /* ignore */ }
+      return { models: def.models.slice(), source: 'registry-fallback', fetchedAt: now };
+    };
+
+    // No key on disk → cannot live-fetch; fall through to cache → registry.
+    if (!this.has(name)) {
+      const cached = this.getCachedModels(name);
+      if (cached) {
+        return { models: cached.models, source: 'cache', fetchedAt: cached.fetchedAt };
+      }
+      return registryFallback();
+    }
+
+    const liveResult = await this.withDirectCredential(name, async (cred) => {
+      try {
+        const headers = buildModelsRequestHeaders(name, cred.apiKey);
+        const resp = await fetch(`${cred.baseUrl}/models`, {
+          headers,
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!resp.ok) return null;
+        const payload = await resp.json().catch(() => null);
+        const ids = parseModelsResponse(payload);
+        if (!ids) return null;
+        const now = new Date().toISOString();
+        const store = loadModelsCache();
+        store[name] = { models: ids, fetchedAt: now, source: 'live' };
+        saveModelsCache(store);
+        return { models: ids, source: 'live' as const, fetchedAt: now };
+      } catch {
+        return null;
+      }
+    });
+
+    if (liveResult) return liveResult;
+
+    const cached = this.getCachedModels(name);
+    if (cached) {
+      return { models: cached.models, source: 'cache', fetchedAt: cached.fetchedAt };
+    }
+    return registryFallback();
   },
 };

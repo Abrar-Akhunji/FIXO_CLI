@@ -29,6 +29,7 @@ import {
 } from '../ui/render-primitives.js';
 import { renderSessionHeader } from '../ui/session-header.js';
 import { renderPlan, type PlanStep } from '../ui/plan-renderer.js';
+import { COMMANDS_WITH_DESC } from '../ui/render.js';
 
 /* ──────────────────────── stdout capture ──────────────────────── */
 
@@ -127,6 +128,16 @@ test('renderLogo writes logo + tagline + blank line to stdout', () => {
   assert.ok(out.endsWith('\n\n'));
 });
 
+/* ──────────────────────── Autocomplete commands list ──────────────────────── */
+
+test('COMMANDS_WITH_DESC exposes /exit but not /quit (alias kept handler-only)', () => {
+  const cmds = COMMANDS_WITH_DESC.map(c => c.cmd);
+  assert.equal(cmds.filter(c => c === '/exit').length, 1, 'exactly one /exit entry');
+  assert.equal(cmds.filter(c => c === '/quit').length, 0, 'no /quit entry in autocomplete list');
+  const exitEntry = COMMANDS_WITH_DESC.find(c => c.cmd === '/exit')!;
+  assert.match(exitEntry.desc, /quit/i, '/exit description mentions /quit alias');
+});
+
 /* ──────────────────────── Status bar ──────────────────────── */
 
 test('renderStatusBar writes a single line with `\r` and the four pills', () => {
@@ -146,9 +157,30 @@ test('renderStatusBar writes a single line with `\r` and the four pills', () => 
   assert.ok(captured.includes('auto'));
   assert.ok(captured.includes('gemini-2.5-flash'));
   assert.ok(captured.includes('main'));
-  assert.ok(captured.includes('ctx 12%'));
+  assert.ok(captured.includes('ctx: 12% used'));
+  assert.ok(captured.includes('88% remaining'));
   assert.ok(captured.includes('3 providers'));
   assert.ok(captured.includes('freellmapi'));
+});
+
+test('renderStatusBar clamps contextPercent above 100 and below 0', () => {
+  const baseState: CLIState = {
+    mode: 'BUILD',
+    routing: 'auto',
+    model: 'gemini-2.5-flash',
+    branch: 'main',
+    contextPercent: 150,
+    providersCount: 0,
+    transport: 'freellmapi',
+  };
+  renderStatusBar(baseState);
+  assert.ok(captured.includes('100% used'));
+  assert.ok(captured.includes('0% remaining'));
+
+  captured = '';
+  renderStatusBar({ ...baseState, contextPercent: -5 });
+  assert.ok(captured.includes('0% used'));
+  assert.ok(captured.includes('100% remaining'));
 });
 
 /* ──────────────────────── Provider list ──────────────────────── */
