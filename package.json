@@ -41,7 +41,7 @@
   },
   "homepage": "https://github.com/Abrar-Akhunji/FIXO_CLI#readme",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@clack/prompts": "^0.9.0",

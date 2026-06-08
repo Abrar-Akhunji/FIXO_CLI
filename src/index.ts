@@ -210,10 +210,10 @@ async function main(): Promise<void> {
   renderLogo();
   renderCommandGrid();
 
-  // Node version check (major >= 24)
+  // Node version check (major >= 20)
   const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
-  if (nodeMajor < 24) {
-    console.error(`${C.RED}Error: FixO CLI requires Node.js version 24.0.0 or higher (current version: ${process.version}).${C.RESET}`);
+  if (nodeMajor < 20) {
+    console.error(`${C.RED}Error: FixO CLI requires Node.js version 20.0.0 or higher (current version: ${process.version}).${C.RESET}`);
     process.exit(1);
   }
 
