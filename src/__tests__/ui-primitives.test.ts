@@ -23,6 +23,7 @@ import {
   renderCostLine,
   renderCommandGrid,
   renderModeSelector,
+  startInlineToolSpinner,
   type CLIState,
   type Provider,
   type ToolCallRender,
@@ -248,6 +249,32 @@ test('renderToolCall pads the tool name to 12 chars for alignment', () => {
   // The pattern is: 2 spaces + icon + 2 spaces + name (12 chars) + 2 spaces + detail.
   const m = stripped.match(/  ✦  (.{12})  /);
   assert.ok(m, `expected '  ✦  <12-char-name>  ' in: ${JSON.stringify(stripped)}`);
+});
+
+test('startInlineToolSpinner: succeed() replaces ⠋ with ✔ summary on one line', () => {
+  // Non-TTY mode keeps the test deterministic (no ticking, no
+  // setInterval). The handle uses `\r\x1b[K` to overwrite in place.
+  Object.defineProperty(process.stdout, 'isTTY', { value: undefined, configurable: true });
+  const handle = startInlineToolSpinner({ kind: 'read', name: 'Read', detail: 'src/index.ts' });
+  // Initial frame: spinner icon + tool name + detail + ellipsis.
+  const stripped = captured.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
+  assert.match(stripped, /⠋\s+Read\s+src\/index\.ts…/);
+  // Finalise → ✔ marker + summary on the same overwriting line.
+  handle.succeed('124 lines (4ms)');
+  const finalStripped = captured.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
+  assert.match(finalStripped, /✔\s+Read\s+124 lines \(4ms\)/);
+  // The line ends with a newline so the next output starts fresh.
+  assert.ok(captured.endsWith('\n'));
+});
+
+test('startInlineToolSpinner: fail() emits ✗ + red summary', () => {
+  Object.defineProperty(process.stdout, 'isTTY', { value: undefined, configurable: true });
+  const handle = startInlineToolSpinner({ kind: 'bash', name: 'Run', detail: 'npm test' });
+  handle.fail('exit code 1');
+  const stripped = captured.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
+  assert.match(stripped, /✗\s+Run\s+exit code 1/);
+  // The failure-state colour escape (red) is present in the raw output.
+  assert.ok(captured.includes(C.RED));
 });
 
 /* ──────────────────────── Routing banner ──────────────────────── */

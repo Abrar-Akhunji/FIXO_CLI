@@ -56,6 +56,23 @@ export interface SemanticLoopTrapPolicy {
   hardAbortCount: number;
 }
 
+/**
+ * Tool-call budget policy. The agent loop runs at most `softLimit`
+ * tool calls per task. When `autoExtend` is enabled, the agent may
+ * extend up to `hardLimit` as long as the semantic loop detector
+ * has not warned — i.e. as long as the agent is still making
+ * forward progress rather than thrashing on the same file. The
+ * hard limit is the absolute ceiling.
+ */
+export interface ToolCallBudgetPolicy {
+  /** Initial cap. Defaults to 50. */
+  softLimit: number;
+  /** Absolute ceiling reachable via auto-extension. Defaults to 100. */
+  hardLimit: number;
+  /** When true, the soft limit silently extends if no loop is detected. */
+  autoExtend: boolean;
+}
+
 /** Pre-save gate severity. */
 export type LspPreSaveMode = 'off' | 'warn' | 'block' | 'sandbox-mock';
 
@@ -84,6 +101,8 @@ export interface SafetyConfig {
    * this fraction. Default 0.85. Set to 1.0 to disable.
    */
   predictiveBudgetPct?: number;
+  /** Tool-call budget — see {@link ToolCallBudgetPolicy}. */
+  toolCalls: ToolCallBudgetPolicy;
 }
 
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
@@ -217,6 +236,11 @@ export function getDefaultConfig(): FreeLLMConfig {
         },
         largeFileGateBytes: 15 * 1024,
         largeFileGateLines: 350,
+        toolCalls: {
+          softLimit: 50,
+          hardLimit: 100,
+          autoExtend: true,
+        },
       },
     },
     _firstRunComplete: false,
@@ -249,6 +273,8 @@ export function loadConfig(): FreeLLMConfig {
     const parsedSemanticLoopTrap =
       (parsedSafety as { semanticLoopTrap?: Partial<SemanticLoopTrapPolicy> })
         .semanticLoopTrap ?? {};
+    const parsedToolCalls =
+      (parsedSafety as { toolCalls?: Partial<ToolCallBudgetPolicy> }).toolCalls ?? {};
     return {
       ...defaults,
       ...parsed,
@@ -269,6 +295,10 @@ export function loadConfig(): FreeLLMConfig {
           semanticLoopTrap: {
             ...defaults.preferences.safety.semanticLoopTrap,
             ...parsedSemanticLoopTrap,
+          },
+          toolCalls: {
+            ...defaults.preferences.safety.toolCalls,
+            ...parsedToolCalls,
           },
         },
       },

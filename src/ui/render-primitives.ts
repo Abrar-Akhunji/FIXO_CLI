@@ -192,6 +192,67 @@ export function renderToolCall(tool: ToolCallRender): void {
   safeWriteLine(`  ${meta.color}${meta.icon}${C.RESET}  ${C.SNOW3}${padded}${C.RESET}  ${C.SNOW4}${tool.detail}${C.RESET}`);
 }
 
+/* ──────────────────────── Inline tool spinner ──────────────────────── */
+
+const SPINNER_DOTS: ReadonlyArray<string> = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+export interface InlineSpinnerHandle {
+  /** Stop and replace the spinner with a ✔ success summary. */
+  succeed(summary: string): void;
+  /** Stop and replace the spinner with a ✗ failure summary. */
+  fail(summary: string): void;
+  /** Stop and clear the spinner with no replacement (rare). */
+  clear(): void;
+}
+
+/**
+ * Start a single-line tool spinner. The line is `⠋ <name>: <detail>...`
+ * rendered with carriage-return so subsequent ticks overwrite in place.
+ * Call `.succeed()` / `.fail()` on the returned handle when the work
+ * completes — the spinner is erased and replaced by a one-line summary.
+ *
+ * Non-TTY callers (tests, redirected pipes) get a single static line
+ * with no ticking, and the summary replaces it via `\r\x1b[K` on the
+ * same line. This keeps test snapshots deterministic.
+ */
+export function startInlineToolSpinner(tool: ToolCallRender): InlineSpinnerHandle {
+  const meta = TOOL_ICON[tool.kind];
+  const isTTY = process.stdout.isTTY === true;
+  let frame = 0;
+  const draw = (icon: string, color: string): void => {
+    safeWrite(
+      `\r\x1b[K  ${color}${icon}${C.RESET}  ${C.SNOW3}${tool.name}${C.RESET}  ${C.SNOW4}${tool.detail}…${C.RESET}`,
+    );
+  };
+  draw(SPINNER_DOTS[0]!, meta.color);
+  let timer: NodeJS.Timeout | null = null;
+  if (isTTY) {
+    timer = setInterval(() => {
+      frame = (frame + 1) % SPINNER_DOTS.length;
+      draw(SPINNER_DOTS[frame]!, meta.color);
+    }, 80);
+  }
+  let stopped = false;
+  const finish = (icon: string, color: string, summary: string): void => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    safeWrite(
+      `\r\x1b[K  ${color}${icon}${C.RESET}  ${C.SNOW3}${tool.name}${C.RESET}  ${C.SNOW4}${summary}${C.RESET}\n`,
+    );
+  };
+  return {
+    succeed(summary: string): void { finish('✔', C.GREEN, summary); },
+    fail(summary: string): void { finish('✗', C.RED, summary); },
+    clear(): void {
+      if (stopped) return;
+      stopped = true;
+      if (timer) { clearInterval(timer); timer = null; }
+      safeWrite('\r\x1b[K');
+    },
+  };
+}
+
 /* ──────────────────────── Routing banner ──────────────────────── */
 
 /**

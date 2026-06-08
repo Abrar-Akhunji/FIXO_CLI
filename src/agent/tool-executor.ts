@@ -7,7 +7,12 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import type { ChatToolDefinition } from '../shared/types.js';
 import { colors } from '../ui/colors.js';
-import { renderToolCall } from '../ui/render-primitives.js';
+import {
+  renderToolCall,
+  startInlineToolSpinner,
+  type InlineSpinnerHandle,
+  type ToolCallRender,
+} from '../ui/render-primitives.js';
 import { WorkspaceGuard } from '../workspace-guard.js';
 import type { TaskSession } from '../runtime/task-session.js';
 import { classifyCommand, type PolicyProfile, type RiskLevel } from '../runtime/policy.js';
@@ -1046,6 +1051,17 @@ export async function executeTool(
     isWrite: false,
   };
 
+  // Single inline spinner shared across the whole tool invocation —
+  // each case under the switch below calls `setSpinner` exactly once,
+  // and the outer try/finally converts the spinner into a ✔ or ✗
+  // summary line when the tool completes (or throws).
+  let inlineSpinner: InlineSpinnerHandle | null = null;
+  const toolStartedAt = Date.now();
+  const setSpinner = (tool: ToolCallRender): void => {
+    if (inlineSpinner) inlineSpinner.clear();
+    inlineSpinner = startInlineToolSpinner(tool);
+  };
+
   try {
     const policy = options.policy ?? options.session?.policy ?? 'shell-confirm';
 
@@ -1169,10 +1185,12 @@ export async function executeTool(
       return event;
     }
     options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
+
     switch (name) {
       case 'read_file': {
         const guard = new WorkspaceGuard(cwd);
         const resolved = guard.resolve(args.path, 'file');
+        setSpinner({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });
         const budgetPct = options.safety?.predictiveBudgetPct ?? DEFAULT_PREDICTIVE_BUDGET_PCT;
         // Skip the predictive gate when it is explicitly disabled
         // (>=1.0) or when no model is configured (we cannot map
@@ -1184,7 +1202,7 @@ export async function executeTool(
           if (deferDecision.defer) {
             event.result = formatPredictiveGateDirective(args.path, estimate, deferDecision);
             event.affectedPath = resolved;
-            renderToolCall({ kind: 'read', name: 'Read', detail: `${shortenPath(args.path, cwd)} (deferred — predictive gate)` });
+            setSpinner({ kind: 'read', name: 'Read', detail: `${shortenPath(args.path, cwd)} (deferred — predictive gate)` });
             options.session?.record('predictive_gate_fired', {
               path: args.path,
               projectedTokens: estimate.projectedTokens,
@@ -1202,31 +1220,30 @@ export async function executeTool(
           options.safety?.largeFileGateLines,
         );
         event.affectedPath = resolved;
-        renderToolCall({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });
         break;
       }
 
       case 'extract_symbols':
+        setSpinner({ kind: 'read', name: 'Symbols', detail: shortenPath(args.path, cwd) });
         event.result = await executeExtractSymbols(args.path, cwd, options.session);
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
-        renderToolCall({ kind: 'read', name: 'Symbols', detail: shortenPath(args.path, cwd) });
         break;
 
       case 'extract_imports':
+        setSpinner({ kind: 'read', name: 'Imports', detail: shortenPath(args.path, cwd) });
         event.result = await executeExtractImports(args.path, cwd, options.session);
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
-        renderToolCall({ kind: 'read', name: 'Imports', detail: shortenPath(args.path, cwd) });
         break;
 
       case 'write_file':
+        setSpinner({ kind: 'write', name: 'Write', detail: shortenPath(args.path, cwd) });
         event.result = await executeWriteFile(args.path, args.content, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
-        renderToolCall({ kind: 'write', name: 'Write', detail: shortenPath(args.path, cwd) });
         break;
 
       case 'run_command':
-        renderToolCall({ kind: 'bash', name: 'Run', detail: truncate(args.command, 60) });
+        setSpinner({ kind: 'bash', name: 'Run', detail: truncate(args.command, 60) });
         let safetyResult = { safe: true, reason: '' };
         try {
           const { isCommandSafe } = await import('./command-parser.js');
@@ -1266,69 +1283,69 @@ export async function executeTool(
         break;
 
       case 'search_code':
-        renderToolCall({ kind: 'search', name: 'Search', detail: `"${truncate(args.query, 40)}" in ${args.path ?? '.'}` });
+        setSpinner({ kind: 'search', name: 'Search', detail: `"${truncate(args.query, 40)}" in ${args.path ?? '.'}` });
         event.result = executeSearchCode(args.query, args.path, args.file_pattern, cwd);
         break;
 
       case 'list_dir':
-        renderToolCall({ kind: 'read', name: 'List', detail: args.path ?? '.' });
+        setSpinner({ kind: 'read', name: 'List', detail: args.path ?? '.' });
         event.result = executeListDir(args.path, cwd);
         break;
 
       case 'delete_file':
-        renderToolCall({ kind: 'write', name: 'Delete', detail: shortenPath(args.path, cwd) });
+        setSpinner({ kind: 'write', name: 'Delete', detail: shortenPath(args.path, cwd) });
         event.result = executeDeleteFile(args.path, cwd, options.session);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'apply_patch':
-        renderToolCall({ kind: 'write', name: 'Patch', detail: 'unified diff' });
+        setSpinner({ kind: 'write', name: 'Patch', detail: 'unified diff' });
         event.result = await executeApplyPatch(args.patch, cwd, options);
         event.isWrite = true;
         break;
 
       case 'replace_range':
-        renderToolCall({ kind: 'write', name: 'Replace', detail: shortenPath(args.path, cwd) });
+        setSpinner({ kind: 'write', name: 'Replace', detail: shortenPath(args.path, cwd) });
         event.result = await executeReplaceRange(args.path, Number(args.startLine), Number(args.endLine), args.content, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'insert_after':
-        renderToolCall({ kind: 'write', name: 'Insert', detail: shortenPath(args.path, cwd) });
+        setSpinner({ kind: 'write', name: 'Insert', detail: shortenPath(args.path, cwd) });
         event.result = await executeInsertAfter(args.path, args.anchor, args.content, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'rename_file':
-        renderToolCall({ kind: 'write', name: 'Rename', detail: `${args.from} -> ${args.to}` });
+        setSpinner({ kind: 'write', name: 'Rename', detail: `${args.from} -> ${args.to}` });
         event.result = await executeRenameFile(args.from, args.to, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.to, 'file');
         break;
 
       case 'create_branch':
-        renderToolCall({ kind: 'write', name: 'Branch', detail: args.branchName });
+        setSpinner({ kind: 'write', name: 'Branch', detail: args.branchName });
         event.result = createBranch(cwd, args.branchName);
         event.isWrite = true;
         break;
 
       case 'commit_changes':
-        renderToolCall({ kind: 'write', name: 'Commit', detail: truncate(args.message, 60) });
+        setSpinner({ kind: 'write', name: 'Commit', detail: truncate(args.message, 60) });
         event.result = commitChanges(cwd, args.message);
         event.isWrite = true;
         break;
 
       case 'push_branch':
-        renderToolCall({ kind: 'write', name: 'Push', detail: args.remote || 'origin' });
+        setSpinner({ kind: 'write', name: 'Push', detail: args.remote || 'origin' });
         event.result = pushBranch(cwd, args.remote || 'origin');
         event.isWrite = true;
         break;
 
       case 'create_pull_request':
-        renderToolCall({ kind: 'write', name: 'PR', detail: `base: ${args.baseBranch || 'main'}` });
+        setSpinner({ kind: 'write', name: 'PR', detail: `base: ${args.baseBranch || 'main'}` });
         if (!options.client) {
           throw new Error('Agent client is required to generate pull request description');
         }
@@ -1340,7 +1357,7 @@ export async function executeTool(
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        renderToolCall({ kind: 'read', name: 'Definition', detail: `${fileBasename}:${line}:${char}` });
+        setSpinner({ kind: 'read', name: 'Definition', detail: `${fileBasename}:${line}:${char}` });
 
         const manager = getLspManager(cwd);
         const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
@@ -1353,7 +1370,7 @@ export async function executeTool(
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        renderToolCall({ kind: 'read', name: 'References', detail: `${fileBasename}:${line}:${char}` });
+        setSpinner({ kind: 'read', name: 'References', detail: `${fileBasename}:${line}:${char}` });
 
         const manager = getLspManager(cwd);
         const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
@@ -1366,7 +1383,7 @@ export async function executeTool(
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        renderToolCall({ kind: 'read', name: 'Hover', detail: `${fileBasename}:${line}:${char}` });
+        setSpinner({ kind: 'read', name: 'Hover', detail: `${fileBasename}:${line}:${char}` });
 
         const manager = getLspManager(cwd);
         const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
@@ -1376,50 +1393,50 @@ export async function executeTool(
       }
 
       case 'web_fetch':
-        renderToolCall({ kind: 'search', name: 'Fetch', detail: args.url });
+        setSpinner({ kind: 'search', name: 'Fetch', detail: args.url });
         event.result = await webFetch(args.url);
         break;
 
       case 'web_search':
-        renderToolCall({ kind: 'search', name: 'Search', detail: truncate(args.query, 40) });
+        setSpinner({ kind: 'search', name: 'Search', detail: truncate(args.query, 40) });
         event.result = await webSearch(args.query);
         break;
 
       case 'str_replace':
-        renderToolCall({ kind: 'write', name: 'Surgical', detail: shortenPath(args.path, cwd) });
+        setSpinner({ kind: 'write', name: 'Surgical', detail: shortenPath(args.path, cwd) });
         event.result = await executeStrReplace(args as unknown as StrReplaceArgs, cwd, options);
         event.isWrite = true;
         event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
         break;
 
       case 'glob_files':
-        renderToolCall({ kind: 'search', name: 'Glob', detail: truncate(args.pattern, 60) });
+        setSpinner({ kind: 'search', name: 'Glob', detail: truncate(args.pattern, 60) });
         event.result = await executeGlobFiles(args as unknown as GlobArgs, cwd, options);
         break;
 
       case 'todo_read':
-        renderToolCall({ kind: 'search', name: 'Todo', detail: 'read' });
+        setSpinner({ kind: 'search', name: 'Todo', detail: 'read' });
         event.result = executeTodoRead(cwd);
         break;
 
       case 'todo_write':
-        renderToolCall({ kind: 'write', name: 'Todo', detail: String((args as { op?: string }).op ?? 'add') });
+        setSpinner({ kind: 'write', name: 'Todo', detail: String((args as { op?: string }).op ?? 'add') });
         event.result = await executeTodoWrite(args as unknown as TodoWriteArgs, cwd, options);
         event.isWrite = true;
         break;
 
       case 'run_command_async':
-        renderToolCall({ kind: 'bash', name: 'Async', detail: truncate(args.cmd, 30) });
+        setSpinner({ kind: 'bash', name: 'Async', detail: truncate(args.cmd, 30) });
         event.result = await executeRunCommandAsync(args as unknown as RunCommandAsyncArgs, cwd, options);
         break;
 
       case 'poll_command_status':
-        renderToolCall({ kind: 'bash', name: 'Poll', detail: String((args as { jobId?: string }).jobId ?? '?') });
+        setSpinner({ kind: 'bash', name: 'Poll', detail: String((args as { jobId?: string }).jobId ?? '?') });
         event.result = executePollCommandStatus(args as unknown as PollCommandStatusArgs, cwd);
         break;
 
       case 'kill_command':
-        renderToolCall({ kind: 'bash', name: 'Kill', detail: String((args as { jobId?: string }).jobId ?? '?') });
+        setSpinner({ kind: 'bash', name: 'Kill', detail: String((args as { jobId?: string }).jobId ?? '?') });
         event.result = executeKillCommand(args as unknown as KillCommandArgs, cwd);
         break;
 
@@ -1429,8 +1446,31 @@ export async function executeTool(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     event.result = `Error: ${msg}`;
-    renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
+    if (inlineSpinner) {
+      (inlineSpinner as InlineSpinnerHandle).fail(truncate(msg, 80));
+      inlineSpinner = null;
+    } else {
+      renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
+    }
   }
+
+  // Finalise the inline spinner — convert it to a ✔ or ✗ summary line
+  // based on whether the tool result starts with `Error:`. The brief
+  // summary is the original detail plus an elapsed-time suffix so the
+  // user sees roughly how long the call took.
+  if (inlineSpinner) {
+    const handle = inlineSpinner as InlineSpinnerHandle;
+    const elapsedMs = Date.now() - toolStartedAt;
+    const elapsedStr = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
+    const failed = typeof event.result === 'string' && event.result.startsWith('Error:');
+    if (failed) {
+      handle.fail(`${truncate(event.result.replace(/^Error:\s*/, ''), 60)} (${elapsedStr})`);
+    } else {
+      handle.succeed(`done (${elapsedStr})`);
+    }
+    inlineSpinner = null;
+  }
+
   options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
 
   // ──── PostToolUse hooks (§3.4) ────

@@ -35,6 +35,22 @@ const DANGEROUS_READERS = new Set([
   'cat', 'less', 'more', 'grep', 'head', 'tail'
 ]);
 
+/**
+ * System binaries that the agent is permitted to invoke even when
+ * referenced via an absolute or workspace-relative path that resolves
+ * outside the workspace root (e.g. `/usr/bin/git`, `/opt/homebrew/bin/node`).
+ *
+ * The per-argument safety checks below (workspace containment for
+ * `DANGEROUS_MODIFIERS`, sensitive-file detection for reads and writes)
+ * still apply — only the "binary lives outside the workspace" rejection
+ * is bypassed. This unblocks the common case of the agent running its
+ * own toolchain (git, node, npm, ...) without weakening the file
+ * containment guarantees.
+ */
+const ALLOWED_GLOBAL_BINARIES = new Set([
+  'git', 'node', 'npm', 'npx', 'bash', 'sh', 'cat', 'grep', 'mkdir', 'rm'
+]);
+
 function unquote(str: string): string {
   if (str.length < 2) return str;
   const first = str[0];
@@ -55,11 +71,19 @@ export async function isCommandSafe(command: string, workspaceRoot: string): Pro
 
   for (const cmd of parsed) {
     const binaryLower = cmd.binary.toLowerCase();
-    
-    // Check if the binary itself is a path outside the workspace
+    // Compare per-arg safety checks against the basename so a binary
+    // invoked by absolute or relative path (`/bin/rm`, `./scripts/rm`)
+    // is still recognised as a dangerous modifier / reader.
+    const binBasename = path.basename(unquote(binaryLower)).toLowerCase();
+
+    // Check if the binary itself is a path outside the workspace.
+    // Trusted system binaries (git/node/npm/...) bypass this rejection
+    // because the agent legitimately needs to invoke its own toolchain,
+    // which lives outside the project root. Per-argument file containment
+    // is still enforced below.
     if (binaryLower.startsWith('/') || binaryLower.startsWith('.')) {
       const resolvedBin = path.resolve(workspaceRoot, unquote(binaryLower));
-      if (!guard.isInside(resolvedBin)) {
+      if (!guard.isInside(resolvedBin) && !ALLOWED_GLOBAL_BINARIES.has(binBasename)) {
         return {
           safe: false,
           reason: `Attempt to execute an external binary located outside the workspace: ${cmd.binary}`,
@@ -86,7 +110,7 @@ export async function isCommandSafe(command: string, workspaceRoot: string): Pro
       const resolved = path.resolve(workspaceRoot, targetPath);
 
       // Check for workspace escaping
-      if (DANGEROUS_MODIFIERS.has(binaryLower)) {
+      if (DANGEROUS_MODIFIERS.has(binBasename)) {
         if (!guard.isInside(resolved)) {
           return {
             safe: false,
@@ -105,14 +129,14 @@ export async function isCommandSafe(command: string, workspaceRoot: string): Pro
                           (filename === 'config' && resolved.includes('.aws'));
 
       if (isSensitive) {
-        if (DANGEROUS_MODIFIERS.has(binaryLower)) {
+        if (DANGEROUS_MODIFIERS.has(binBasename)) {
           return {
             safe: false,
             reason: `Command '${cmd.binary}' attempts to modify a sensitive credentials file: ${filename}`,
             affectedPath: resolved
           };
         }
-        if (DANGEROUS_READERS.has(binaryLower) || binaryLower === 'grep') {
+        if (DANGEROUS_READERS.has(binBasename) || binBasename === 'grep') {
           return {
             safe: false,
             reason: `Command '${cmd.binary}' attempts to read a sensitive credentials file: ${filename}`,

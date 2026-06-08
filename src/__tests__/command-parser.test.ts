@@ -43,3 +43,31 @@ test('isCommandSafe flags dangerous operations outside workspace', async () => {
   // Clean up
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('isCommandSafe permits trusted global binaries invoked by absolute path', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-test-workspace-'));
+  const workspaceRoot = path.join(tempDir, 'root');
+  fs.mkdirSync(workspaceRoot);
+
+  // Absolute path to git — the binary lives outside the workspace, but
+  // git is on the allowlist and the file target stays inside.
+  const okGit = await isCommandSafe('/usr/bin/git status', workspaceRoot);
+  assert.equal(okGit.safe, true, okGit.reason);
+
+  // Same for node.
+  const okNode = await isCommandSafe('/opt/homebrew/bin/node --version', workspaceRoot);
+  assert.equal(okNode.safe, true, okNode.reason);
+
+  // A non-allowlisted external binary is still rejected.
+  const blocked = await isCommandSafe('/usr/bin/curl https://example.com', workspaceRoot);
+  assert.equal(blocked.safe, false);
+  assert.match(blocked.reason || '', /external binary/);
+
+  // Allowlist does not weaken file containment: `rm` on the allowlist,
+  // but the target escapes the workspace.
+  const stillBlocked = await isCommandSafe('/bin/rm ../outside.txt', workspaceRoot);
+  assert.equal(stillBlocked.safe, false);
+  assert.match(stillBlocked.reason || '', /outside the workspace root/);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

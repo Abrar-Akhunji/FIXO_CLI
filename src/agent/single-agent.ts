@@ -50,7 +50,6 @@ import { FixoMdWatcher } from '../context/fixo-md-watcher.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
-const MAX_TOOL_CALLS = 25;
 const MAX_TOOL_RESULT_LENGTH = 30_000;
 
 const colors = {
@@ -370,6 +369,13 @@ export class SingleAgent {
       console.log(`${colors.dim}🛡  Read-only role — mutation tools hidden.${colors.reset}`);
     }
     const safety = loadConfig().preferences.safety;
+    // Tool-call budget. The agent loop runs at most `softLimit` calls
+    // by default; when `autoExtend` is on and the semantic loop
+    // detector is not warning, the budget silently lifts to
+    // `hardLimit`. The hard limit is the absolute ceiling.
+    const budget = safety.toolCalls;
+    let toolCallLimit = Math.max(1, budget.softLimit);
+    const toolCallHardLimit = Math.max(toolCallLimit, budget.hardLimit);
 
     // Pillar 2 — semantic loop detector. Tracks per-file frequency so
     // an LLM which varies its search arguments but keeps hammering
@@ -397,7 +403,24 @@ export class SingleAgent {
     console.log(`\n${colors.cyan}${colors.bold}🤖 Agent working...${colors.reset}`);
 
     try {
-      while (toolCallCount < MAX_TOOL_CALLS) {
+      while (toolCallCount < toolCallLimit) {
+        // Auto-extend the budget when the agent is at the soft limit
+        // but the semantic loop detector is quiet — i.e. the work is
+        // still progressing, not thrashing. Capped at hardLimit.
+        if (
+          budget.autoExtend &&
+          toolCallCount + 1 >= toolCallLimit &&
+          toolCallLimit < toolCallHardLimit &&
+          pendingSafetyDirective === null
+        ) {
+          const previous = toolCallLimit;
+          toolCallLimit = Math.min(toolCallHardLimit, toolCallLimit * 2);
+          if (toolCallLimit > previous) {
+            console.log(
+              `${colors.dim}↳ tool-call budget extended ${previous} → ${toolCallLimit} (no loop detected)${colors.reset}`,
+            );
+          }
+        }
         // Background-job awareness: surface newly-finished and
         // still-running jobs as a directive before each chat() call.
         // Skipped on the first iteration because no async tools have
@@ -423,7 +446,7 @@ export class SingleAgent {
         }
 
         const spinner = promptsWrapper.spinner();
-        spinner.start(`🤖 Agent thinking (turn ${toolCallCount + 1})...`);
+        spinner.start(`⚡ Agent is analyzing context paths… (turn ${toolCallCount + 1})`);
         dashboard.emit({
           type: 'turn-start',
           turnIndex: toolCallCount + 1,
@@ -627,7 +650,7 @@ export class SingleAgent {
       }
 
       console.log(
-        `${colors.yellow}⚠  Tool call limit reached (${MAX_TOOL_CALLS}).${colors.reset}`,
+        `${colors.yellow}⚠  Tool call limit reached (${toolCallLimit}).${colors.reset}`,
       );
 
       conversation.addTurn(
@@ -742,11 +765,29 @@ export class SingleAgent {
       : this.client.chatStream(messages, model);
 
     const renderer = new MarkdownStreamRenderer();
+    // Reasoning / chain-of-thought is suppressed by default. Models
+    // that emit `<think>` blocks or `reasoning_content` deltas are
+    // routed through here; the user only sees a short status line.
+    // Set DEBUG=1 or pass --verbose to render the raw thinking dim
+    // inline so developers can still inspect it.
+    const showThinking =
+      !!process.env.DEBUG || !!process.env.VERBOSE || process.argv.includes('--verbose');
+    let thinkingAnnounced = false;
 
     for await (const chunk of stream) {
       if (chunk.type === 'content' && chunk.content) {
         renderer.write(chunk.content);
         fullText += chunk.content;
+      }
+      if (chunk.type === 'thinking' && chunk.thinking) {
+        if (showThinking) {
+          // Dim secondary colour so the thought stream is visually
+          // subordinate to the actual response.
+          process.stdout.write(`${colors.dim}${chunk.thinking}${colors.reset}`);
+        } else if (!thinkingAnnounced) {
+          process.stdout.write(`  ${colors.dim}⚡ Agent is reasoning…${colors.reset}\n`);
+          thinkingAnnounced = true;
+        }
       }
       if (chunk.type === 'done') {
         if (chunk.usage) {
