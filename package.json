@@ -4,10 +4,10 @@
   "description": "FixO CLI — Autonomous Free Multi-Provider LLM Coding Tool",
   "type": "module",
   "bin": {
-    "fixo": "./dist/index.js",
-    "fixo-cli": "./dist/index.js"
+    "fixo": "dist/index.js",
+    "fixo-cli": "dist/index.js"
   },
-  "main": "./dist/index.js",
+  "main": "dist/index.js",
   "files": [
     "dist/",
     "README.md"
