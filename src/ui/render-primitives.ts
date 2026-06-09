@@ -296,6 +296,51 @@ export function renderThinkingIndicator(active: boolean): void {
   }
 }
 
+/**
+ * A three-frame ASCII spinner for in-band task progress.
+ *
+ * Used by SingleAgent to show the user that the agent is working
+ * and indicate that Escape will cancel.  Call `.start()` before
+ * the tool loop, `.stop()` on normal completion, and
+ * `.markCancelled()` when the user aborts.
+ */
+export class TaskStatusIndicator {
+  private timer: NodeJS.Timeout | null = null;
+  private frameIndex = 0;
+  private readonly frames = ['⠋', '⠙', '⠹'];
+  private readonly intervalMs = 300;
+  private static readonly HINT = `${C.SNOW3}Press Escape to cancel${C.RESET}`;
+
+  start(): void {
+    if (this.timer) return;
+    safeWrite(`${C.LAVA}${this.frames[0]!}${C.RESET} agent working…  ${TaskStatusIndicator.HINT}`);
+    this.frameIndex = 0;
+    this.timer = setInterval(() => {
+      this.frameIndex = (this.frameIndex + 1) % this.frames.length;
+      const ch = this.frames[this.frameIndex]!;
+      safeWrite(`\r${C.LAVA}${ch}${C.RESET} agent working…  ${TaskStatusIndicator.HINT}`);
+    }, this.intervalMs);
+  }
+
+  stop(): void {
+    this.clear();
+    safeWrite('\r' + ' '.repeat(60) + '\r');
+  }
+
+  /** Print a clean "cancelled" message and stop the spinner. */
+  markCancelled(): void {
+    this.clear();
+    safeWriteLine(`\r${C.YELLOW}⚠ Task cancelled${C.RESET}`);
+  }
+
+  private clear(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+}
+
 /* ──────────────────────── AI response ──────────────────────── */
 
 const FRAME_WIDTH_FALLBACK = 76;

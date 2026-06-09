@@ -303,7 +303,31 @@ function parseModelsResponse(payload: unknown): string[] | null {
   return ids.length > 0 ? ids : null;
 }
 
+/**
+ * Maps model IDs to their explicitly-selected provider name.
+ * Populated when the user picks a model from a provider's list
+ * via the /model interactive picker. Consulted by
+ * AgentClient.resolveDirectConfig() before heuristic matching,
+ * which makes live-fetched models route to their correct provider.
+ */
+let modelProviderHints = new Map<string, string>();
+
 export const ProvidersManager = {
+  /** Set an explicit model-to-provider association. */
+  setModelProviderHint(model: string, provider: string): void {
+    modelProviderHints.set(model.toLowerCase().trim(), provider);
+  },
+
+  /** Get the explicit provider hint for a model, if one exists. */
+  getModelProviderHint(model: string): string | undefined {
+    return modelProviderHints.get(model.toLowerCase().trim());
+  },
+
+  /** Clear all model-provider hints (e.g. when context resets). */
+  clearModelProviderHints(): void {
+    modelProviderHints = new Map<string, string>();
+  },
+
   /** List all connected providers with masked keys. */
   list(): Array<{ name: string; displayName: string; maskedKey: string; addedAt: string }> {
     const store = loadStore();

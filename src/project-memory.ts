@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'node:module';
 
 export interface ProjectFacts {
   packageManager: 'npm' | 'pnpm' | 'yarn' | 'unknown';
@@ -45,13 +46,24 @@ export function detectProjectFacts(cwd: string): ProjectFacts {
   };
 }
 
-import { DatabaseSync } from 'node:sqlite';
 import { colors } from './ui/colors.js';
 
-let dbInstance: DatabaseSync | null = null;
+// Lazy-loaded SQLite to suppress Node.js experimental warning at module scope.
+// The module is loaded on first call to getDb() rather than at import time.
+let dbInstance: any = null;
 let lastCwd = '';
 
-export function getDb(cwd: string): DatabaseSync {
+let _DatabaseSyncCtor: any = null;
+function getDatabaseSync(): any {
+  if (!_DatabaseSyncCtor) {
+    const _require = createRequire(import.meta.url);
+    const sqlite = _require('node:sqlite');
+    _DatabaseSyncCtor = sqlite.DatabaseSync;
+  }
+  return _DatabaseSyncCtor;
+}
+
+export function getDb(cwd: string): any {
   const dir = memoryDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   const dbPath = path.join(dir, 'memory.db');
@@ -71,6 +83,7 @@ export function getDb(cwd: string): DatabaseSync {
   }
 
   lastCwd = cwd;
+  const DatabaseSync = getDatabaseSync();
   dbInstance = new DatabaseSync(dbPath);
 
   // Initialize tables

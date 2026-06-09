@@ -220,11 +220,27 @@ export class WorkerAgent {
   private client: AgentClient;
   private verbose: boolean;
   private allowAll = false;
+  /** AbortController used to cancel the current worker task. */
+  private abortController = new AbortController();
+  /** Set true once the user requests cancellation. */
+  private markedForCancellation = false;
 
   constructor(verbose = false) {
     const config = loadConfig();
     this.client = new AgentClient(config.freellmapi_api_key || '', config.apiUrl, verbose);
     this.verbose = verbose;
+  }
+
+  /** Abort the current worker task. */
+  abort(): void {
+    this.markedForCancellation = true;
+    this.abortController.abort();
+  }
+
+  /** Reset the abort controller after a cancellation. */
+  reset(): void {
+    this.abortController = new AbortController();
+    this.markedForCancellation = false;
   }
 
   async run(
@@ -355,6 +371,11 @@ export class WorkerAgent {
     };
 
     while (toolCallCount < maxLocalToolCalls) {
+      // Check for user cancellation before each LLM call
+      if (this.abortController.signal.aborted) {
+        throw new Error('Worker task cancelled by user.');
+      }
+
       const spinner = p.spinner();
       spinner.start(`🤖 Worker agent thinking (turn ${toolCallCount + 1})...`);
       let result;
@@ -363,7 +384,8 @@ export class WorkerAgent {
           tools: getActiveTools(context.mode),
           tool_choice: 'auto',
           agent_task_type: 'mutation',
-          required_capabilities: ['tool-calling', 'coding']
+          required_capabilities: ['tool-calling', 'coding'],
+          signal: this.abortController.signal,
         });
       } finally {
         spinner.stop('🤖 Worker thought completed');

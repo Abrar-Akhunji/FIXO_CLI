@@ -827,6 +827,11 @@ export interface ToolExecutionOptions {
    * file's own projected cost.
    */
   getConversationTokens?: () => number;
+  /**
+   * Optional abort signal. When the signal fires, tools that have not
+   * yet started executing return an early "Task cancelled" result.
+   */
+  signal?: AbortSignal;
 }
 
 /* ──────────────────────── Per-process Run ID (Pillar 2) ──────────── */
@@ -1051,6 +1056,12 @@ export async function executeTool(
     isWrite: false,
   };
 
+  // Check for user cancellation before starting any tool work
+  if (options.signal?.aborted) {
+    event.result = 'Error: Task cancelled by user.';
+    return event;
+  }
+
   // Single inline spinner shared across the whole tool invocation —
   // each case under the switch below calls `setSpinner` exactly once,
   // and the outer try/finally converts the spinner into a ✔ or ✗
@@ -1104,6 +1115,7 @@ export async function executeTool(
 
     const plugin = loadedPlugins.find(p => p.tools.some(t => t.function.name === name));
     if (plugin) {
+      if (options.signal?.aborted) { event.result = 'Error: Task cancelled by user.'; return event; }
       const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
       const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
       if (!decision.allowed) {
@@ -1188,6 +1200,7 @@ export async function executeTool(
 
     switch (name) {
       case 'read_file': {
+        if (options.signal?.aborted) { event.result = 'Error: Task cancelled by user.'; return event; }
         const guard = new WorkspaceGuard(cwd);
         const resolved = guard.resolve(args.path, 'file');
         setSpinner({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });

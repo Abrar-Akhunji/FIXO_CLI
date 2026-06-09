@@ -31,6 +31,7 @@ import {
   toSafetyAlertDirective,
 } from '../runtime/loop-trap.js';
 import { dashboard } from '../ui/render.js';
+import { TaskStatusIndicator } from '../ui/render-primitives.js';
 import * as p from '@clack/prompts';
 export const promptsWrapper = {
   select: p.select,
@@ -247,6 +248,11 @@ export class SingleAgent {
   private client: AgentClient;
   private verbose: boolean;
   private allowAll = false;
+  /** AbortController used to cancel the current task on Escape / Ctrl+C. */
+  private abortController = new AbortController();
+  /** Set true once the user requests cancellation so the tool loop
+   *  produces a clean "Task cancelled" message. */
+  private markedForCancellation = false;
 
   constructor(verbose = false) {
     const config = loadConfig();
@@ -257,6 +263,21 @@ export class SingleAgent {
   /** Expose the underlying client for direct API calls (e.g. compaction). */
   getClient(): AgentClient {
     return this.client;
+  }
+
+  /** Abort the current task. Any in-flight LLM call or tool execution
+   *  will be interrupted at the next opportunity. */
+  abort(): void {
+    this.markedForCancellation = true;
+    this.abortController.abort();
+  }
+
+  /** Reset the abort controller so a new task can be run after a
+   *  cancellation. Called by the UI layer when the user starts a new
+   *  task or when the cancelled task finishes unwinding. */
+  reset(): void {
+    this.abortController = new AbortController();
+    this.markedForCancellation = false;
   }
 
   async runStreaming(
@@ -288,7 +309,7 @@ export class SingleAgent {
         { role: 'user', content: buildUserContent(context) },
       ];
 
-      const streamRes = await this.streamResponse(messages, context.model, totalUsage);
+      const streamRes = await this.streamResponse(messages, context.model, totalUsage, this.abortController.signal);
       const fullResponse = streamRes.responseText;
       conversation.addTurn(context.task, fullResponse);
 
@@ -400,7 +421,8 @@ export class SingleAgent {
     // Instructions] directive on the next chat().
     const fixoMdWatcher = new FixoMdWatcher(context.cwd);
 
-    console.log(`\n${colors.cyan}${colors.bold}🤖 Agent working...${colors.reset}`);
+    const indicator = new TaskStatusIndicator();
+    indicator.start();
 
     try {
       while (toolCallCount < toolCallLimit) {
@@ -452,11 +474,17 @@ export class SingleAgent {
           turnIndex: toolCallCount + 1,
           task: context.task,
         });
+        // Check for pre-turn cancellation
+        if (this.abortController.signal.aborted) {
+          throw new Error('Task cancelled by user.');
+        }
+
         let result;
         try {
           result = await this.client.chat(messages, context.model, {
             tools: activeTools,
             tool_choice: 'auto',
+            signal: this.abortController.signal,
           });
           resolvedModel = result.model;
         } catch (err: any) {
@@ -500,6 +528,7 @@ export class SingleAgent {
             renderMarkdown(response);
           }
 
+          indicator.stop();
           conversation.addTurn(context.task, response);
           taskSession.finish('success', response);
 
@@ -649,6 +678,8 @@ export class SingleAgent {
         }
       }
 
+      indicator.stop();
+
       console.log(
         `${colors.yellow}⚠  Tool call limit reached (${toolCallLimit}).${colors.reset}`,
       );
@@ -671,6 +702,7 @@ export class SingleAgent {
         model: resolvedModel,
       };
     } catch (error: any) {
+      indicator.stop();
       const errorMsg = error instanceof Error ? error.message : String(error);
       taskSession.finish('error', errorMsg);
       throw error;
@@ -753,6 +785,7 @@ export class SingleAgent {
     messages: ChatMessage[],
     model: string,
     usage: TokenUsage,
+    signal?: AbortSignal,
   ): Promise<{ responseText: string; resolvedModel: string }> {
     let fullText = '';
     let resolvedModel = model;
@@ -761,8 +794,8 @@ export class SingleAgent {
       loadConfig().preferences.resilience?.maxResumeAttempts ?? 3;
 
     const stream = policy === 'auto'
-      ? this.client.chatStreamWithResume(messages, model, {}, maxResumeAttempts)
-      : this.client.chatStream(messages, model);
+      ? this.client.chatStreamWithResume(messages, model, { signal }, maxResumeAttempts)
+      : this.client.chatStream(messages, model, { signal });
 
     const renderer = new MarkdownStreamRenderer();
     // Reasoning / chain-of-thought is suppressed by default. Models
@@ -831,7 +864,7 @@ export class SingleAgent {
       { role: 'user', content: task },
     ];
 
-    const streamRes = await this.streamResponse(messages, context.model, totalUsage);
+    const streamRes = await this.streamResponse(messages, context.model, totalUsage, this.abortController.signal);
     const fullResponse = streamRes.responseText;
     conversation.addTurn(task, fullResponse);
 

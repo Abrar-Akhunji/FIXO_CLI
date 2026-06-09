@@ -147,6 +147,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   }
 
   let isPrompting = false;
+  let isTaskRunning = false;
+  let currentRunningAgent: SingleAgent | null = null;
   let activeSuggestionsCount = 0;
   interface AutocompleteOption {
     display: string;
@@ -346,12 +348,49 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   };
   process.on('exit', exitCleanup);
 
-  // ──── Graceful exit handlers ────
+  // ──── Double-Ctrl+C (and task-abort) handler ────
+  const SIGINT_RESET_MS = 2000;
+  let sigintCount = 0;
+  let lastSigintTime = 0;
+  let sigintResetTimer: NodeJS.Timeout | null = null;
+
   const sigintHandler = () => {
+    if (isTaskRunning && currentRunningAgent) {
+      // A task is running — cancel it instead of exiting
+      currentRunningAgent.abort();
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastSigintTime > SIGINT_RESET_MS) {
+      // First press (or after reset window)
+      sigintCount = 1;
+      lastSigintTime = now;
+      // Write hint and redraw the prompt
+      const promptStr = `${C.LAVA}›${C.RESET} `;
+      process.stdout.write(`\n${c.yellow}⚠ Press Ctrl+C again to exit${c.reset}\n`);
+      drawLavaStatusBar();
+      process.stdout.write(promptStr);
+      // Auto-reset after the window expires
+      if (sigintResetTimer) clearTimeout(sigintResetTimer);
+      sigintResetTimer = setTimeout(() => {
+        sigintCount = 0;
+        sigintResetTimer = null;
+      }, SIGINT_RESET_MS);
+      return;
+    }
+
+    // Second press within the window — exit
+    if (sigintResetTimer) clearTimeout(sigintResetTimer);
+    sigintResetTimer = null;
+    sigintCount = 0;
     exitCleanup();
     console.log('\n\n👋 FixO CLI session ended safely. Core engine offline.');
     process.exit(0);
   };
+  // Listen on both the readline interface (catches Ctrl+C during rl.question())
+  // and the process (fallback for non-readline scenarios).
+  rl.on('SIGINT', sigintHandler);
   process.on('SIGINT', sigintHandler);
 
   const sigtermHandler = () => {
@@ -558,7 +597,15 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   const keypressHandler = (_char: any, key: any) => {
     if (!isPrompting) return;
-    if (key && (key.name === 'up' || key.name === 'down' || key.name === 'escape' || key.name === 'tab' || key.name === 'enter' || key.name === 'return')) {
+    // Intercept Escape to cancel a running task even when readline is in a question state
+    if (key && key.name === 'escape') {
+      if (isTaskRunning && currentRunningAgent) {
+        currentRunningAgent.abort();
+        return;
+      }
+      return;
+    }
+    if (key && (key.name === 'up' || key.name === 'down' || key.name === 'tab' || key.name === 'enter' || key.name === 'return')) {
       return;
     }
     process.nextTick(() => {
@@ -693,6 +740,16 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     if (event === 'keypress') {
       const [char, key] = args;
 
+      // Intercept Escape or Ctrl+C to cancel a running task (when not prompting)
+      if (key && key.name === 'escape' && isTaskRunning && currentRunningAgent) {
+        currentRunningAgent.abort();
+        return true;
+      }
+      if (key && key.name === 'c' && key.ctrl && isTaskRunning && currentRunningAgent) {
+        currentRunningAgent.abort();
+        return true;
+      }
+
       // Tab on empty line → cycle mode (BEFORE suggestion handling, so it always works)
       if (isPrompting && key && key.name === 'tab' && rl.line.trim() === '') {
         const modes: Array<'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT'> = ['BUILD', 'EXPLORE', 'SCOUT', 'PLAN'];
@@ -796,13 +853,20 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         case '/model': {
           if (args[0] === 'list') {
             // Print full model table grouped by provider
+            // Uses live-fetched cached models when available, otherwise falls
+            // back to the static registry list (tagged [unverified]).
             console.log(`\n${c.bold}${c.cyan}Available Models by Provider${c.reset}`);
             console.log(`${c.dim}${'─'.repeat(60)}${c.reset}`);
             for (const def of PROVIDER_REGISTRY) {
               const hasKey = ProvidersManager.has(def.name);
               const keyStatus = hasKey ? `${c.green}[key ✓]${c.reset}` : `${c.dim}[no key]${c.reset}`;
-              console.log(`\n  ${c.snow}${c.bold}${def.displayName}${c.reset} ${keyStatus}`);
-              for (const model of def.models) {
+              const cached = ProvidersManager.getCachedModels(def.name);
+              const modelList = cached?.models?.length ? cached.models : def.models;
+              const sourceTag = cached?.source === 'live'
+                ? ''
+                : ` ${c.dim}[unverified]${c.reset}`;
+              console.log(`\n  ${c.snow}${c.bold}${def.displayName}${c.reset} ${keyStatus}${sourceTag}`);
+              for (const model of modelList) {
                 console.log(`    ${c.cyan}•${c.reset} ${model}`);
               }
             }
@@ -872,6 +936,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
                 return;
               }
               currentModel = picked as string;
+              // Store hint — find which provider this model belongs to
+              const owningDef = PROVIDER_REGISTRY.find(d =>
+                d.models.includes(currentModel)
+                || ProvidersManager.getCachedModels(d.name)?.models?.includes(currentModel)
+              );
+              if (owningDef) ProvidersManager.setModelProviderHint(currentModel, owningDef.name);
               conversation.setContextLimit(currentModel);
               console.log(`\n${c.green}✓ Model set to: ${c.bold}${currentModel}${c.reset}`);
               return;
@@ -912,6 +982,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             }
 
             currentModel = picked as string;
+            // Store explicit model-provider association so
+            // resolveDirectConfig can route this model directly
+            // to this provider (critical for live-fetched models
+            // that don't appear in the static registry).
+            ProvidersManager.setModelProviderHint(currentModel, def.name);
             conversation.setContextLimit(currentModel);
             console.log(`\n${c.green}✓ Model set to: ${c.bold}${currentModel}${c.reset}`);
             return;
@@ -1351,6 +1426,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             };
 
             try {
+              isTaskRunning = true;
+              currentRunningAgent = agent;
               const result = await agent.runStreaming(context, conversation, rl);
               for (const file of result.modifiedFiles) {
                 if (!modifiedFiles.includes(file)) {
@@ -1359,6 +1436,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               }
             } catch (err: any) {
               console.log(`\n${c.red}✗ Repair agent failed on attempt ${attempt}: ${err.message || err}${c.reset}`);
+            } finally {
+              isTaskRunning = false;
+              currentRunningAgent = null;
+              agent.reset();
             }
 
             testResult = runProjectTests(cwd);
@@ -2017,7 +2098,15 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       }
     } else {
       console.log(`\n${c.cyan}[Routing Engine] Simple task detected (${classification.reason}). Routing to SingleAgent...${c.reset}`);
-      result = await agent.runStreaming(context, conversation, rl);
+      isTaskRunning = true;
+      currentRunningAgent = agent;
+      try {
+        result = await agent.runStreaming(context, conversation, rl);
+      } finally {
+        isTaskRunning = false;
+        currentRunningAgent = null;
+        agent.reset();
+      }
     }
 
     // Print result summary

@@ -65,6 +65,9 @@ export interface ChatOptions {
   max_tokens?: number;
   agent_task_type?: 'chat' | 'review' | 'mutation' | 'test-fix' | 'refactor' | 'investigation';
   required_capabilities?: string[];
+  /** Optional external abort signal. When provided, combined with the
+   *  internal 60s timeout so the request aborts on EITHER signal. */
+  signal?: AbortSignal;
 }
 
 export interface ChatResult {
@@ -261,6 +264,24 @@ export class AgentClient {
     const modelLower = model.toLowerCase();
     let providerName: string | null = null;
 
+    // ── Phase 1: Check explicit user-set model-provider hints ──
+    // When a user picks a model from a specific provider's list via
+    // the /model interactive picker, the association is stored here.
+    const hint = ProvidersManager.getModelProviderHint(modelLower);
+    if (hint) {
+      const direct = ProvidersManager.getDirectConfig(hint);
+      if (direct) {
+        const def = ProvidersManager.getDefinition(hint);
+        return {
+          baseUrl: direct.baseUrl,
+          displayName: direct.displayName,
+          providerName: hint,
+          openAICompat: def ? def.openAICompat : true,
+        };
+      }
+    }
+
+    // ── Phase 2: Hard-coded prefix checks for known model families ──
     if (modelLower.startsWith('gpt-') || modelLower.startsWith('o3-') || modelLower.startsWith('o4-') || modelLower.startsWith('o1-')) {
       providerName = 'openai';
     } else if (modelLower.startsWith('claude-')) {
@@ -268,6 +289,7 @@ export class AgentClient {
     } else if (modelLower.startsWith('gemini-')) {
       providerName = 'google';
     } else {
+      // ── Phase 3: Substring match against registry model lists ──
       const definitions = ProvidersManager.getAllDefinitions();
       for (const def of definitions) {
         if (def.models.some(m => modelLower.includes(m.toLowerCase()))) {
@@ -275,9 +297,27 @@ export class AgentClient {
           break;
         }
       }
+      // ── Phase 4: Prefix match (providerName/model or providerName:model) ──
       if (!providerName) {
         for (const def of definitions) {
           if (modelLower.startsWith(def.name + '/') || modelLower.startsWith(def.name + ':')) {
+            providerName = def.name;
+            break;
+          }
+        }
+      }
+
+      // ── Phase 5: Check cached models from live fetches ──
+      // If the user has configured a provider with a key, check the
+      // cached live model list from that provider. This catches models
+      // like deepseek-v4-flash-free that are returned by a provider's
+      // /models endpoint but don't appear in the static registry.
+      if (!providerName) {
+        for (const def of definitions) {
+          if (!ProvidersManager.has(def.name)) continue;
+          const cached = ProvidersManager.getCachedModels(def.name);
+          if (cached?.models?.some(m => modelLower.includes(m.toLowerCase())
+            || m.toLowerCase().includes(modelLower))) {
             providerName = def.name;
             break;
           }
@@ -319,11 +359,18 @@ export class AgentClient {
     model: string,
     options: ChatOptions = {},
   ): Promise<ChatResult> {
+    const { signal: externalSignal, ...restOptions } = options;
     const providerId = this.getProviderId(model);
     providerCooldown.assertAvailable(providerId);
 
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = direct && direct.providerName === 'anthropic';
+
+    // Combine external abort signal with the internal 60s timeout so
+    // the request aborts on EITHER signal (timeout OR user cancellation).
+    const combinedSignal = externalSignal
+      ? AbortSignal.any([AbortSignal.timeout(60000), externalSignal])
+      : AbortSignal.timeout(60000);
 
     let requestUrl = `${this.baseUrl}/chat/completions`;
     let headers: Record<string, string> = {
@@ -369,7 +416,7 @@ export class AgentClient {
           model,
           messages: messagesForOpenAIWire(messages),
           stream: false,
-          ...options,
+          ...restOptions,
         };
         body = JSON.stringify(bodyObj);
       }
@@ -379,7 +426,7 @@ export class AgentClient {
         model,
         messages: messagesForOpenAIWire(messages),
         stream: false,
-        ...options,
+        ...restOptions,
       };
       if (hasTools) {
         bodyObj.x_requires_tools = true;
@@ -393,6 +440,11 @@ export class AgentClient {
       body = JSON.stringify(bodyObj);
     }
 
+    // Check for pre-flight cancellation
+    if (combinedSignal.aborted) {
+      throw new Error('Task cancelled by user.');
+    }
+
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -401,7 +453,7 @@ export class AgentClient {
           method: 'POST',
           headers,
           body,
-          signal: AbortSignal.timeout(60000), // 60s timeout
+          signal: combinedSignal,
         });
 
         // Non-retryable errors
@@ -528,12 +580,17 @@ export class AgentClient {
     body: string,
     model: string,
     isAnthropicDirect: boolean,
+    signal: AbortSignal = AbortSignal.timeout(60000),
   ): AsyncGenerator<StreamChunk> {
+    // Pre-flight cancellation check
+    if (signal.aborted) {
+      throw new Error('Task cancelled by user.');
+    }
     const response = await fetch(requestUrl, {
       method: 'POST',
       headers,
       body,
-      signal: AbortSignal.timeout(60000), // 60s timeout
+      signal,
     });
 
     if (response.status === 413) {
@@ -810,6 +867,11 @@ export class AgentClient {
     model: string,
     options: ChatOptions = {},
   ): AsyncGenerator<StreamChunk> {
+    const { signal: externalSignal, ...restOptions } = options;
+    const combinedSignal = externalSignal
+      ? AbortSignal.any([AbortSignal.timeout(60000), externalSignal])
+      : AbortSignal.timeout(60000);
+
     const providerId = this.getProviderId(model);
     providerCooldown.assertAvailable(providerId);
 
@@ -833,7 +895,7 @@ export class AgentClient {
           'x-api-key': key,
           'anthropic-version': '2023-06-01',
         }));
-        const payload = translateOpenAIToAnthropic(messages, model, options);
+        const payload = translateOpenAIToAnthropic(messages, model, restOptions);
         payload.stream = true;
         body = JSON.stringify(payload);
       } else {
@@ -859,7 +921,7 @@ export class AgentClient {
           model,
           messages: messagesForOpenAIWire(messages),
           stream: true,
-          ...options,
+          ...restOptions,
         };
         body = JSON.stringify(bodyObj);
       }
@@ -869,7 +931,7 @@ export class AgentClient {
         model,
         messages: messagesForOpenAIWire(messages),
         stream: true,
-        ...options,
+        ...restOptions,
       };
       if (hasTools) {
         bodyObj.x_requires_tools = true;
@@ -894,6 +956,7 @@ export class AgentClient {
           body,
           model,
           isAnthropicDirect,
+          combinedSignal,
         );
 
         for await (const chunk of stream) {
