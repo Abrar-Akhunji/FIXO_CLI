@@ -30,6 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, getConfigDir } from '../config.js';
+import { formatDuration } from './duration.js';
 
 // ---------------------------------------------------------------------------
 // Public event types
@@ -320,8 +321,13 @@ export function diagnoseFailures(windowMs: number = 60 * 60_000): DiagnosisHint[
   const cooldowns = recent.filter((e) => e.type === 'cooldown');
   if (cooldowns.length > 0) {
     const providers = new Set(cooldowns.map((e) => String(e.fields.providerId ?? '?')));
+    const maxCooldownMs = cooldowns.reduce(
+      (acc, e) => Math.max(acc, Number(e.fields.cooldownMs ?? 0)),
+      0,
+    );
+    const durationTag = maxCooldownMs > 0 ? ` (up to ${formatDuration(maxCooldownMs)})` : '';
     hints.push({
-      summary: `Provider cooldown: ${[...providers].join(', ')}`,
+      summary: `Provider cooldown: ${[...providers].join(', ')}${durationTag}`,
       severity: 'warn',
       count: cooldowns.length,
       suggestion:

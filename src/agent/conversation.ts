@@ -574,6 +574,12 @@ export interface SessionData {
     completion_tokens: number;
     total_tokens: number;
   };
+  /**
+   * User-chosen human-readable label. Distinct from `summary`
+   * (auto-derived) and `sessionId` (durable). Renames keep the
+   * filename and sessionId stable so resume URLs stay valid.
+   */
+  label?: string;
 }
 
 import fs from 'node:fs';
@@ -595,7 +601,8 @@ export class SessionManager {
     model: string,
     modifiedFiles: string[],
     tokenUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
-    sessionId?: string
+    sessionId?: string,
+    label?: string,
   ): string {
     const id = sessionId || crypto.randomUUID();
     const dir = this.getSessionsDir();
@@ -608,14 +615,19 @@ export class SessionManager {
       summary: conversation.getSummary(),
       modifiedFiles,
       tokenUsage,
+      label,
     };
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    // Atomic write: tmp + rename, matching the snapshot writer so a
+    // mid-write Ctrl+C never leaves a half-written session file behind.
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(tmp, filePath);
     return id;
   }
 
-  static listSessions(): Array<{ sessionId: string; timestamp: string; model: string; messageCount: number; summary: string; totalTokens: number }> {
+  static listSessions(): Array<{ sessionId: string; timestamp: string; model: string; messageCount: number; summary: string; totalTokens: number; label?: string }> {
     const dir = this.getSessionsDir();
-    const results: any[] = [];
+    const results: Array<{ sessionId: string; timestamp: string; model: string; messageCount: number; summary: string; totalTokens: number; label?: string }> = [];
     try {
       const files = fs.readdirSync(dir);
       for (const file of files) {
@@ -630,6 +642,7 @@ export class SessionManager {
               messageCount: data.history.length,
               summary: data.summary,
               totalTokens: data.tokenUsage?.total_tokens || 0,
+              label: data.label,
             });
           } catch (err: any) {
             console.warn(`[Debug Warning] Failed to parse session file ${file}:`, err.message || err);
@@ -652,6 +665,29 @@ export class SessionManager {
     }
     const raw = fs.readFileSync(filePath, 'utf-8');
     return JSON.parse(raw) as SessionData;
+  }
+
+  /**
+   * Atomically updates the `label` field of an existing session
+   * file. The on-disk filename (the session id) stays unchanged so
+   * existing /resume invocations keep working after a rename.
+   *
+   * Returns true on success, false if the session does not exist.
+   * Throws if the label fails validation — callers should pre-validate
+   * via {@link isValidSessionLabel} for a cleaner UX message.
+   */
+  static renameSession(id: string, label: string | undefined): boolean {
+    const dir = this.getSessionsDir();
+    const filePath = path.join(dir, `session_${id}.json`);
+    if (!fs.existsSync(filePath)) return false;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const data = JSON.parse(raw) as SessionData;
+    const cleaned = label?.trim();
+    data.label = cleaned && cleaned.length > 0 ? cleaned : undefined;
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(tmp, filePath);
+    return true;
   }
 }
 

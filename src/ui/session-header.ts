@@ -25,6 +25,19 @@ export interface SessionHeaderOptions {
   routing: 'auto' | 'single' | 'multi';
   /** Context window, e.g. `200k`. */
   contextWindow: string;
+  /**
+   * Resolved API endpoint URL the CLI will talk to. Surfaced in the
+   * session header so a misconfigured URL — or a regression to a stale
+   * default — is visible at boot instead of failing silently on the
+   * first request.
+   */
+  endpoint?: string;
+  /**
+   * True if the endpoint came from the `FIXO_API_URL` env var override
+   * rather than the configured default. Rendered as a `(env)` tag so
+   * the user knows why the URL differs from their saved config.
+   */
+  endpointFromEnv?: boolean;
 }
 
 function frameWidth(): number {
@@ -66,12 +79,20 @@ export function renderSessionHeader(opts: SessionHeaderOptions): void {
   const line1 = `${C.SNOW3}${statusLabel(opts.status)}${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW2}${formatDate(opts.startedAt)}${C.RESET}`;
   const line2 = `${C.SNOW4}Provider:${C.RESET} ${C.SNOW}${providerColor(opts.provider)}${opts.provider}${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}Model:${C.RESET} ${C.BLUE}${opts.model}${C.RESET}`;
   const line3 = `${C.SNOW4}Mode:${C.RESET} ${modeColor(opts.mode)}${opts.mode}${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}Routing:${C.RESET} ${C.SNOW2}${opts.routing}${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW4}Context:${C.RESET} ${C.SNOW2}${opts.contextWindow}${C.RESET}`;
+  const endpointLine = opts.endpoint
+    ? `${C.SNOW4}Endpoint:${C.RESET} ${C.SNOW2}${opts.endpoint}${C.RESET}${
+        opts.endpointFromEnv ? `  ${C.SNOW4}(via FIXO_API_URL)${C.RESET}` : ''
+      }`
+    : null;
 
   try {
     process.stdout.write(top + '\n');
     process.stdout.write(`  ${C.SNOW4}│${C.RESET}  ${padInside(line1, inner)}${C.SNOW4}│${C.RESET}\n`);
     process.stdout.write(`  ${C.SNOW4}│${C.RESET}  ${padInside(line2, inner)}${C.SNOW4}│${C.RESET}\n`);
     process.stdout.write(`  ${C.SNOW4}│${C.RESET}  ${padInside(line3, inner)}${C.SNOW4}│${C.RESET}\n`);
+    if (endpointLine) {
+      process.stdout.write(`  ${C.SNOW4}│${C.RESET}  ${padInside(endpointLine, inner)}${C.SNOW4}│${C.RESET}\n`);
+    }
     process.stdout.write(bottom + '\n');
   } catch {
     // stdout may be closed during teardown

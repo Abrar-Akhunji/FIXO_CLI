@@ -305,7 +305,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     type: 'function',
     function: {
       name: 'apply_patch',
-      description: 'Apply a unified diff patch to files in the workspace. Prefer this over write_file for editing existing files.',
+      description: 'Apply a unified diff patch to files in the workspace. Prefer this over write_file for editing existing files, and NEVER substitute it with `sed -i`, `patch < file`, or `python3 -c` — shell file-writing is sandbox-blocked.',
       parameters: {
         type: 'object',
         properties: {
@@ -368,7 +368,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'write_file',
       description:
-        'Write a complete file to disk. Use ONLY for new files or full rewrites where the prior content is irrelevant. For ANY change to an existing file (single-region edit, symbol rename, line tweak, multi-line refactor) you MUST use `str_replace` (single hunk) or `apply_patch` (multi-region) instead — both go through the same atomic staging pipeline but preserve the rest of the file. Rewriting an existing file with write_file when str_replace would do is an error: it wastes tokens, defeats LSP pre-save gating granularity, and risks losing concurrent edits. Creates parent directories if missing.',
+        'Write a complete file to disk. Use ONLY for new files or full rewrites where the prior content is irrelevant. Never use `run_command` with `cat > file`, heredocs, `tee`, `sed -i`, or `python3 -c`/`node -e` to write files — those are sandbox-blocked. For ANY change to an existing file you MUST use `str_replace` (single hunk) or `apply_patch` (multi-region). Rewriting an existing file with write_file when str_replace would do wastes tokens, defeats LSP granularity, and risks clobbering concurrent edits. Creates parent directories if missing.',
       parameters: {
         type: 'object',
         properties: {
@@ -391,7 +391,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'run_command',
       description:
-        'Execute a shell command and return its stdout and stderr output. Use this to run tests, build projects, install dependencies, or verify changes. Commands run in the workspace directory.',
+        'Execute a shell command and return its stdout and stderr output. Use this to run tests, build projects, install dependencies, or verify changes. Commands run in the workspace directory. DO NOT use this tool to write or edit files — shell-based file writing is sandbox-blocked, including: `>` / `>>` redirects, `cat > file <<EOF` heredocs, `tee`, `sed -i`, `mv`/`cp` into source paths, and interpreter payloads like `python3 -c "open(...,\'w\')"`, `node -e "fs.writeFileSync(...)"`. Attempts to write files this way will be rejected with a security error. For file writes use `write_file` (new files / full rewrites), `str_replace` (single-region edit), or `apply_patch` (multi-region diff) — they all go through the same atomic staging + LSP pre-save pipeline.',
       parameters: {
         type: 'object',
         properties: {
@@ -665,7 +665,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'str_replace',
       description:
-        'Use this tool by default for any in-place edit to an existing file. Performs a surgical, atomic replacement of oldString with newString. By default, oldString must be unique within the file (expectUnique=true) — non-unique matches are rejected with a clear error so the caller can narrow the snippet. Pass replaceAll=true to substitute every occurrence. Rejected in PLAN mode. Refused for platform-locked paths. Goes through the same atomic staging pipeline as write_file and the LSP pre-save gate before any disk mutation.',
+        'Use this tool by default for any in-place edit to an existing file. Performs a surgical, atomic replacement of oldString with newString. By default, oldString must be unique within the file (expectUnique=true) — non-unique matches are rejected with a clear error so the caller can narrow the snippet. Pass replaceAll=true to substitute every occurrence. Rejected in PLAN mode. Refused for platform-locked paths. Goes through the same atomic staging pipeline as write_file and the LSP pre-save gate before any disk mutation. NEVER substitute this with shell commands like `sed -i`, `python3 -c`, or `cat > file` — those are sandbox-blocked.',
       parameters: {
         type: 'object',
         properties: {

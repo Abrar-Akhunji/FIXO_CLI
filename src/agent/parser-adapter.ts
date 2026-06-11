@@ -23,6 +23,8 @@
  */
 
 import * as ParserModule from 'web-tree-sitter';
+import { existsSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractShellTokens, isCommandSafeShellFallback } from './parsers/shell.js';
@@ -30,6 +32,49 @@ import { extractSymbols as regexExtractSymbols } from './parsers/symbols.js';
 import { extractImports as regexExtractImports } from './parsers/imports.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const requireFromHere = createRequire(import.meta.url);
+
+/**
+ * Returns the first existing, non-empty path for a vendored WASM blob.
+ *
+ * Resolution order:
+ *   1. `<package>/vendor/<file>` (the canonical location written to the
+ *      tarball by `npm pack`).
+ *   2. `<package>/../vendor/<file>` (handles the dev layout where this
+ *      file lives in `src/agent/` rather than `dist/agent/`).
+ *   3. For `tree-sitter.wasm` only: the copy shipped inside the
+ *      `web-tree-sitter` dependency. This is the safety net that keeps
+ *      symbol indexing working even if a future publish accidentally
+ *      drops the vendor/ directory again (the regression that caused
+ *      the v1.0.x ENOENT crashes).
+ *
+ * Returns `null` if nothing usable was found; callers fall back to the
+ * regex adapter and log a single warning.
+ */
+function resolveVendorWasm(fileName: string): string | null {
+  const candidates = [
+    path.resolve(__dirname, '../../vendor', fileName),
+    path.resolve(__dirname, '../vendor', fileName),
+  ];
+
+  if (fileName === 'tree-sitter.wasm') {
+    try {
+      const pkg = requireFromHere.resolve('web-tree-sitter/package.json');
+      candidates.push(path.resolve(path.dirname(pkg), 'tree-sitter.wasm'));
+    } catch {
+      // web-tree-sitter not resolvable from this module — ignore.
+    }
+  }
+
+  for (const c of candidates) {
+    try {
+      if (existsSync(c) && statSync(c).size > 0) return c;
+    } catch {
+      /* ignore stat errors and try the next candidate */
+    }
+  }
+  return null;
+}
 
 // ──── Local typed shim for web-tree-sitter (no upstream @types) ────
 
@@ -176,17 +221,24 @@ export class TreeSitterAdapter implements ParserAdapter {
     this.initialised = true;
 
     try {
+      const coreWasm = resolveVendorWasm('tree-sitter.wasm');
+      if (!coreWasm) {
+        throw new Error(
+          'tree-sitter.wasm not found in vendor/ or web-tree-sitter package',
+        );
+      }
+      const bashWasm = resolveVendorWasm('tree-sitter-bash.wasm');
+      if (!bashWasm) {
+        throw new Error('tree-sitter-bash.wasm not found in vendor/');
+      }
+
       await ParserCtor.init({
         locateFile: (scriptName: string): string => {
-          if (scriptName === 'tree-sitter.wasm') {
-            return path.resolve(__dirname, '../../vendor/tree-sitter.wasm');
-          }
-          return path.resolve(__dirname, '../../vendor', scriptName);
+          if (scriptName === 'tree-sitter.wasm') return coreWasm;
+          return resolveVendorWasm(scriptName) ?? scriptName;
         },
       });
-      const Bash = await LanguageCtor.load(
-        path.resolve(__dirname, '../../vendor/tree-sitter-bash.wasm'),
-      );
+      const Bash = await LanguageCtor.load(bashWasm);
       this.parser = new (ParserCtor as unknown as { new (): TreeSitterParser })();
       this.parser.setLanguage(Bash);
       this.supported = true;

@@ -19,6 +19,7 @@ import {
   toSafetyAlertDirective,
 } from '../runtime/loop-trap.js';
 import * as p from '@clack/prompts';
+import { FILE_WRITING_RULES_BLOCK } from './file-writing-rules.js';
 
 function getPatchPaths(patch: string): string[] {
   const paths: string[] = [];
@@ -150,7 +151,8 @@ export async function partitionContext(
     }
     filesToLoad = Array.from(codeFiles);
     systemPrompt = `You are the FixO Code Agent. Your job is to read and modify code files in the workspace.
-You have access to files and their dependencies. Focus only on the requested code changes.`;
+You have access to files and their dependencies. Focus only on the requested code changes.
+${FILE_WRITING_RULES_BLOCK}`;
   } else if (persona === 'test') {
     const testFiles = new Set<string>();
     for (const f of index.files) {
@@ -166,7 +168,8 @@ You have access to files and their dependencies. Focus only on the requested cod
     }
     filesToLoad = Array.from(testFiles);
     systemPrompt = `You are the FixO Test Agent. Your job is to run, write, or fix unit and integration tests.
-Ensure code changes are thoroughly covered by tests and all test suites pass.`;
+Ensure code changes are thoroughly covered by tests and all test suites pass.
+${FILE_WRITING_RULES_BLOCK}`;
   } else if (persona === 'doc') {
     const docFiles = new Set<string>();
     for (const f of index.files) {

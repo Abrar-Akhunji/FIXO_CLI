@@ -13,7 +13,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, saveConfig, getDefaultConfig, type FreeLLMConfig } from './config.js';
+import { loadConfig, saveConfig, getDefaultConfig, DEFAULT_API_URL, type FreeLLMConfig } from './config.js';
 import { runSetupWizard } from './setup-wizard.js';
 import { startREPL } from './ui/prompt.js';
 import type { ProjectConfig } from './types.js';
@@ -356,6 +356,8 @@ async function main(): Promise<void> {
   // handing off to startREPL so the boot sequence is:
   // logo → command grid → session header → › prompt.
   const sessionModel = model ?? 'auto';
+  const envEndpoint = process.env.FIXO_API_URL?.trim();
+  const resolvedEndpoint = envEndpoint || config.apiUrl || DEFAULT_API_URL;
   renderSessionHeader({
     status: 'new',
     startedAt: new Date().toISOString(),
@@ -364,6 +366,8 @@ async function main(): Promise<void> {
     mode: 'BUILD',
     routing: 'auto',
     contextWindow: '200k',
+    endpoint: resolvedEndpoint,
+    endpointFromEnv: Boolean(envEndpoint),
   });
   await startREPL({
     config,

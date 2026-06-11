@@ -13,12 +13,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { getDefaultConfig, loadConfig } from '../config.js';
 
-test('getDefaultConfig: toolCalls budget defaults to soft=50, hard=100, autoExtend=true', () => {
+test('getDefaultConfig: toolCalls budget defaults to soft=50, hard=100, autoExtend=true, investigationMultiplier=3', () => {
   const cfg = getDefaultConfig();
   assert.deepEqual(cfg.preferences.safety.toolCalls, {
     softLimit: 50,
     hardLimit: 100,
     autoExtend: true,
+    investigationMultiplier: 3,
   });
 });
 

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { PolicyProfile } from './runtime/policy.js';
 
-export const DEFAULT_API_URL = 'https://api.freellmapi.com/v1';
+export const DEFAULT_API_URL = 'https://freellm-liart.vercel.app/v1';
 
 /** Stream-resume policy. */
 export type StreamResumePolicy = 'auto' | 'never';
@@ -71,6 +71,16 @@ export interface ToolCallBudgetPolicy {
   hardLimit: number;
   /** When true, the soft limit silently extends if no loop is detected. */
   autoExtend: boolean;
+  /**
+   * Multiplier applied to `hardLimit` when the loop has invoked only
+   * read-only tools so far (no `write_file`, `apply_patch`, `sed -i`,
+   * `run_command`, etc.). Investigation-shaped tasks — audits, reviews,
+   * "find vulnerabilities" — often need to read 80+ files before
+   * answering. Defaults to 3, giving a ceiling of `hardLimit * 3` (300
+   * with the default 100 hard limit). Snaps back to `hardLimit` the
+   * instant the agent runs a mutating tool. Set to 1 to disable.
+   */
+  investigationMultiplier: number;
 }
 
 /** Pre-save gate severity. */
@@ -240,6 +250,7 @@ export function getDefaultConfig(): FreeLLMConfig {
           softLimit: 50,
           hardLimit: 100,
           autoExtend: true,
+          investigationMultiplier: 3,
         },
       },
     },

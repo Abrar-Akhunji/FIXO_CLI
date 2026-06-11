@@ -25,10 +25,13 @@ import {
   saveSnapshot,
   SNAPSHOT_KIND,
   SNAPSHOT_VERSION,
+  isValidSessionLabel,
+  renameSnapshot,
   type SaveInput,
   type SessionMessage,
 } from '../runtime/session-snapshots.js';
 import { emptyTodoList, addItem } from '../context/todo.js';
+import { ConversationManager, SessionManager } from '../agent/conversation.js';
 
 function mkTmp(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -187,5 +190,108 @@ test('saveSnapshot is atomic — no leftover .tmp file', () => {
     assert.equal(stray.length, 0);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('isValidSessionLabel validates label names', () => {
+  assert.equal(isValidSessionLabel('my-session.1'), true);
+  assert.equal(isValidSessionLabel('accessibility_audit'), true);
+  assert.equal(isValidSessionLabel('  valid label with spaces  '), true);
+  
+  // Invalid cases
+  assert.equal(isValidSessionLabel(''), false); // empty
+  assert.equal(isValidSessionLabel('a'.repeat(65)), false); // too long
+  assert.equal(isValidSessionLabel('session/1'), false); // path separator
+  assert.equal(isValidSessionLabel('session\\1'), false); // backslash
+  assert.equal(isValidSessionLabel('session; echo bad'), false); // semicolon
+  assert.equal(isValidSessionLabel('session$foo'), false); // dollar
+  assert.equal(isValidSessionLabel('session`pwd`'), false); // backtick
+  assert.equal(isValidSessionLabel(null as any), false); // wrong type
+});
+
+test('renameSnapshot atomically updates session label on disk', () => {
+  const cwd = mkTmp('snap-test-');
+  try {
+    const input = buildSampleInput(cwd);
+    const result = saveSnapshot(input);
+    assert.equal(result.ok, true);
+
+    // Initial load should have no label
+    const initial = loadSnapshot(cwd, result.id);
+    assert.equal(initial.ok, true);
+    assert.equal(initial.snapshot?.label, undefined);
+
+    // Rename
+    const renameRes = renameSnapshot(cwd, result.id, 'new-label');
+    assert.equal(renameRes.ok, true);
+    assert.equal(renameRes.label, 'new-label');
+
+    // Reload and check
+    const reloaded = loadSnapshot(cwd, result.id);
+    assert.equal(reloaded.ok, true);
+    assert.equal(reloaded.snapshot?.label, 'new-label');
+
+    // Rename with invalid label should fail
+    const failRename = renameSnapshot(cwd, result.id, 'bad;label');
+    assert.equal(failRename.ok, false);
+    assert.match(failRename.error || '', /invalid label/);
+
+    // Reload again and check label remains unchanged
+    const reloaded2 = loadSnapshot(cwd, result.id);
+    assert.equal(reloaded2.ok, true);
+    assert.equal(reloaded2.snapshot?.label, 'new-label');
+
+    // Clear label
+    const clearRes = renameSnapshot(cwd, result.id, undefined);
+    assert.equal(clearRes.ok, true);
+    assert.equal(clearRes.label, undefined);
+
+    const reloaded3 = loadSnapshot(cwd, result.id);
+    assert.equal(reloaded3.ok, true);
+    assert.equal(reloaded3.snapshot?.label, undefined);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('SessionManager.renameSession atomically updates global session label', () => {
+  // Mock the sessions directory to avoid writing to ~/.fixocli/sessions
+  const tmpDir = mkTmp('sessions-test-');
+  const originalGetSessionsDir = SessionManager.getSessionsDir;
+  SessionManager.getSessionsDir = () => tmpDir;
+
+  try {
+    const conv = new ConversationManager();
+    conv.addTurn('hi', 'hello');
+
+    const sessionId = SessionManager.saveSession(
+      conv,
+      'gemini-2.5-flash',
+      ['a.ts'],
+      { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
+    );
+
+    // Initial check
+    const list = SessionManager.listSessions();
+    const found = list.find((s) => s.sessionId === sessionId);
+    assert.ok(found);
+    assert.equal(found.label, undefined);
+
+    // Rename
+    const ok = SessionManager.renameSession(sessionId, 'my-global-label');
+    assert.equal(ok, true);
+
+    // Reload and verify
+    const list2 = SessionManager.listSessions();
+    const found2 = list2.find((s) => s.sessionId === sessionId);
+    assert.ok(found2);
+    assert.equal(found2.label, 'my-global-label');
+
+    // Rename non-existent session
+    const ok2 = SessionManager.renameSession('non-existent-uuid', 'label');
+    assert.equal(ok2, false);
+  } finally {
+    SessionManager.getSessionsDir = originalGetSessionsDir;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

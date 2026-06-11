@@ -10,13 +10,17 @@
   "main": "dist/index.js",
   "files": [
     "dist/",
+    "vendor/",
+    "scripts/check-vendor-wasm.js",
     "README.md"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test src/__tests__/*.test.ts",
-    "prepublishOnly": "npm run build"
+    "check:vendor": "node scripts/check-vendor-wasm.js",
+    "prepack": "npm run check:vendor",
+    "prepublishOnly": "npm run build && npm run check:vendor"
   },
   "keywords": [
     "ai",

@@ -98,6 +98,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   const { randomUUID } = await import('node:crypto');
   let currentSessionId: string = randomUUID();
+  let currentSessionLabel: string | undefined;
   let sessionModifiedFiles: string[] = [];
   let currentMode: 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT' = 'BUILD';
 
@@ -135,6 +136,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       conversation.setContextLimit(currentModel);
       currentMode = snap.mode;
       selectedFiles = [...snap.selectedFiles];
+      currentSessionId = snap.id;
+      currentSessionLabel = snap.label;
       console.log(`\n${c.green}✓ Resumed session${c.reset} ${c.dim}${snap.id}${c.reset}`);
       console.log(`  ${c.dim}messages=${snap.conversation.length} tokens=${snap.tokens} model=${snap.model} mode=${snap.mode}${c.reset}`);
       if (snap.summary) {
@@ -252,7 +255,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       mode: modeForState,
       routing: 'auto',
       model: currentModel,
-      branch: currentBranch || 'detached',
+      // Show '(detached HEAD)' instead of bare 'detached' so the
+      // status bar is unambiguous — the previous label read as "the
+      // CLI is detached from the API server" to several users.
+      branch: currentBranch || '(detached HEAD)',
       contextPercent,
       providersCount,
       transport: 'freellmapi',
@@ -1554,9 +1560,70 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           return;
         }
 
+        case '/rename': {
+          // Renames the *active* session. Accepts the rest of the
+          // input as a free-form label (so spaces don't need quoting).
+          const rawLabel = args.join(' ').trim();
+          const { isValidSessionLabel, MAX_LABEL_LENGTH } = await import(
+            '../runtime/session-snapshots.js'
+          );
+          const { SessionManager } = await import('../agent/conversation.js');
+          if (!rawLabel) {
+            console.log(
+              `\n${c.yellow}Usage: /rename <label>${c.reset}\n` +
+                `${c.dim}  Labels are 1..${MAX_LABEL_LENGTH} chars: letters, digits, space, dash, underscore, dot.${c.reset}`,
+            );
+            return;
+          }
+          if (!isValidSessionLabel(rawLabel)) {
+            console.log(
+              `\n${c.red}✗ Invalid label.${c.reset} ${c.dim}Allowed: letters, digits, space, dash, underscore, dot — max ${MAX_LABEL_LENGTH} chars.${c.reset}`,
+            );
+            return;
+          }
+          // Persist if the session has already been saved at least
+          // once; otherwise just remember the label in memory until
+          // the next save fires.
+          try {
+            SessionManager.renameSession(currentSessionId, rawLabel);
+          } catch {
+            /* tolerate first-rename-before-save */
+          }
+          currentSessionLabel = rawLabel;
+          console.log(`\n${c.green}✓ Session renamed:${c.reset} ${c.cyan}${rawLabel}${c.reset} ${c.dim}(id: ${currentSessionId})${c.reset}`);
+          return;
+        }
+
         case '/session': {
           const sub = args[0];
           const { SessionManager } = await import('../agent/conversation.js');
+          if (sub === 'rename') {
+            const id = args[1];
+            const rawLabel = args.slice(2).join(' ').trim();
+            const { isValidSessionLabel, MAX_LABEL_LENGTH } = await import(
+              '../runtime/session-snapshots.js'
+            );
+            if (!id || !rawLabel) {
+              console.log(
+                `\n${c.yellow}Usage: /session rename <id> <label>${c.reset}`,
+              );
+              return;
+            }
+            if (!isValidSessionLabel(rawLabel)) {
+              console.log(
+                `\n${c.red}✗ Invalid label.${c.reset} ${c.dim}Max ${MAX_LABEL_LENGTH} chars; letters, digits, space, dash, underscore, dot only.${c.reset}`,
+              );
+              return;
+            }
+            const ok = SessionManager.renameSession(id, rawLabel);
+            if (!ok) {
+              console.log(`\n${c.red}✗ Session not found: ${id}${c.reset}`);
+              return;
+            }
+            if (id === currentSessionId) currentSessionLabel = rawLabel;
+            console.log(`\n${c.green}✓ Renamed${c.reset} ${c.dim}${id}${c.reset} → ${c.cyan}${rawLabel}${c.reset}`);
+            return;
+          }
           if (sub === 'list') {
             const list = SessionManager.listSessions();
             if (list.length === 0) {
@@ -1565,7 +1632,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               console.log(`\n${c.cyan}${c.bold}Saved Sessions:${c.reset}`);
               for (const s of list) {
                 const date = new Date(s.timestamp).toLocaleString();
-                console.log(`  ${c.cyan}${s.sessionId}${c.reset} - ${c.bold}${s.model}${c.reset} (${s.messageCount} msgs)`);
+                const labelDisplay = s.label
+                  ? `${c.cyan}${s.label}${c.reset} ${c.dim}(${s.sessionId.slice(0, 8)})${c.reset}`
+                  : `${c.cyan}${s.sessionId}${c.reset}`;
+                console.log(`  ${labelDisplay} - ${c.bold}${s.model}${c.reset} (${s.messageCount} msgs)`);
                 console.log(`    ${c.dim}Created: ${date} | Tokens: ${s.totalTokens.toLocaleString()}${c.reset}`);
                 if (s.summary) {
                   console.log(`    ${c.dim}Summary: ${s.summary.slice(0, 80)}...${c.reset}`);
@@ -1587,6 +1657,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               conversation.setContextLimit(currentModel);
               sessionModifiedFiles = data.modifiedFiles || [];
               currentSessionId = data.sessionId;
+              currentSessionLabel = data.label;
               stats.totalPromptTokens = data.tokenUsage?.prompt_tokens || 0;
               stats.totalCompletionTokens = data.tokenUsage?.completion_tokens || 0;
               console.log(`\n${c.green}✓ Session restored successfully: ${c.bold}${uuid}${c.reset}`);
@@ -1604,6 +1675,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             stats.totalDurationMs = 0;
             const { randomUUID } = await import('node:crypto');
             currentSessionId = randomUUID();
+            currentSessionLabel = undefined;
             SessionManager.saveSession(
               conversation,
               currentModel,
@@ -1613,11 +1685,29 @@ export async function startREPL(options: PromptOptions): Promise<void> {
                 completion_tokens: stats.totalCompletionTokens,
                 total_tokens: stats.totalPromptTokens + stats.totalCompletionTokens,
               },
-              currentSessionId
+              currentSessionId,
+              currentSessionLabel,
             );
+            try {
+              const { saveSnapshot } = await import('../runtime/session-snapshots.js');
+              saveSnapshot({
+                cwd,
+                conversation: [],
+                tokens: 0,
+                model: currentModel,
+                mode: currentMode,
+                selectedFiles: [],
+                summary: '',
+                label: undefined,
+                id: currentSessionId,
+                fixedInstructions: projectConfig?.systemPrompt,
+              });
+            } catch {
+              // Ignore snapshot save errors on new session
+            }
             console.log(`\n${c.green}✓ Active conversation memory purged. New session initialized: ${c.bold}${currentSessionId}${c.reset}`);
           } else {
-            console.log(`\n${c.yellow}Usage: /session [list | load <uuid> | new]${c.reset}`);
+            console.log(`\n${c.yellow}Usage: /session [list | load <uuid> | new | rename <id> <label>]${c.reset}`);
           }
           return;
         }
@@ -2189,8 +2279,27 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           completion_tokens: stats.totalCompletionTokens,
           total_tokens: stats.totalPromptTokens + stats.totalCompletionTokens,
         },
-        currentSessionId
+        currentSessionId,
+        currentSessionLabel,
       );
+      const { saveSnapshot } = await import('../runtime/session-snapshots.js');
+      saveSnapshot({
+        cwd,
+        conversation: conversation.exportHistory().map((m, idx) => ({
+          role: m.role as any,
+          content: m.content || '',
+          name: m.name,
+          index: idx,
+        })),
+        tokens: stats.totalPromptTokens + stats.totalCompletionTokens,
+        model: currentModel,
+        mode: currentMode,
+        selectedFiles: [...selectedFiles],
+        summary: conversation.getSummary(),
+        label: currentSessionLabel,
+        id: currentSessionId,
+        fixedInstructions: projectConfig?.systemPrompt,
+      });
     } catch (err) {
       // Ignore session save errors
     }

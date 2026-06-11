@@ -30,6 +30,11 @@ import {
   SemanticLoopAbortedError,
   toSafetyAlertDirective,
 } from '../runtime/loop-trap.js';
+import {
+  LoopMitigationTracker,
+  isReadTool,
+  buildLoopBlockedReadResult,
+} from '../runtime/loop-mitigation.js';
 import { dashboard } from '../ui/render.js';
 import { TaskStatusIndicator } from '../ui/render-primitives.js';
 import * as p from '@clack/prompts';
@@ -48,10 +53,42 @@ import {
 } from '../runtime/worktree.js';
 import { BackgroundAwareness } from './background-awareness.js';
 import { FixoMdWatcher } from '../context/fixo-md-watcher.js';
+import { FILE_WRITING_RULES_BLOCK } from './file-writing-rules.js';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
 const MAX_TOOL_RESULT_LENGTH = 30_000;
+
+/**
+ * Tools that mutate the workspace, the git tree, the network, or any
+ * external state. Exported so the budget logic and the permission
+ * prompt logic share one source of truth — keeping the
+ * "investigation vs mutation" classification aligned with what the
+ * user sees in the approval prompt.
+ */
+export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'write_file',
+  'run_command',
+  'run_command_async',
+  'apply_patch',
+  'replace_range',
+  'insert_after',
+  'str_replace',
+  'rename_file',
+  'delete_file',
+  'create_branch',
+  'commit_changes',
+  'push_branch',
+  'create_pull_request',
+]);
+
+/**
+ * Returns true when the given tool name is a pure read / analysis
+ * operation (read_file, search_code, list_dir, extract_symbols, ...).
+ */
+export function isReadOnlyTool(name: string): boolean {
+  return !MUTATING_TOOL_NAMES.has(name);
+}
 
 const colors = {
   reset: C.RESET,
@@ -186,6 +223,7 @@ function buildSystemPrompt(
       `- **Multi-region or hunked edit on an existing file** (several non-adjacent changes, or a diff you already have) → use \`apply_patch\` with a unified diff. One tool call, all hunks atomic.`,
       `- **New file** OR **full rewrite** where the prior content is genuinely irrelevant → use \`write_file\`. This is the only sanctioned use of \`write_file\` on an existing path.`,
       `Never use \`write_file\` to "edit" an existing file by rewriting it whole. If the diff is small enough to describe, it is small enough for \`str_replace\` or \`apply_patch\`.`,
+      FILE_WRITING_RULES_BLOCK,
     );
   } else {
     parts.push(
@@ -397,6 +435,21 @@ export class SingleAgent {
     const budget = safety.toolCalls;
     let toolCallLimit = Math.max(1, budget.softLimit);
     const toolCallHardLimit = Math.max(toolCallLimit, budget.hardLimit);
+    /**
+     * Investigation budget — applies when the agent has only invoked
+     * read-only tools so far. Audits, reviews, and "find vulnerabilities"
+     * tasks routinely need to read 80+ files before answering; if we
+     * cap them at `hardLimit` they force the user to type `continue`
+     * mid-investigation (the failure mode seen in Test 2 of the log).
+     * Snaps back to `hardLimit` the moment a mutation fires.
+     */
+    const investigationMultiplier = Math.max(1, budget.investigationMultiplier ?? 1);
+    const toolCallInvestigationCeiling = Math.max(
+      toolCallHardLimit,
+      Math.floor(toolCallHardLimit * investigationMultiplier),
+    );
+    let anyMutationSeen = false;
+    let investigationModeAnnounced = false;
 
     // Pillar 2 — semantic loop detector. Tracks per-file frequency so
     // an LLM which varies its search arguments but keeps hammering
@@ -405,6 +458,7 @@ export class SingleAgent {
     // detectors run in parallel; the semantic one covers the most
     // common accidental "stare at one file" failure mode.
     const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
+    const loopMitigation = new LoopMitigationTracker();
     let pendingSafetyDirective: string | null = null;
 
     // Pillar 5 — per-turn background-job awareness. The LLM
@@ -428,19 +482,35 @@ export class SingleAgent {
       while (toolCallCount < toolCallLimit) {
         // Auto-extend the budget when the agent is at the soft limit
         // but the semantic loop detector is quiet — i.e. the work is
-        // still progressing, not thrashing. Capped at hardLimit.
+        // still progressing, not thrashing. Capped at hardLimit for
+        // mutating runs; lifted to the investigation ceiling
+        // (hardLimit * investigationMultiplier) while only read-only
+        // tools have fired.
         if (
           budget.autoExtend &&
           toolCallCount + 1 >= toolCallLimit &&
-          toolCallLimit < toolCallHardLimit &&
           pendingSafetyDirective === null
         ) {
-          const previous = toolCallLimit;
-          toolCallLimit = Math.min(toolCallHardLimit, toolCallLimit * 2);
-          if (toolCallLimit > previous) {
-            console.log(
-              `${colors.dim}↳ tool-call budget extended ${previous} → ${toolCallLimit} (no loop detected)${colors.reset}`,
-            );
+          const ceiling =
+            !anyMutationSeen && investigationMultiplier > 1
+              ? toolCallInvestigationCeiling
+              : toolCallHardLimit;
+          if (toolCallLimit < ceiling) {
+            const previous = toolCallLimit;
+            toolCallLimit = Math.min(ceiling, toolCallLimit * 2);
+            if (toolCallLimit > previous) {
+              const investigation = !anyMutationSeen && investigationMultiplier > 1;
+              if (investigation && !investigationModeAnnounced) {
+                console.log(
+                  `${colors.dim}ⓘ Investigation mode — extended budget to ${toolCallLimit} (read-only tools only).${colors.reset}`,
+                );
+                investigationModeAnnounced = true;
+              } else if (!investigation) {
+                console.log(
+                  `${colors.dim}↳ tool-call budget extended ${previous} → ${toolCallLimit} (no loop detected)${colors.reset}`,
+                );
+              }
+            }
           }
         }
         // Background-job awareness: surface newly-finished and
@@ -581,6 +651,13 @@ export class SingleAgent {
                 `${colors.yellow}⚠  Semantic loop warning: ${verdict.target} ` +
                 `accessed ${verdict.count}× in the last ${verdict.windowSize} turns.${colors.reset}`,
               );
+              const nowBlocking = loopMitigation.recordWarn(verdict.target);
+              if (nowBlocking) {
+                console.log(
+                  `${colors.yellow}⚠  Further reads of ${verdict.target} will be ` +
+                    `rejected this session — agent will be forced to pivot.${colors.reset}`,
+                );
+              }
             } else if (verdict.state === 'hard-abort') {
               // Rollback any staged writes from this run before
               // throwing, so a runaway agent doesn't leave a
@@ -606,6 +683,31 @@ export class SingleAgent {
           if (pendingSafetyDirective) {
             injectSafetyDirective(pendingSafetyDirective);
             pendingSafetyDirective = null;
+          }
+
+          // Active loop mitigation: if the model is trying to read
+          // a target the loop-trap has already warned on N times,
+          // short-circuit with a tool-error result instead of letting
+          // the LLM stare at the same file again. The mitigation
+          // tracker is per-session, so a future user task can re-read
+          // the same file freely.
+          if (
+            isReadTool(toolCall.function.name) &&
+            typeof parsedArgs.path === 'string' &&
+            loopMitigation.isBlocked(parsedArgs.path)
+          ) {
+            const warns = loopMitigation.warnsFor(parsedArgs.path);
+            const blockedResult = buildLoopBlockedReadResult(parsedArgs.path, warns);
+            console.log(
+              `${colors.yellow}⚠  Loop-blocked read intercepted: ${parsedArgs.path}${colors.reset}`,
+            );
+            messages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: blockedResult,
+            });
+            toolCallCount++;
+            continue;
           }
 
           const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl, context.yes);
@@ -658,6 +760,20 @@ export class SingleAgent {
           if (event.isWrite && event.affectedPath) {
             if (!modifiedFiles.includes(event.affectedPath)) {
               modifiedFiles.push(event.affectedPath);
+            }
+          }
+
+          // Investigation-budget gate: any mutating tool snaps the
+          // ceiling back to hardLimit on the next iteration. We check
+          // the tool name (not just event.isWrite) because run_command
+          // is mutating-by-default even when it doesn't touch a file.
+          if (
+            !anyMutationSeen &&
+            (event.isWrite || MUTATING_TOOL_NAMES.has(toolCall.function.name))
+          ) {
+            anyMutationSeen = true;
+            if (toolCallLimit > toolCallHardLimit) {
+              toolCallLimit = toolCallHardLimit;
             }
           }
 
@@ -724,20 +840,7 @@ export class SingleAgent {
     rl?: readline.Interface,
     allowWithoutPrompt?: boolean,
   ): Promise<boolean> {
-    const MUTATING_TOOLS = new Set([
-      'write_file',
-      'run_command',
-      'apply_patch',
-      'replace_range',
-      'insert_after',
-      'rename_file',
-      'delete_file',
-      'create_branch',
-      'commit_changes',
-      'push_branch',
-      'create_pull_request',
-    ]);
-    if (!MUTATING_TOOLS.has(name)) {
+    if (!MUTATING_TOOL_NAMES.has(name)) {
       return true;
     }
 

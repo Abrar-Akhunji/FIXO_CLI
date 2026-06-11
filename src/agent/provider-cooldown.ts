@@ -21,6 +21,8 @@
  *   - Non-retryable (4xx other)            → no cooldown, just record
  */
 
+import { formatDuration } from './duration.js';
+
 const ONE_SECOND_MS = 1_000;
 const ONE_MINUTE_MS = 60 * ONE_SECOND_MS;
 
@@ -81,8 +83,8 @@ export class ProviderInCooldownError extends Error {
   readonly until: number;
   constructor(providerId: string, cooldownMs: number, until: number) {
     super(
-      `Provider '${providerId}' is in cooldown for ${cooldownMs}ms ` +
-        `(until ${new Date(until).toISOString()})`,
+      `Provider '${providerId}' is in cooldown for ${formatDuration(cooldownMs)} ` +
+        `(until ${new Date(until).toLocaleTimeString()})`,
     );
     this.name = 'ProviderInCooldownError';
     this.providerId = providerId;
