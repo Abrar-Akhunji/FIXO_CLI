@@ -2094,140 +2094,32 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // own copy via context above.
     pendingAttachments = [];
 
-    const classification = classifyComplexityHeuristic(input);
-    let result;
-    const startTime = Date.now();
-
-    if (classification.complexity === 'complex') {
-      console.log(`\n${c.cyan}[Routing Engine] Complex task detected (${classification.reason}). Routing to Orchestrator...${c.reset}`);
-      try {
-        const { Orchestrator } = await import('../agent/orchestrator.js');
-        const { AgentPool } = await import('../agent/agent-pool.js');
-
-        console.log(`\n${c.cyan}[Orchestrator] Generating plan for complex task...${c.reset}`);
-        const orchestrator = new Orchestrator(verbose);
-        const dag = await orchestrator.plan(context);
-
-        // Render planned phases in high contrast box
-        const width = 60;
-        const borderTop = `┌${'─'.repeat(width)}┐`;
-        const borderBottom = `└${'─'.repeat(width)}┘`;
-        console.log(`\n${c.cyan}${borderTop}${c.reset}`);
-        console.log(`${c.cyan}│${c.reset}  ${c.bold}Planned Subtask Phases (Complex Task decomposition):${c.reset}${' '.repeat(width - 52)}${c.cyan}│${c.reset}`);
-        console.log(`${c.cyan}├${'─'.repeat(width)}┤${c.reset}`);
-        for (const sub of dag.subtasks) {
-          const deps = sub.dependencies.length > 0 ? ` (deps: ${sub.dependencies.join(', ')})` : '';
-          const lineStr = `  - [${sub.persona.toUpperCase()}] ${sub.title}${deps}`;
-          const pad = Math.max(0, width - lineStr.length - 4);
-          console.log(`${c.cyan}│${c.reset}  ${c.bold}${lineStr}${c.reset}${' '.repeat(pad)}  ${c.cyan}│${c.reset}`);
-        }
-        console.log(`${c.cyan}${borderBottom}${c.reset}\n`);
-
-        // Save the DAG to .fixo/last-dag.json
-        const fixoDir = path.join(cwd, '.fixo');
-        fs.mkdirSync(fixoDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(fixoDir, 'last-dag.json'),
-          JSON.stringify({ task: input, dag }, null, 2),
-          'utf-8'
-        );
-
-        if (currentMode === 'PLAN') {
-          console.log(`${c.green}✓ Plan generated and saved successfully.${c.reset}`);
-          console.log(`${c.dim}  To execute this plan, switch to BUILD mode (type /mode build or hit [TAB]) and run: /run-plan${c.reset}\n`);
-          return;
-        }
-
-        const budgetLimit = projectConfig?.maxAttempts ?? 12;
-        const pool = new AgentPool(3, budgetLimit);
-
-        console.log(`\n${c.cyan}[Agent Pool] Executing DAG of subtasks (concurrency limit: 3, budget: ${budgetLimit} tool calls)...${c.reset}`);
-        const success = await pool.execute(context, dag);
-        const durationMs = Date.now() - startTime;
-
-        const totalPromptTokens = orchestrator.tokensUsed.prompt_tokens + pool.tokensUsed.prompt_tokens;
-        const totalCompletionTokens = orchestrator.tokensUsed.completion_tokens + pool.tokensUsed.completion_tokens;
-
-        // Find modified files to report
-        const { getModifiedFiles, getBranchPoint } = await import('../agent/worker-agent.js');
-        const relativeModified = getModifiedFiles(cwd, getBranchPoint(cwd));
-        const modifiedFiles = relativeModified.map(f => path.resolve(cwd, f));
-
-        if (!success) {
-          console.log(`\n${c.red}✗ Parallel workers failed to complete all subtasks.${c.reset}`);
-          if (git.isGitRepo()) {
-            // Phase 0.0 — scope rollback to worker-touched files only.
-            if (modifiedFiles.length > 0) {
-              console.log(`\n${c.yellow}[Agent Pool] Rolling back ${modifiedFiles.length} file(s) the workers touched...${c.reset}`);
-              git.discardChangesIn(modifiedFiles);
-            } else {
-              console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
-            }
-          }
-        }
-
-        result = {
-          success,
-          response: success
-            ? 'Successfully completed complex task via parallel agents.'
-            : 'Failed to complete all complex subtasks.',
-          modifiedFiles,
-          tokensUsed: {
-            prompt_tokens: totalPromptTokens,
-            completion_tokens: totalCompletionTokens,
-            total_tokens: totalPromptTokens + totalCompletionTokens
-          },
-          toolCallCount: pool.toolCallCount,
-          durationMs,
-          model: context.model,
-        };
-
-      } catch (err: any) {
-        console.error(`\n${c.red}✗ Orchestrated execution failed: ${err.message || err}${c.reset}`);
-        if (git.isGitRepo()) {
-          // Phase 0.0 — never reset files the workers didn't touch.
-          // Failures *before* worker spawns mean the workspace is
-          // untouched; failures *during* worker exec leave behind a
-          // measurable modified-files set. In either case the safe
-          // behaviour is the same: only roll back what the workers
-          // actually wrote, never anything else the user is editing.
-          try {
-            const { getModifiedFiles, getBranchPoint } = await import('../agent/worker-agent.js');
-            const touched = getModifiedFiles(cwd, getBranchPoint(cwd));
-            if (touched.length > 0) {
-              console.log(`\n${c.yellow}[Agent Pool] Rolling back ${touched.length} file(s) the workers touched...${c.reset}`);
-              git.discardChangesIn(touched);
-            } else {
-              console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
-            }
-          } catch (_inner) {
-            // safe: rollback discovery itself must never crash the error path
-            console.log(`\n${c.dim}[Agent Pool] Rollback discovery failed — leaving workspace untouched as a precaution.${c.reset}`);
-          }
-        }
-        const durationMs = Date.now() - startTime;
-        result = {
-          success: false,
-          response: `Orchestrated run failed: ${err.message || err}`,
-          modifiedFiles: [],
-          tokensUsed: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-          toolCallCount: 0,
-          durationMs,
-          model: context.model,
-        };
-      }
-    } else {
-      console.log(`\n${c.cyan}[Routing Engine] Simple task detected (${classification.reason}). Routing to SingleAgent...${c.reset}`);
-      isTaskRunning = true;
-      currentRunningAgent = agent;
-      try {
-        result = await agent.runStreaming(context, conversation, rl);
-      } finally {
+    // Phase 2.1 — routing decision + execution lives in
+    // task-router.ts so it can be unit-tested independently of the
+    // REPL and reused by future non-TUI entry points (--headless,
+    // web backend, IDE extension). Console output is byte-identical
+    // to the pre-extraction inline path. The rollback inside the
+    // complex path uses git.discardChangesIn() (Phase 0.0 — scoped).
+    const { routeAndExecute } = await import('../agent/task-router.js');
+    const routed = await routeAndExecute(input, context, {
+      agent,
+      conversation,
+      rl,
+      projectConfig,
+      verbose,
+      onSimplePathStart: (a) => {
+        isTaskRunning = true;
+        currentRunningAgent = a;
+      },
+      onSimplePathEnd: () => {
         isTaskRunning = false;
         currentRunningAgent = null;
-        agent.reset();
-      }
+      },
+    });
+    if (routed.route === 'plan-mode-deferred') {
+      return;
     }
+    const result = routed.result;
 
     // Print result summary
     console.log('');
