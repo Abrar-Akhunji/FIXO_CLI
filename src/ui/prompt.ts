@@ -2001,6 +2001,54 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           return;
         }
 
+        case '/model-routing': {
+          // Phase 2.4 — list / set the per-capability model tiers.
+          //
+          //   /model-routing                        → print current
+          //   /model-routing fast gpt-4o-mini       → set fast tier
+          //   /model-routing heavy claude-opus-4-7  → set heavy tier
+          //   /model-routing default <model>        → set default
+          //   /model-routing clear fast             → unset fast
+          //   /model-routing clear                  → unset all tiers
+          const sub = args[0]?.toLowerCase();
+          const routing = config.preferences.modelRouting ?? {};
+          if (!sub) {
+            console.log(`\n${c.cyan}Model routing tiers:${c.reset}`);
+            console.log(`  ${c.bold}fast${c.reset}    → ${routing.fast ?? c.dim + '(unset)' + c.reset}`);
+            console.log(`  ${c.bold}default${c.reset} → ${routing.default ?? c.dim + '(unset)' + c.reset}`);
+            console.log(`  ${c.bold}heavy${c.reset}   → ${routing.heavy ?? c.dim + '(unset)' + c.reset}`);
+            console.log(`${c.dim}\n  Usage:\n    /model-routing fast <model>\n    /model-routing heavy <model>\n    /model-routing default <model>\n    /model-routing clear [tier]${c.reset}`);
+          } else if (sub === 'clear') {
+            const tier = args[1]?.toLowerCase();
+            if (!tier) {
+              config.preferences.modelRouting = {};
+              saveConfig(config);
+              console.log(`\n${c.green}✓ All model-routing tiers cleared${c.reset}`);
+            } else if (tier === 'fast' || tier === 'default' || tier === 'heavy') {
+              const next = { ...routing };
+              delete next[tier];
+              config.preferences.modelRouting = next;
+              saveConfig(config);
+              console.log(`\n${c.green}✓ Cleared ${tier} tier${c.reset}`);
+            } else {
+              console.log(`\n${c.yellow}Unknown tier: ${tier}. Expected fast, default, or heavy.${c.reset}`);
+            }
+          } else if (sub === 'fast' || sub === 'default' || sub === 'heavy') {
+            const modelName = args[1];
+            if (!modelName) {
+              console.log(`\n${c.yellow}Usage: /model-routing ${sub} <model-name>${c.reset}`);
+            } else {
+              config.preferences.modelRouting = { ...routing, [sub]: modelName };
+              saveConfig(config);
+              console.log(`\n${c.green}✓ Set ${sub} tier → ${modelName}${c.reset}`);
+              console.log(`${c.dim}  Restart the session or run a new task — agents will pick up the new tier on construction.${c.reset}`);
+            }
+          } else {
+            console.log(`\n${c.yellow}Unknown sub-command: ${sub}. Try /model-routing without arguments to see usage.${c.reset}`);
+          }
+          return;
+        }
+
         case '/telemetry': {
           const sub = args[0]?.toLowerCase();
           if (sub === 'on' || sub === 'enable') {

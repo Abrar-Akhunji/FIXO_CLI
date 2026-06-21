@@ -172,6 +172,36 @@ export interface SafetyConfig {
   autoVerifyMaxRepairs?: number;
 }
 
+/**
+ * Phase 2.4 — local fast/heavy-tier model substitution.
+ *
+ * When a code path tags its request with `required_capabilities`,
+ * the client looks up the corresponding tier in this table and
+ * substitutes the locally-configured model BEFORE issuing the
+ * request. Works in both direct and proxy modes — direct sends the
+ * substituted model to the provider; proxy still sees the
+ * substitution as well as the legacy metadata headers.
+ *
+ * Per-tier semantics:
+ *   - `fast`    — used for planner classification, complexity
+ *                  routing, summary turns. Optimise for latency
+ *                  + cost; quality is less important.
+ *   - `heavy`   — used for the orchestrator's plan() and any
+ *                  call that asks for `'heavy'`. Optimise for
+ *                  quality.
+ *   - `default` — fallback when a request asks for a capability
+ *                  the user hasn't configured; equivalent to
+ *                  not substituting at all.
+ *
+ * All three fields are optional. When a tier is unset, the
+ * client falls through to the model the caller passed.
+ */
+export interface ModelRoutingConfig {
+  fast?: string;
+  default?: string;
+  heavy?: string;
+}
+
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
 export interface ResilienceConfig {
   /** When 'auto', mid-stream cuts are resumed transparently (default). */
@@ -255,6 +285,11 @@ export interface FreeLLMConfig {
      * is a programmatic-only surface and is not user-configurable.
      */
     safety: SafetyConfig;
+    /**
+     * Phase 2.4 — per-capability model substitution. Optional. See
+     * {@link ModelRoutingConfig}.
+     */
+    modelRouting?: ModelRoutingConfig;
   };
   _firstRunComplete: boolean;
 }

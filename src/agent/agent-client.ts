@@ -19,7 +19,7 @@ import {
   isMidStreamResumable,
   StreamResumeExhaustedError,
 } from './stream-glue.js';
-import { DEFAULT_API_URL } from '../config.js';
+import { DEFAULT_API_URL, type ModelRoutingConfig } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
 import { getProviderKeyVault } from '../runtime/credential-vault.js';
 import { extractTextFromContent } from '../shared/content.js';
@@ -266,17 +266,41 @@ export class AgentClient {
   private apiKey: string;
   private verbose: boolean;
   private providerMode: 'direct' | 'proxy';
+  private modelRouting: ModelRoutingConfig;
 
   constructor(
     apiKey: string,
     apiUrl?: string,
     verbose = false,
     providerMode: 'direct' | 'proxy' = 'proxy',
+    modelRouting?: ModelRoutingConfig,
   ) {
     this.baseUrl = process.env.FIXO_API_URL || apiUrl || BASE_URL;
     this.apiKey = apiKey;
     this.verbose = verbose;
     this.providerMode = providerMode;
+    this.modelRouting = modelRouting ?? {};
+  }
+
+  /**
+   * Phase 2.4 — substitute the caller-supplied model with a
+   * configured tier when `required_capabilities` asks for one.
+   * Returns the caller's model unchanged when no matching tier is
+   * configured, so the call is a no-op for users who haven't set
+   * up routing.
+   */
+  private applyCapabilityRouting(model: string, capabilities: string[] | undefined): string {
+    if (!capabilities || capabilities.length === 0) return model;
+    if (capabilities.includes('fast') && this.modelRouting.fast) {
+      return this.modelRouting.fast;
+    }
+    if (capabilities.includes('heavy') && this.modelRouting.heavy) {
+      return this.modelRouting.heavy;
+    }
+    if (this.modelRouting.default) {
+      return this.modelRouting.default;
+    }
+    return model;
   }
 
   private resolveDirectConfig(model: string): {
@@ -384,6 +408,11 @@ export class AgentClient {
     options: ChatOptions = {},
   ): Promise<ChatResult> {
     const { signal: externalSignal, ...restOptions } = options;
+    // Phase 2.4 — substitute the model BEFORE provider resolution so
+    // both the routing decision and the eventual request body see
+    // the same name. No-op when no capabilities are tagged or no
+    // tier is configured.
+    model = this.applyCapabilityRouting(model, options.required_capabilities);
     const providerId = this.getProviderId(model);
     providerCooldown.assertAvailable(providerId);
 
@@ -900,6 +929,8 @@ export class AgentClient {
     options: ChatOptions = {},
   ): AsyncGenerator<StreamChunk> {
     const { signal: externalSignal, ...restOptions } = options;
+    // Phase 2.4 — capability-tier substitution (see chat() comment).
+    model = this.applyCapabilityRouting(model, options.required_capabilities);
     const combinedSignal = externalSignal
       ? AbortSignal.any([AbortSignal.timeout(60000), externalSignal])
       : AbortSignal.timeout(60000);

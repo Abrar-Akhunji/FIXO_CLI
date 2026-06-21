@@ -235,6 +235,7 @@ export class WorkerAgent {
       config.apiUrl,
       verbose,
       config.provider_mode,
+      config.preferences.modelRouting,
     );
     this.verbose = verbose;
   }

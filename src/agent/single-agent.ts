@@ -300,6 +300,7 @@ export class SingleAgent {
       config.apiUrl,
       verbose,
       config.provider_mode,
+      config.preferences.modelRouting,
     );
     this.verbose = verbose;
   }
