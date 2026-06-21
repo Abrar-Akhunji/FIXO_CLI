@@ -149,6 +149,27 @@ export interface SafetyConfig {
   toolCalls: ToolCallBudgetPolicy;
   /** OS-level sandbox for `run_command`. Defaults to `'guard'`. */
   sandboxMode?: SandboxMode;
+  /**
+   * Phase 2 — automatic post-edit verification. When `true` (default)
+   * AND the run is in BUILD mode AND at least one file-mutating tool
+   * was called, the agent runs the project's detected test/typecheck
+   * command at the end of the tool loop and — if it fails — pushes a
+   * repair-request message back to the model up to
+   * {@link autoVerifyMaxRepairs} times before returning.
+   *
+   * Set to `false` to restore the pre-Phase-2 "trust the model"
+   * behaviour. Cheap-to-detect projects (no test/typecheck command in
+   * {@link import('./project-memory.js').detectProjectFacts}) silently
+   * skip the verifier — there's nothing to run.
+   */
+  autoVerify?: boolean;
+  /**
+   * Maximum number of automatic repair turns the verifier may use in
+   * one run. The default of 1 was chosen so a long-horizon task gets
+   * exactly one self-correction shot — enough to catch obvious type
+   * errors without spinning forever on hard failures.
+   */
+  autoVerifyMaxRepairs?: number;
 }
 
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
@@ -308,6 +329,8 @@ export function getDefaultConfig(): FreeLLMConfig {
           investigationMultiplier: 3,
         },
         sandboxMode: 'guard',
+        autoVerify: true,
+        autoVerifyMaxRepairs: 1,
       },
     },
     _firstRunComplete: false,

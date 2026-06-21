@@ -11,6 +11,7 @@ import { AgentClient, type ChatResult, type StreamChunk } from './agent-client.j
 import { ConversationManager } from './conversation.js';
 import { getActiveTools, TOOL_DEFINITIONS, executeTool, classifyExecutionRole, type ToolCallEvent } from './tool-executor.js';
 import { isTrivialQuery } from '../planner.js';
+import { decideAutoVerify, classifyVerifyOutput, buildRepairMessage } from './auto-verifier.js';
 import { buildRepoMap } from './repo-map.js';
 import type { AgentContext, AgentResult } from '../types.js';
 import { loadConfig } from '../config.js';
@@ -456,6 +457,16 @@ export class SingleAgent {
     let anyMutationSeen = false;
     let investigationModeAnnounced = false;
 
+    // Phase 2.2 — automatic post-edit verifier. After the tool loop
+    // reports "no more tool calls", re-check the project's tests
+    // (when configured) and — on failure — push a repair-request
+    // back into the same conversation up to `autoVerifyMaxRepairs`
+    // times before returning. Disabled outside BUILD mode and when
+    // no file-mutating tool ran. Gate + classification + message
+    // shape live in ./auto-verifier (testable in isolation).
+    let autoVerifyRepairsUsed = 0;
+    const autoVerifyMaxRepairs = Math.max(0, safety.autoVerifyMaxRepairs ?? 1);
+
     // Pillar 2 — semantic loop detector. Tracks per-file frequency so
     // an LLM which varies its search arguments but keeps hammering
     // the same file still trips. The composite LoopTrapDetector is
@@ -594,13 +605,44 @@ export class SingleAgent {
         totalUsage.completion_tokens += result.usage.completion_tokens;
         totalUsage.total_tokens += result.usage.total_tokens;
 
-        // No tool calls → stream final response
+        // No tool calls → potentially run the auto-verifier, then
+        // either continue the loop (one repair pass) or return.
         if (!result.tool_calls || result.tool_calls.length === 0) {
           const response = result.content ?? '';
 
           // Print the response (already received in non-streaming mode)
           if (response) {
             renderMarkdown(response);
+          }
+
+          // Phase 2.2 — automatic verifier.
+          const verifyGate = decideAutoVerify({
+            safety,
+            context,
+            modifiedFilesCount: modifiedFiles.length,
+            repairsUsed: autoVerifyRepairsUsed,
+          });
+          if (verifyGate.run) {
+            const { runProjectTests } = await import('../test-runner.js');
+            const verifyOutput = runProjectTests(context.cwd);
+            const outcome = classifyVerifyOutput(verifyOutput);
+            if (outcome === 'failing') {
+              autoVerifyRepairsUsed += 1;
+              console.log(
+                `\n${colors.yellow}🔍 [Auto-Verify] Verification failed (repair attempt ${autoVerifyRepairsUsed}/${autoVerifyMaxRepairs}). Asking the model to fix...${colors.reset}`,
+              );
+              if (this.verbose) {
+                console.log(`${colors.dim}${verifyOutput}${colors.reset}\n`);
+              }
+              messages.push({ role: 'assistant', content: response });
+              messages.push({ role: 'user', content: buildRepairMessage(verifyOutput) });
+              // Counts toward tool budget so pathological repairs
+              // don't extend the run indefinitely.
+              toolCallCount += 1;
+              continue;
+            }
+            // outcome === 'passing' or 'no-command' → fall through
+            // to the success return below.
           }
 
           indicator.stop();
