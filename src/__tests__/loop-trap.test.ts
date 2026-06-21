@@ -205,11 +205,9 @@ test('LoopTrapAbortedError — carries fingerprint and count', () => {
   assert.match(err.message, /Loop-trap hard-abort/);
 });
 
-test('planner re-exports LoopTrapDetector surface', async () => {
-  const mod = await import('../planner.js');
-  assert.equal(typeof mod.LoopTrapDetector, 'function');
-  assert.equal(typeof mod.LoopTrapAbortedError, 'function');
-  assert.equal(typeof mod.canonicaliseArgs, 'function');
-  assert.equal(typeof mod.DEFAULT_LOOP_TRAP_PREFS, 'object');
-  assert.equal(typeof mod.LoopTrapDetector, 'function');
-});
+// Phase 4.3 — the `planner.ts` re-export façade has been removed.
+// The previous "planner re-exports LoopTrapDetector surface" test
+// is intentionally deleted: the contract it asserted no longer
+// exists by design (the façade had zero live consumers and
+// reverse-coupled planner.ts to an unrelated runtime concern).
+// Callers that need the detector import from '../runtime/loop-trap.js'.
