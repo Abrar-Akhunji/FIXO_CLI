@@ -1518,8 +1518,16 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               } else {
                 console.log(`\n${c.red}✗ Parallel workers failed to complete all subtasks.${c.reset}`);
                 if (git.isGitRepo()) {
-                  console.log(`\n${c.yellow}[Agent Pool] Rolling back all uncommitted changes due to run failure...${c.reset}`);
-                  git.discardUncommittedChanges();
+                  // Phase 0.0 (Jun 21 incident): roll back only files the
+                  // workers actually touched, not the entire workspace.
+                  const { getModifiedFiles, getBranchPoint } = await import('../agent/worker-agent.js');
+                  const touched = getModifiedFiles(cwd, getBranchPoint(cwd));
+                  if (touched.length > 0) {
+                    console.log(`\n${c.yellow}[Agent Pool] Rolling back ${touched.length} file(s) the workers touched...${c.reset}`);
+                    git.discardChangesIn(touched);
+                  } else {
+                    console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
+                  }
                 }
               }
               return;
@@ -2148,8 +2156,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         if (!success) {
           console.log(`\n${c.red}✗ Parallel workers failed to complete all subtasks.${c.reset}`);
           if (git.isGitRepo()) {
-            console.log(`\n${c.yellow}[Agent Pool] Rolling back all uncommitted changes due to run failure...${c.reset}`);
-            git.discardUncommittedChanges();
+            // Phase 0.0 — scope rollback to worker-touched files only.
+            if (modifiedFiles.length > 0) {
+              console.log(`\n${c.yellow}[Agent Pool] Rolling back ${modifiedFiles.length} file(s) the workers touched...${c.reset}`);
+              git.discardChangesIn(modifiedFiles);
+            } else {
+              console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
+            }
           }
         }
 
@@ -2172,8 +2185,25 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       } catch (err: any) {
         console.error(`\n${c.red}✗ Orchestrated execution failed: ${err.message || err}${c.reset}`);
         if (git.isGitRepo()) {
-          console.log(`\n${c.yellow}[Agent Pool] Rolling back all uncommitted changes due to error...${c.reset}`);
-          git.discardUncommittedChanges();
+          // Phase 0.0 — never reset files the workers didn't touch.
+          // Failures *before* worker spawns mean the workspace is
+          // untouched; failures *during* worker exec leave behind a
+          // measurable modified-files set. In either case the safe
+          // behaviour is the same: only roll back what the workers
+          // actually wrote, never anything else the user is editing.
+          try {
+            const { getModifiedFiles, getBranchPoint } = await import('../agent/worker-agent.js');
+            const touched = getModifiedFiles(cwd, getBranchPoint(cwd));
+            if (touched.length > 0) {
+              console.log(`\n${c.yellow}[Agent Pool] Rolling back ${touched.length} file(s) the workers touched...${c.reset}`);
+              git.discardChangesIn(touched);
+            } else {
+              console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
+            }
+          } catch (_inner) {
+            // safe: rollback discovery itself must never crash the error path
+            console.log(`\n${c.dim}[Agent Pool] Rollback discovery failed — leaving workspace untouched as a precaution.${c.reset}`);
+          }
         }
         const durationMs = Date.now() - startTime;
         result = {

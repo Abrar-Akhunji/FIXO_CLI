@@ -3,6 +3,8 @@
  * All git operations are safely sandboxed to the workspace directory.
  */
 import { execFileSync } from 'child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WorkspaceGuard } from '../workspace-guard.js';
 import { C } from '../ui/colors.js';
 
@@ -262,13 +264,90 @@ export class GitManager {
     }
   }
 
-  /** Discard all uncommitted modifications and untracked files in the workspace. */
-  discardUncommittedChanges(): void {
+  /**
+   * Discard the agent's edits to a specific set of files only.
+   *
+   * Background: an earlier version exposed a `discardUncommittedChanges()`
+   * method that ran `git checkout -- .` followed by `git clean -fd`,
+   * unconditionally wiping every uncommitted change in the workspace —
+   * including pre-existing user work the agent never touched. The
+   * orchestrator's failure-rollback path called it on any error, which
+   * meant a *read-only* task failing on a tool-call budget could
+   * destroy hours of unrelated in-progress work. That method has been
+   * removed. Callers must now name the files they want to roll back.
+   *
+   * For tracked files in `files`, the change is reverted to the
+   * `HEAD` revision. For untracked files in `files` (i.e. new files
+   * the agent created during the run), the file is unlinked. Files
+   * NOT in `files` are left completely alone — including any other
+   * uncommitted user work.
+   *
+   * Passing an empty list is a no-op.
+   *
+   * @param files Absolute or workspace-relative paths the run actually modified.
+   */
+  discardChangesIn(files: string[]): void {
+    if (!this.isGitRepo()) return;
+    if (files.length === 0) {
+      console.log(`${colors.dim}  ⏪ Rollback: nothing to discard (0 files reported).${colors.reset}`);
+      return;
+    }
+    const relativeFiles = files.map((f) => path.isAbsolute(f) ? path.relative(this.cwd, f) : f);
+    const tracked: string[] = [];
+    const untracked: string[] = [];
+    try {
+      for (const rel of relativeFiles) {
+        let status = '';
+        try {
+          status = execFileSync('git', ['status', '--porcelain', '--', rel], {
+            cwd: this.cwd,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          }).trim();
+        } catch {
+          // safe: file may have been deleted mid-run; treat as no-op
+          continue;
+        }
+        if (!status) continue; // file is clean — nothing to roll back
+        if (status.startsWith('??')) untracked.push(rel);
+        else tracked.push(rel);
+      }
+      if (tracked.length > 0) {
+        execFileSync('git', ['checkout', 'HEAD', '--', ...tracked], {
+          cwd: this.cwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }
+      for (const rel of untracked) {
+        try { fs.unlinkSync(path.join(this.cwd, rel)); } catch { /* safe: best-effort */ }
+      }
+      const total = tracked.length + untracked.length;
+      if (total > 0) {
+        console.log(
+          `${colors.green}  ⏪ Rolled back ${tracked.length} modified + ${untracked.length} new file(s) the agent touched.${colors.reset}`,
+        );
+      } else {
+        console.log(`${colors.dim}  ⏪ Rollback: agent-touched files were already clean.${colors.reset}`);
+      }
+    } catch (error: any) {
+      console.log(`${colors.yellow}  ⚠ Failed to discard targeted changes: ${error.message || error}${colors.reset}`);
+    }
+  }
+
+  /**
+   * Escape hatch — full workspace wipe (`git checkout -- .` + `git clean -fd`).
+   * Removed from any agent-driven path; intentionally kept here for
+   * the rare case where a user explicitly chooses to discard
+   * everything from a slash command. Callers must pass
+   * `{ iAmCertain: true }` to spell out the intent.
+   */
+  forceDiscardAllUncommittedChanges(opts: { iAmCertain: true }): void {
+    if (!opts.iAmCertain) return;
     if (!this.isGitRepo()) return;
     try {
       execFileSync('git', ['checkout', '--', '.'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
       execFileSync('git', ['clean', '-fd'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-      console.log(`${colors.green}  ⏪ Discarded all uncommitted workspace changes due to execution failure.${colors.reset}`);
+      console.log(`${colors.green}  ⏪ Discarded ALL uncommitted workspace changes (explicit user request).${colors.reset}`);
     } catch (error: any) {
       console.log(`${colors.yellow}  ⚠ Failed to discard uncommitted changes: ${error.message || error}${colors.reset}`);
     }
