@@ -99,7 +99,12 @@ interface TreeSitterNode {
   readonly type: string;
   readonly text: string;
   readonly childCount: number;
+  readonly namedChildCount: number;
+  readonly startPosition: { row: number; column: number };
+  readonly endPosition: { row: number; column: number };
   child(index: number): TreeSitterNode;
+  namedChild(index: number): TreeSitterNode;
+  childForFieldName(name: string): TreeSitterNode | null;
 }
 
 const ParserCtor = (ParserModule as unknown as { Parser: TreeSitterParserAPI }).Parser;
@@ -213,6 +218,11 @@ export class TreeSitterAdapter implements ParserAdapter {
   public supported = true;
   private parser: TreeSitterParser | null = null;
   private initialised = false;
+  /** Lazily-loaded language grammars, keyed by LanguageId. The `bash`
+   *  grammar is loaded eagerly in {@link init} because the shell-
+   *  command parser path runs on virtually every tool call. The other
+   *  languages are loaded on demand by {@link loadLanguage}. */
+  private languages = new Map<LanguageId, unknown>();
 
   async init(): Promise<ParserInitResult> {
     if (this.initialised) {
@@ -241,11 +251,12 @@ export class TreeSitterAdapter implements ParserAdapter {
       const Bash = await LanguageCtor.load(bashWasm);
       this.parser = new (ParserCtor as unknown as { new (): TreeSitterParser })();
       this.parser.setLanguage(Bash);
+      this.languages.set('bash', Bash);
       this.supported = true;
       return { ok: true };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
-       
+
       console.warn(
         `\u26A0  Tree-Sitter WASM unavailable (${reason}). Falling back to regex parser. ` +
           `Performance reduced; accuracy may vary.`,
@@ -256,8 +267,61 @@ export class TreeSitterAdapter implements ParserAdapter {
     }
   }
 
+  /**
+   * Lazily load a language grammar from the vendored WASM. Idempotent.
+   * Returns `true` if the language is ready for tree-sitter-based
+   * extraction; `false` if the WASM is missing or fails to load
+   * (callers will fall back to the regex extractor).
+   *
+   * Pre-warm a language before calling {@link extractSymbols} in
+   * hot paths \u2014 extractSymbols itself is synchronous (see why in
+   * the {@link ParserAdapter} interface) and will silently fall
+   * through to the regex path if the grammar isn't loaded yet.
+   */
+  async loadLanguage(lang: LanguageId): Promise<boolean> {
+    if (!this.parser || !this.supported) return false;
+    if (this.languages.has(lang)) return true;
+    const wasmFile = wasmFileForLanguage(lang);
+    if (!wasmFile) return false;
+    const wasmPath = resolveVendorWasm(wasmFile);
+    if (!wasmPath) return false;
+    try {
+      const grammar = await LanguageCtor.load(wasmPath);
+      this.languages.set(lang, grammar);
+      return true;
+    } catch {
+      // safe: a single missing/incompatible grammar must not break
+      // unrelated languages or the shell path.
+      return false;
+    }
+  }
+
   extractSymbols(source: string, language: LanguageId): SymbolInfo[] {
-    return regexExtractSymbols(source, language);
+    const grammar = this.languages.get(language);
+    if (!grammar || !this.parser) {
+      return regexExtractSymbols(source, language);
+    }
+    try {
+      this.parser.setLanguage(grammar);
+      const tree = this.parser.parse(source);
+      const out = extractSymbolsFromTree(tree.rootNode, language);
+      // Restore the parser to its eagerly-loaded bash grammar so the
+      // command-parser path stays correct after a symbol extraction.
+      const bash = this.languages.get('bash');
+      if (bash) this.parser.setLanguage(bash);
+      // Empty result on a successful parse usually means the source
+      // had no top-level declarations \u2014 but it's also the failure
+      // mode of an unfamiliar dialect. Fall through to the regex
+      // extractor in that case as a belt-and-braces safety net; if
+      // the regex agrees there are none, we still return an empty
+      // array.
+      if (out.length === 0) return regexExtractSymbols(source, language);
+      return out;
+    } catch {
+      // safe: any tree-sitter failure (mismatched dialect, corrupt
+      // source, etc.) falls back to the regex extractor.
+      return regexExtractSymbols(source, language);
+    }
   }
 
   extractImports(source: string, language: LanguageId): ImportInfo[] {
@@ -314,6 +378,181 @@ function findCommandNodes(node: TreeSitterNode): TreeSitterNode[] {
     list.push(...findCommandNodes(node.child(i)));
   }
   return list;
+}
+
+/* ──────────────────────── Language → WASM file ──────────────────────── */
+
+/**
+ * Maps a {@link LanguageId} to the vendored WASM file the grammar
+ * lives in. Returns `null` for languages that don't have a vendored
+ * grammar (regex fallback only).
+ */
+function wasmFileForLanguage(lang: LanguageId): string | null {
+  switch (lang) {
+    case 'typescript': return 'tree-sitter-typescript.wasm';
+    case 'javascript': return 'tree-sitter-javascript.wasm';
+    case 'python':     return 'tree-sitter-python.wasm';
+    case 'go':         return 'tree-sitter-go.wasm';
+    case 'rust':       return 'tree-sitter-rust.wasm';
+    case 'bash':       return 'tree-sitter-bash.wasm';
+    default:           return null;
+  }
+}
+
+/* ──────────────────────── AST → SymbolInfo[] ──────────────────────── */
+
+/**
+ * Walks a parsed root node and emits symbol records for top-level
+ * declarations. Per-language conventions for "exported":
+ *   - TS/JS: wrapped in an `export_statement` (or `export default`).
+ *   - Python: top-level name whose first char is not `_`.
+ *   - Go: top-level name whose first char is uppercase.
+ *   - Rust: declaration carries a `visibility_modifier` child whose
+ *     text starts with `pub`.
+ *
+ * The function caps at 100 symbols per file to mirror the regex
+ * extractor and protect downstream context budgets.
+ */
+function extractSymbolsFromTree(root: TreeSitterNode, language: LanguageId): SymbolInfo[] {
+  const out: SymbolInfo[] = [];
+  const seen = new Set<string>();
+  const MAX = 100;
+
+  const push = (
+    name: string | undefined,
+    kind: SymbolInfo['kind'],
+    node: TreeSitterNode,
+    exported: boolean,
+  ): void => {
+    if (!name || seen.has(name) || out.length >= MAX) return;
+    seen.add(name);
+    out.push({
+      name,
+      kind,
+      line: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
+      exported,
+    });
+  };
+
+  /** First identifier-shaped descendant; used as a fallback when the
+   *  grammar exposes the name via a positional child instead of a
+   *  named field. */
+  const firstIdentText = (node: TreeSitterNode): string | undefined => {
+    const named = node.childForFieldName('name');
+    if (named) return named.text;
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const c = node.namedChild(i);
+      if (c.type === 'identifier' || c.type === 'type_identifier' || c.type === 'property_identifier') {
+        return c.text;
+      }
+    }
+    return undefined;
+  };
+
+  const hasPub = (node: TreeSitterNode): boolean => {
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const c = node.namedChild(i);
+      if (c.type === 'visibility_modifier' && c.text.startsWith('pub')) return true;
+    }
+    return false;
+  };
+
+  const visitTopLevel = (node: TreeSitterNode, exportedFromWrapper: boolean): void => {
+    const t = node.type;
+    if (language === 'typescript' || language === 'javascript') {
+      // Unwrap `export_statement` → emit the inner declaration as exported.
+      if (t === 'export_statement') {
+        for (let i = 0; i < node.namedChildCount; i++) {
+          visitTopLevel(node.namedChild(i), true);
+        }
+        return;
+      }
+      if (t === 'class_declaration')    return push(firstIdentText(node), 'class', node, exportedFromWrapper);
+      if (t === 'interface_declaration') return push(firstIdentText(node), 'interface', node, exportedFromWrapper);
+      if (t === 'function_declaration') return push(firstIdentText(node), 'function', node, exportedFromWrapper);
+      if (t === 'function_signature')   return push(firstIdentText(node), 'function', node, exportedFromWrapper);
+      if (t === 'enum_declaration')     return push(firstIdentText(node), 'enum', node, exportedFromWrapper);
+      if (t === 'type_alias_declaration') return push(firstIdentText(node), 'type', node, exportedFromWrapper);
+      if (t === 'lexical_declaration' || t === 'variable_declaration') {
+        // `const a = 1, b = 2;` → walk declarators.
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const decl = node.namedChild(i);
+          if (decl.type === 'variable_declarator') {
+            push(firstIdentText(decl), 'const', decl, exportedFromWrapper);
+          }
+        }
+        return;
+      }
+      return;
+    }
+    if (language === 'python') {
+      if (t === 'class_definition' || t === 'function_definition' || t === 'decorated_definition') {
+        // Decorated wraps the real definition as a named child.
+        let target = node;
+        if (t === 'decorated_definition') {
+          for (let i = 0; i < node.namedChildCount; i++) {
+            const c = node.namedChild(i);
+            if (c.type === 'class_definition' || c.type === 'function_definition') {
+              target = c;
+              break;
+            }
+          }
+        }
+        const name = firstIdentText(target);
+        const kind: SymbolInfo['kind'] = target.type === 'class_definition' ? 'class' : 'function';
+        push(name, kind, target, name !== undefined && !name.startsWith('_'));
+      }
+      return;
+    }
+    if (language === 'go') {
+      const isUpper = (s: string | undefined): boolean => !!s && s[0] >= 'A' && s[0] <= 'Z';
+      if (t === 'function_declaration' || t === 'method_declaration') {
+        const name = firstIdentText(node);
+        push(name, 'function', node, isUpper(name));
+        return;
+      }
+      if (t === 'type_declaration' || t === 'var_declaration' || t === 'const_declaration') {
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const spec = node.namedChild(i);
+          const name = firstIdentText(spec);
+          let kind: SymbolInfo['kind'] = 'type';
+          if (t === 'var_declaration') kind = 'var';
+          else if (t === 'const_declaration') kind = 'const';
+          else if (spec.type === 'type_spec') {
+            // Look at the type definition body to refine the kind.
+            for (let j = 0; j < spec.namedChildCount; j++) {
+              const def = spec.namedChild(j);
+              if (def.type === 'struct_type') { kind = 'type'; break; }
+              if (def.type === 'interface_type') { kind = 'interface'; break; }
+            }
+          }
+          push(name, kind, spec, isUpper(name));
+        }
+        return;
+      }
+      return;
+    }
+    if (language === 'rust') {
+      const exported = hasPub(node);
+      if (t === 'function_item')   return push(firstIdentText(node), 'function', node, exported);
+      if (t === 'struct_item')     return push(firstIdentText(node), 'type', node, exported);
+      if (t === 'enum_item')       return push(firstIdentText(node), 'enum', node, exported);
+      if (t === 'trait_item')      return push(firstIdentText(node), 'interface', node, exported);
+      if (t === 'mod_item')        return push(firstIdentText(node), 'module', node, exported);
+      if (t === 'const_item')      return push(firstIdentText(node), 'const', node, exported);
+      if (t === 'static_item')     return push(firstIdentText(node), 'const', node, exported);
+      // type_item → `type Alias = …;`
+      if (t === 'type_item')       return push(firstIdentText(node), 'type', node, exported);
+      return;
+    }
+  };
+
+  for (let i = 0; i < root.namedChildCount; i++) {
+    visitTopLevel(root.namedChild(i), false);
+    if (out.length >= MAX) break;
+  }
+  return out;
 }
 
 // ──── RegexParserAdapter ─────────────────────────────────────────

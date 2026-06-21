@@ -375,7 +375,7 @@ export class SingleAgent {
     }
 
     // ──── Complex task → tool loop ────
-    const repoMap = buildRepoMap(context.cwd);
+    const repoMap = await buildRepoMap(context.cwd);
     const systemPrompt = buildSystemPrompt(repoMap, context);
 
     // Auto-compact before building messages if context is near limit
@@ -1001,7 +1001,7 @@ export class SingleAgent {
     const startTime = Date.now();
     const totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
     
-    const repoMap = buildRepoMap(context.cwd);
+    const repoMap = await buildRepoMap(context.cwd);
     const systemPrompt = buildSystemPrompt(repoMap, context, false);
 
     // Auto-compact before chat if context is near limit

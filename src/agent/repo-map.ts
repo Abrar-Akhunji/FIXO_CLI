@@ -1,11 +1,26 @@
 /**
- * Generates an efficient thin map of the workspace.
+ * repo-map.ts — Compact workspace snapshot for LLM context injection.
+ *
  * Instead of sending the full codebase content to the LLM (~8000 tokens),
- * this produces a compact directory tree + export signatures (~500 tokens).
- * The model can then selectively read specific files via the read_file tool.
+ * this produces a compact directory tree + export signatures (~500
+ * tokens). The model can then selectively read specific files via the
+ * read_file tool.
+ *
+ * Phase 3.1 — export extraction is now driven by the shared
+ * {@link ParserFactory} adapter. When the vendored tree-sitter WASM
+ * grammars are available (the npm package ships them; CI gates the
+ * publish on their presence), real AST extraction is used per
+ * language. When a grammar is missing or the parser fails to load
+ * for any reason, the call gracefully falls back to the pre-existing
+ * regex extractor in src/agent/parsers/symbols.ts — so output is
+ * never worse than before.
+ *
+ * Adds Rust as a first-class language for the first time (the old
+ * regex-only path did not extract Rust symbols at all).
  */
 import fs from 'fs';
 import path from 'path';
+import { ParserFactory, languageIdFromExtension, type ParserAdapter, type LanguageId } from './parser-adapter.js';
 
 /* ──────────────────────── Config ──────────────────────── */
 
@@ -29,6 +44,11 @@ const CODE_EXTENSIONS = new Set([
 const MAX_DEPTH = 4;
 const MAX_FILES = 200;
 
+/** Tree-sitter languages we pre-warm before scanning. Anything not in
+ *  this list falls back to the regex extractor — that's the existing
+ *  behaviour for Java/Kotlin/Swift/Ruby/etc. */
+const PREWARM_LANGUAGES: LanguageId[] = ['typescript', 'javascript', 'python', 'go', 'rust'];
+
 /* ──────────────────────── Types ──────────────────────── */
 
 interface TreeEntry {
@@ -44,11 +64,35 @@ interface TreeEntry {
 /**
  * Build a compact repo map string suitable for LLM context injection.
  * Returns ~200-500 tokens of structured information about the workspace.
+ *
+ * Async because the parser adapter loads language grammars lazily on
+ * first use. The cost is paid once per process; subsequent calls hit
+ * the {@link ParserFactory} cache and resolve immediately.
  */
-export function buildRepoMap(cwd: string, additionalExcludes?: string[]): string {
+export async function buildRepoMap(cwd: string, additionalExcludes?: string[]): Promise<string> {
   const excludes = new Set([...IGNORE_DIRS, ...(additionalExcludes ?? [])]);
-  const tree = scanDirectory(cwd, excludes, 0);
 
+  // Pre-warm the parser + language grammars we plan to use. Failures
+  // here are non-fatal: scanDirectory below falls back to the regex
+  // extractor on any extractSymbols failure.
+  let adapter: ParserAdapter | null = null;
+  try {
+    adapter = await ParserFactory.getParser();
+    if (adapter.name === 'tree-sitter') {
+      const ts = adapter as ParserAdapter & {
+        loadLanguage?: (lang: LanguageId) => Promise<boolean>;
+      };
+      if (ts.loadLanguage) {
+        await Promise.all(PREWARM_LANGUAGES.map((l) => ts.loadLanguage!(l)));
+      }
+    }
+  } catch {
+    // safe: any parser-init failure leaves `adapter` null; the regex
+    // path inside extractExports handles that case.
+    adapter = null;
+  }
+
+  const tree = scanDirectory(cwd, excludes, 0, adapter);
   if (!tree) return '(empty workspace)';
 
   const lines: string[] = ['## Workspace Structure'];
@@ -74,6 +118,7 @@ function scanDirectory(
   dirPath: string,
   excludes: Set<string>,
   depth: number,
+  adapter: ParserAdapter | null,
 ): TreeEntry | null {
   if (depth > MAX_DEPTH) return null;
 
@@ -109,6 +154,7 @@ function scanDirectory(
         path.join(dirPath, entry.name),
         excludes,
         depth + 1,
+        adapter,
       );
       if (subtree) {
         children.push(subtree);
@@ -125,7 +171,7 @@ function scanDirectory(
         const stat = fs.statSync(filePath);
         sizeBytes = stat.size;
       } catch {
-        // Ignore stat errors
+        // safe: stat failures (permissions, race) just leave size undefined
       }
 
       const treeEntry: TreeEntry = {
@@ -134,9 +180,8 @@ function scanDirectory(
         sizeBytes,
       };
 
-      // Extract export signatures from code files (fast, regex-based)
       if (CODE_EXTENSIONS.has(ext) && sizeBytes && sizeBytes < 100_000) {
-        const exports = extractExports(filePath, ext);
+        const exports = extractExports(filePath, ext, adapter);
         if (exports.length > 0) {
           treeEntry.exports = exports;
         }
@@ -157,55 +202,92 @@ function scanDirectory(
 
 /* ──────────────────────── Export Extraction ──────────────────────── */
 
-function extractExports(filePath: string, ext: string): string[] {
+/**
+ * Extract top-level exported symbol names from a single file.
+ *
+ * Tries the shared parser adapter first (real tree-sitter AST walk
+ * when the language grammar is loaded; otherwise the curated regex
+ * patterns in parsers/symbols.ts). On any failure — file read, parse,
+ * adapter error — returns an empty list rather than crashing the
+ * scan.
+ */
+function extractExports(filePath: string, ext: string, adapter: ParserAdapter | null): string[] {
+  let content: string;
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const exports: string[] = [];
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return [];
+  }
 
-    if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
-      // Match: export function name, export class name, export const name, export interface name, export type name
-      const patterns = [
-        /export\s+(?:async\s+)?function\s+(\w+)/g,
-        /export\s+class\s+(\w+)/g,
-        /export\s+(?:const|let|var)\s+(\w+)/g,
-        /export\s+interface\s+(\w+)/g,
-        /export\s+type\s+(\w+)/g,
-        /export\s+enum\s+(\w+)/g,
-        /export\s+default\s+(?:class|function)\s+(\w+)/g,
-      ];
+  const language = languageIdFromExtension(ext);
 
-      for (const pattern of patterns) {
-        let match: RegExpExecArray | null;
-        while ((match = pattern.exec(content)) !== null) {
-          exports.push(match[1]);
-        }
+  // Adapter path — used whenever the parser factory has produced a
+  // working adapter. The adapter itself decides whether to use
+  // tree-sitter (if the grammar loaded) or the regex extractor.
+  if (adapter) {
+    try {
+      const symbols = adapter.extractSymbols(content, language);
+      const names = symbols
+        .filter((s) => s.exported)
+        .map((s) => s.name);
+      // Dedupe while preserving order — repo-map only renders the
+      // first ~8 anyway, but stable ordering keeps cached output
+      // diffs minimal.
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const n of names) {
+        if (seen.has(n)) continue;
+        seen.add(n);
+        out.push(n);
+        if (out.length >= 15) break;
       }
-    } else if (ext === '.py') {
-      // Match: def name, class name (top-level only)
-      const patterns = [
-        /^def\s+(\w+)/gm,
-        /^class\s+(\w+)/gm,
-      ];
-      for (const pattern of patterns) {
-        let match: RegExpExecArray | null;
-        while ((match = pattern.exec(content)) !== null) {
-          exports.push(match[1]);
-        }
-      }
-    } else if (ext === '.go') {
-      // Match: func Name (capitalized = exported)
-      const pattern = /^func\s+([A-Z]\w*)/gm;
+      if (out.length > 0) return out;
+    } catch {
+      // safe: fall through to the inline regex below
+    }
+  }
+
+  // Final safety net — the pre-Phase-3.1 inline regex. Kept verbatim
+  // so the worst-case behaviour matches the v1.0.4 baseline exactly.
+  return inlineRegexExports(content, ext);
+}
+
+function inlineRegexExports(content: string, ext: string): string[] {
+  const exports: string[] = [];
+
+  if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+    const patterns = [
+      /export\s+(?:async\s+)?function\s+(\w+)/g,
+      /export\s+class\s+(\w+)/g,
+      /export\s+(?:const|let|var)\s+(\w+)/g,
+      /export\s+interface\s+(\w+)/g,
+      /export\s+type\s+(\w+)/g,
+      /export\s+enum\s+(\w+)/g,
+      /export\s+default\s+(?:class|function)\s+(\w+)/g,
+    ];
+    for (const pattern of patterns) {
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(content)) !== null) {
         exports.push(match[1]);
       }
     }
-
-    // Deduplicate
-    return [...new Set(exports)].slice(0, 15); // Max 15 per file
-  } catch {
-    return [];
+  } else if (ext === '.py') {
+    const patterns = [/^def\s+(\w+)/gm, /^class\s+(\w+)/gm];
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(content)) !== null) {
+        exports.push(match[1]);
+      }
+    }
+  } else if (ext === '.go') {
+    const pattern = /^func\s+([A-Z]\w*)/gm;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      exports.push(match[1]);
+    }
   }
+
+  return [...new Set(exports)].slice(0, 15);
 }
 
 /* ──────────────────────── Tree Rendering ──────────────────────── */
@@ -229,7 +311,6 @@ function renderTree(entry: TreeEntry, prefix: string, lines: string[], isRoot: b
     } else {
       let line = `${prefix}${connector}${child.name}`;
 
-      // Append compact export list
       if (child.exports && child.exports.length > 0) {
         const exportStr = child.exports.slice(0, 8).join(', ');
         const suffix = child.exports.length > 8 ? ', …' : '';

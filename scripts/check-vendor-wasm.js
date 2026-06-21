@@ -16,6 +16,17 @@ const root = path.resolve(__dirname, '..');
 const required = [
   'vendor/tree-sitter.wasm',
   'vendor/tree-sitter-bash.wasm',
+  // Phase 3.1 — language grammars used by the symbol-extraction path
+  // in repo-map.ts via TreeSitterAdapter.extractSymbols. Missing any
+  // of these silently downgrades the affected language to the regex
+  // fallback; that's better than crashing but still a regression, so
+  // the publish must fail rather than ship a missing blob.
+  'vendor/tree-sitter-typescript.wasm',
+  'vendor/tree-sitter-tsx.wasm',
+  'vendor/tree-sitter-javascript.wasm',
+  'vendor/tree-sitter-python.wasm',
+  'vendor/tree-sitter-go.wasm',
+  'vendor/tree-sitter-rust.wasm',
 ];
 
 let failed = false;
