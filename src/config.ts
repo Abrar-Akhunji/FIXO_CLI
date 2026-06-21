@@ -173,6 +173,22 @@ export interface SafetyConfig {
 }
 
 /**
+ * Phase 3.3 — repo-map scan caps.
+ *
+ * Controls how aggressively `buildRepoMap` walks the workspace.
+ * Both fields are optional; defaults track the pre-Phase-3.3
+ * constants (depth 4, 200 files) so existing users see no
+ * behaviour change. Increase these on large repos where the
+ * default cap truncates important directories.
+ */
+export interface RepoMapConfig {
+  /** Maximum recursion depth. Default 4. */
+  maxDepth?: number;
+  /** Maximum files per directory. Default 200. */
+  maxFiles?: number;
+}
+
+/**
  * Phase 2.4 — local fast/heavy-tier model substitution.
  *
  * When a code path tags its request with `required_capabilities`,
@@ -290,6 +306,11 @@ export interface FreeLLMConfig {
      * {@link ModelRoutingConfig}.
      */
     modelRouting?: ModelRoutingConfig;
+    /**
+     * Phase 3.3 — repo-map walk caps. Optional. See
+     * {@link RepoMapConfig}.
+     */
+    repoMap?: RepoMapConfig;
   };
   _firstRunComplete: boolean;
 }

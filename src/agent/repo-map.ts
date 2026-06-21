@@ -41,8 +41,13 @@ const CODE_EXTENSIONS = new Set([
   '.h', '.cs', '.vue', '.svelte',
 ]);
 
-const MAX_DEPTH = 4;
-const MAX_FILES = 200;
+/**
+ * Default caps. The Phase 3.3 work makes both overridable via the
+ * `opts` argument to {@link buildRepoMap}; the constants here are
+ * the defaults the v1.0.4 codebase used.
+ */
+const DEFAULT_MAX_DEPTH = 4;
+const DEFAULT_MAX_FILES = 200;
 
 /** Tree-sitter languages we pre-warm before scanning. Anything not in
  *  this list falls back to the regex extractor — that's the existing
@@ -61,6 +66,16 @@ interface TreeEntry {
 
 /* ──────────────────────── Main ──────────────────────── */
 
+/** Phase 3.3 — per-call overrides for the workspace-walk caps. */
+export interface BuildRepoMapOptions {
+  /** Override `IGNORE_DIRS` with additional names. */
+  additionalExcludes?: string[];
+  /** Override the recursion depth cap (default: 4). */
+  maxDepth?: number;
+  /** Override the per-directory file cap (default: 200). */
+  maxFiles?: number;
+}
+
 /**
  * Build a compact repo map string suitable for LLM context injection.
  * Returns ~200-500 tokens of structured information about the workspace.
@@ -68,9 +83,21 @@ interface TreeEntry {
  * Async because the parser adapter loads language grammars lazily on
  * first use. The cost is paid once per process; subsequent calls hit
  * the {@link ParserFactory} cache and resolve immediately.
+ *
+ * Back-compat: the second positional argument may still be the
+ * legacy `additionalExcludes` string array. New callers should pass
+ * a {@link BuildRepoMapOptions} object.
  */
-export async function buildRepoMap(cwd: string, additionalExcludes?: string[]): Promise<string> {
-  const excludes = new Set([...IGNORE_DIRS, ...(additionalExcludes ?? [])]);
+export async function buildRepoMap(
+  cwd: string,
+  optsOrExcludes?: BuildRepoMapOptions | string[],
+): Promise<string> {
+  const opts: BuildRepoMapOptions = Array.isArray(optsOrExcludes)
+    ? { additionalExcludes: optsOrExcludes }
+    : (optsOrExcludes ?? {});
+  const excludes = new Set([...IGNORE_DIRS, ...(opts.additionalExcludes ?? [])]);
+  const maxDepth = Math.max(1, opts.maxDepth ?? DEFAULT_MAX_DEPTH);
+  const maxFiles = Math.max(1, opts.maxFiles ?? DEFAULT_MAX_FILES);
 
   // Pre-warm the parser + language grammars we plan to use. Failures
   // here are non-fatal: scanDirectory below falls back to the regex
@@ -92,7 +119,7 @@ export async function buildRepoMap(cwd: string, additionalExcludes?: string[]): 
     adapter = null;
   }
 
-  const tree = scanDirectory(cwd, excludes, 0, adapter);
+  const tree = scanDirectory(cwd, excludes, 0, adapter, maxDepth, maxFiles);
   if (!tree) return '(empty workspace)';
 
   const lines: string[] = ['## Workspace Structure'];
@@ -119,8 +146,10 @@ function scanDirectory(
   excludes: Set<string>,
   depth: number,
   adapter: ParserAdapter | null,
+  maxDepth: number,
+  maxFiles: number,
 ): TreeEntry | null {
-  if (depth > MAX_DEPTH) return null;
+  if (depth > maxDepth) return null;
 
   let entries: fs.Dirent[];
   try {
@@ -155,12 +184,14 @@ function scanDirectory(
         excludes,
         depth + 1,
         adapter,
+        maxDepth,
+        maxFiles,
       );
       if (subtree) {
         children.push(subtree);
       }
     } else if (entry.isFile()) {
-      if (filesSeen >= MAX_FILES) continue;
+      if (filesSeen >= maxFiles) continue;
       filesSeen++;
 
       const ext = path.extname(entry.name);
