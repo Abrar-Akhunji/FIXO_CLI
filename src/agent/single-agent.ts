@@ -379,7 +379,29 @@ export class SingleAgent {
       maxDepth: loadConfig().preferences.repoMap?.maxDepth,
       maxFiles: loadConfig().preferences.repoMap?.maxFiles,
     });
-    const systemPrompt = buildSystemPrompt(repoMap, context);
+
+    // Phase 3.2 — auto-collect cross-file references for the files
+    // this run is likely to mutate (user-pinned files via /select).
+    // The block is empty if no LSP server is on $PATH, so adding it
+    // unconditionally is safe on machines without an LSP installed.
+    let referencesBlock = '';
+    if (context.selectedFiles && context.selectedFiles.length > 0) {
+      try {
+        const { gatherReferencesForTargets } = await import('./context-builder.js');
+        const { getLspManager } = await import('./tool-executor.js');
+        referencesBlock = await gatherReferencesForTargets(
+          context.cwd,
+          context.selectedFiles.map((f) => ({ file: f })),
+          () => getLspManager(context.cwd),
+        );
+      } catch {
+        // safe: any failure in the LSP path must not block the run
+      }
+    }
+
+    const systemPrompt = referencesBlock
+      ? `${buildSystemPrompt(repoMap, context)}\n\n${referencesBlock}`
+      : buildSystemPrompt(repoMap, context);
 
     // Auto-compact before building messages if context is near limit
     await this.autoCompactIfNeeded(conversation, systemPrompt, context.task, context.model);
