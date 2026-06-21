@@ -33,6 +33,7 @@ function parseArgs(): {
   port?: number;
   task?: string;
   resume?: string;
+  sandboxMode?: 'guard' | 'os-sandbox';
 } {
   const args = process.argv.slice(2);
   const result = {
@@ -44,6 +45,7 @@ function parseArgs(): {
     port: undefined as number | undefined,
     task: undefined as string | undefined,
     resume: undefined as string | undefined,
+    sandboxMode: undefined as 'guard' | 'os-sandbox' | undefined,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -84,6 +86,17 @@ function parseArgs(): {
           i = args.length; // consume rest
         }
         break;
+      case '--sandbox-mode':
+        if (i + 1 < args.length) {
+          const v = args[++i];
+          if (v === 'guard' || v === 'os-sandbox') {
+            result.sandboxMode = v;
+          } else {
+            console.error(`Invalid --sandbox-mode value '${v}'. Expected 'guard' or 'os-sandbox'.`);
+            process.exit(1);
+          }
+        }
+        break;
       default:
         // If no flag, treat rest as task
         if (!arg.startsWith('-') && !result.task) {
@@ -115,6 +128,7 @@ ${C.BOLD}OPTIONS${C.RESET}
   -p, --port <port>   Proxy server port (default: 3001)
   -t, --task <text>   Run a one-shot task
   -r, --resume <id>   Resume a previous session snapshot by id
+  --sandbox-mode <m>  Override session sandbox: 'guard' (default) or 'os-sandbox'
 
 ${C.BOLD}INTERACTIVE COMMANDS${C.RESET}
   /help               Show all commands
@@ -300,7 +314,25 @@ async function main(): Promise<void> {
     }
   }
 
-  // ──── Apply CLI port override ────
+  // ──── Apply CLI overrides ────
+  if (args.sandboxMode) {
+    config.preferences.safety.sandboxMode = args.sandboxMode;
+    if (args.sandboxMode === 'os-sandbox') {
+      // Loud, visible boot-time check so the user finds out at start
+      // — not at the first run_command — if the platform binary is
+      // missing.
+      try {
+        const { probeSandbox } = await import('./runtime/os-sandbox.js');
+        const probe = probeSandbox();
+        if (!probe.ok) {
+          console.warn(`${C.YELLOW}⚠ --sandbox-mode os-sandbox requested but unavailable: ${probe.reason}${C.RESET}`);
+        }
+      } catch (_err: unknown) {
+        // best-effort — sandbox check failure is non-blocking at boot
+      }
+    }
+  }
+
   if (args.port) {
     if (config.apiUrl) {
       try {

@@ -18,6 +18,7 @@ import type { TaskSession } from '../runtime/task-session.js';
 import { classifyCommand, type PolicyProfile, type RiskLevel } from '../runtime/policy.js';
 import { checkPermission, type PermissionCheckResult } from './permissions.js';
 import { redactedEnv, redactSecrets } from '../runtime/redaction.js';
+import { runSandboxed, SandboxUnavailableError } from '../runtime/os-sandbox.js';
 import { McpManager } from './mcp-manager.js';
 import { estimateReadCost, shouldDeferRead, formatPredictiveGateDirective, DEFAULT_PREDICTIVE_BUDGET_PCT } from './predictive-gate.js';
 import type { AgentClient } from './agent-client.js';
@@ -1292,7 +1293,13 @@ export async function executeTool(
             break;
           }
         }
-        event.result = executeRunCommand(args.command, args.cwd || cwd, cwd, options.session);
+        event.result = executeRunCommand(
+          args.command,
+          args.cwd || cwd,
+          cwd,
+          options.session,
+          options.safety?.sandboxMode,
+        );
         break;
 
       case 'search_code':
@@ -1724,18 +1731,47 @@ function executeWriteFile(
     });
 }
 
-function executeRunCommand(command: string, requestedCwd: string, workspaceRoot: string, session?: TaskSession): string {
+function executeRunCommand(
+  command: string,
+  requestedCwd: string,
+  workspaceRoot: string,
+  session?: TaskSession,
+  sandboxMode?: import('../config.js').SandboxMode,
+): string {
   const guard = new WorkspaceGuard(workspaceRoot);
   const commandCwd = guard.resolve(requestedCwd, 'command cwd');
   try {
-    const result = spawnSync(command, {
-      shell: true,
-      cwd: commandCwd,
-      encoding: 'utf-8',
-      timeout: 60_000, // 60 second timeout
-      maxBuffer: 1024 * 1024, // 1MB max output
-      env: redactedEnv(),
-    });
+    let result;
+    if (sandboxMode === 'os-sandbox') {
+      // Opt-in OS-level sandbox. The regex command-parser layer that
+      // ran upstream is left in place — this is defence in depth.
+      // If the platform binary is missing we surface a structured
+      // error instead of silently downgrading to unsandboxed exec.
+      try {
+        result = runSandboxed(command, {
+          cwd: commandCwd,
+          allowedWritePaths: [workspaceRoot],
+          allowNetwork: true,
+          timeout: 60_000,
+          maxBuffer: 1024 * 1024,
+          env: redactedEnv(),
+        });
+      } catch (sandboxErr: unknown) {
+        if (sandboxErr instanceof SandboxUnavailableError) {
+          return `Error: OS sandbox mode is enabled but cannot be applied — ${sandboxErr.message}. Either install the platform binary or set preferences.safety.sandboxMode to 'guard'.`;
+        }
+        throw sandboxErr;
+      }
+    } else {
+      result = spawnSync(command, {
+        shell: true,
+        cwd: commandCwd,
+        encoding: 'utf-8',
+        timeout: 60_000, // 60 second timeout
+        maxBuffer: 1024 * 1024, // 1MB max output
+        env: redactedEnv(),
+      });
+    }
     const output = redactSecrets([result.stdout ?? '', result.stderr ?? ''].filter(Boolean).join('\n'));
     const status = result.status ?? 0;
     session?.record('command_finished', { command, cwd: guard.relative(commandCwd), status, output: truncate(output, 4000) });

@@ -100,6 +100,26 @@ export interface ToolCallBudgetPolicy {
 /** Pre-save gate severity. */
 export type LspPreSaveMode = 'off' | 'warn' | 'block' | 'sandbox-mock';
 
+/**
+ * Sandbox mode for `run_command` execution.
+ *
+ *  - `guard`        — Today's behaviour. The in-process command-parser
+ *                     regex layer + WorkspaceGuard path-boundary checks
+ *                     are the only line of defence. Fast, no platform
+ *                     dependencies, no behaviour change.
+ *  - `os-sandbox`   — Opt-in. Wraps every shell command in an
+ *                     OS-enforced sandbox (`sandbox-exec` on macOS,
+ *                     `bwrap` on Linux). Blocks writes outside the
+ *                     workspace + tmpdir even when the regex guard is
+ *                     bypassed by a creative command. Requires the
+ *                     platform binary to be present; surfaces a
+ *                     structured error otherwise rather than silently
+ *                     downgrading to `guard`.
+ *
+ * Always combined with the regex/guard layer — defence in depth.
+ */
+export type SandboxMode = 'guard' | 'os-sandbox';
+
 /** Safety preferences — Pillar 1, 2, 3 surface. Pillar 4 lives in the
  *  credential vault module, not in the user-facing config. */
 export interface SafetyConfig {
@@ -127,6 +147,8 @@ export interface SafetyConfig {
   predictiveBudgetPct?: number;
   /** Tool-call budget — see {@link ToolCallBudgetPolicy}. */
   toolCalls: ToolCallBudgetPolicy;
+  /** OS-level sandbox for `run_command`. Defaults to `'guard'`. */
+  sandboxMode?: SandboxMode;
 }
 
 /** Resilience preferences for the new withRetry + chatStreamWithResume paths. */
@@ -285,6 +307,7 @@ export function getDefaultConfig(): FreeLLMConfig {
           autoExtend: true,
           investigationMultiplier: 3,
         },
+        sandboxMode: 'guard',
       },
     },
     _firstRunComplete: false,
