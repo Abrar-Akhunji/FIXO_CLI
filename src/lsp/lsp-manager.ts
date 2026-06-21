@@ -81,7 +81,7 @@ export class LspManager {
       return null;
     }
 
-    let binaryPath = findBinaryInPath(binaryName);
+    const binaryPath = findBinaryInPath(binaryName);
 
     // If JS/TS and not found, we no longer forcefully globally install.
     // Let it fail gracefully and inform the user.

@@ -2307,7 +2307,7 @@ export async function executeTodoWrite(
  * dispatch is hot-path-friendly and test-friendly (tests inject
  * a custom registry via {@link setBackgroundJobRegistry}).
  */
-let globalBackgroundRegistry: BackgroundJobRegistry | null = null;
+const globalBackgroundRegistry: BackgroundJobRegistry | null = null;
 const backgroundRegistries = new Map<string, BackgroundJobRegistry>();
 
 export function getBackgroundJobRegistry(cwd: string): BackgroundJobRegistry {

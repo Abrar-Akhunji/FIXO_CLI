@@ -245,7 +245,7 @@ export class TreeSitterAdapter implements ParserAdapter {
       return { ok: true };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
-      // eslint-disable-next-line no-console
+       
       console.warn(
         `\u26A0  Tree-Sitter WASM unavailable (${reason}). Falling back to regex parser. ` +
           `Performance reduced; accuracy may vary.`,

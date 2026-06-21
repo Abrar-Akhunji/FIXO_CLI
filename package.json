@@ -18,6 +18,7 @@
     "build": "tsc && chmod +x dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test src/__tests__/*.test.ts",
+    "lint": "eslint src --max-warnings=170",
     "check:vendor": "node scripts/check-vendor-wasm.js",
     "prepack": "npm run check:vendor",
     "prepublishOnly": "npm run build && npm run check:vendor"
@@ -61,7 +62,9 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.15.3",
     "@types/turndown": "^5.0.6",
+    "eslint": "^9.39.4",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.61.1"
   }
 }

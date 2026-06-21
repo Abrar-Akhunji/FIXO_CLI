@@ -340,7 +340,7 @@ function emitRetryEvent(
   } catch (hookErr: unknown) {
     // Telemetry must never break the retry chain.
     const msg = hookErr instanceof Error ? hookErr.message : String(hookErr);
-    // eslint-disable-next-line no-console
+     
     console.warn(`[retry] onRetry hook threw: ${msg}`);
   }
 }

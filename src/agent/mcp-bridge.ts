@@ -42,7 +42,7 @@ export class McpBridgeManager {
   private loadProjectMcpConfig(cwd: string): any {
     const ymlPath = path.join(cwd, '.fixo.yml');
     const yamlPath = path.join(cwd, '.fixo.yaml');
-    let configPath = fs.existsSync(ymlPath) ? ymlPath : fs.existsSync(yamlPath) ? yamlPath : null;
+    const configPath = fs.existsSync(ymlPath) ? ymlPath : fs.existsSync(yamlPath) ? yamlPath : null;
 
     if (configPath) {
       try {
