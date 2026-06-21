@@ -244,15 +244,39 @@ export class HttpError extends Error {
 
 /* ──────────────────────── AgentClient ──────────────────────── */
 
+/**
+ * Thrown when the client is running in direct-provider mode but the
+ * model the caller asked for did not resolve to any direct provider
+ * via {@link AgentClient.resolveDirectConfig}. Catching this gives
+ * the UI a chance to suggest `/model` or `/providers add` instead of
+ * silently leaking the request to the FreeLLMAPI proxy.
+ */
+export class DirectModelUnresolvedError extends Error {
+  constructor(public model: string) {
+    super(
+      `Model "${model}" did not match any direct provider configured in your vault. ` +
+        `Run /providers to add a key, /model to pick a recognized model, or run setup again to switch to FreeLLMAPI proxy mode.`,
+    );
+    this.name = 'DirectModelUnresolvedError';
+  }
+}
+
 export class AgentClient {
   private baseUrl: string;
   private apiKey: string;
   private verbose: boolean;
+  private providerMode: 'direct' | 'proxy';
 
-  constructor(apiKey: string, apiUrl?: string, verbose = false) {
+  constructor(
+    apiKey: string,
+    apiUrl?: string,
+    verbose = false,
+    providerMode: 'direct' | 'proxy' = 'proxy',
+  ) {
     this.baseUrl = process.env.FIXO_API_URL || apiUrl || BASE_URL;
     this.apiKey = apiKey;
     this.verbose = verbose;
+    this.providerMode = providerMode;
   }
 
   private resolveDirectConfig(model: string): {
@@ -365,6 +389,14 @@ export class AgentClient {
 
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = direct && direct.providerName === 'anthropic';
+
+    // Direct-mode safety: refuse to silently fall through to the
+    // FreeLLMAPI proxy when the user explicitly chose direct mode at
+    // setup. A user who picked direct deserves a loud error, not a
+    // request that surprises them by transiting a third-party SaaS.
+    if (this.providerMode === 'direct' && !direct) {
+      throw new DirectModelUnresolvedError(model);
+    }
 
     // Combine external abort signal with the internal 60s timeout so
     // the request aborts on EITHER signal (timeout OR user cancellation).
@@ -877,6 +909,11 @@ export class AgentClient {
 
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = !!(direct && direct.providerName === 'anthropic');
+
+    // Same direct-mode safety as `chat()` — refuse to leak to proxy.
+    if (this.providerMode === 'direct' && !direct) {
+      throw new DirectModelUnresolvedError(model);
+    }
 
     let requestUrl = `${this.baseUrl}/chat/completions`;
     let headers: Record<string, string> = {

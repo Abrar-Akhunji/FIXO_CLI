@@ -257,11 +257,17 @@ async function main(): Promise<void> {
   }
 
   // ──── Step 2: First-run wizard & Validation ────
-  if (!config._firstRunComplete || !config.freellmapi_api_key || !config.apiUrl) {
+  const needsSetup =
+    !config._firstRunComplete ||
+    (config.provider_mode === 'proxy' && (!config.freellmapi_api_key || !config.apiUrl)) ||
+    (config.provider_mode === 'direct' && !config.directProvider?.name);
+
+  if (needsSetup) {
     config = await runSetupWizard();
     saveConfig(config);
-  } else {
-    // Validate API Key
+  } else if (config.provider_mode === 'proxy' && config.freellmapi_api_key && config.apiUrl) {
+    // Proxy mode: validate the FreeLLMAPI key by pinging /models.
+    // Direct mode skips this — the proxy isn't in the loop at all.
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
@@ -273,8 +279,24 @@ async function main(): Promise<void> {
       if (res.status === 401 || res.status === 403) {
         console.warn(`${C.YELLOW}⚠ Warning: API Key appears invalid (HTTP ${res.status}). You may need to re-run setup.${C.RESET}`);
       }
-    } catch (err: unknown) {
+    } catch (_err: unknown) {
       console.warn(`${C.YELLOW}⚠ Warning: Could not validate API key (connection failed). Proceeding in offline mode or assuming temporary network issue.${C.RESET}`);
+    }
+  } else if (config.provider_mode === 'direct' && config.directProvider) {
+    // Direct mode: hydrate the in-memory vault from the persisted
+    // providers store and register a model→provider hint so the
+    // first request resolves correctly without the user having to
+    // visit the /model picker.
+    try {
+      const { ProvidersManager } = await import('./agent/providers-manager.js');
+      ProvidersManager.hydrateVault();
+      ProvidersManager.setModelProviderHint(
+        config.directProvider.defaultModel,
+        config.directProvider.name,
+      );
+    } catch (_err: unknown) {
+      // best-effort — vault hydration failure surfaces later as a
+      // clear "no key for provider X" error at request time.
     }
   }
 
@@ -357,11 +379,21 @@ async function main(): Promise<void> {
   // logo → command grid → session header → › prompt.
   const sessionModel = model ?? 'auto';
   const envEndpoint = process.env.FIXO_API_URL?.trim();
-  const resolvedEndpoint = envEndpoint || config.apiUrl || DEFAULT_API_URL;
+  let resolvedEndpoint: string;
+  let providerLabel: string;
+  if (config.provider_mode === 'direct' && config.directProvider) {
+    const { PROVIDER_REGISTRY } = await import('./agent/providers-manager.js');
+    const def = PROVIDER_REGISTRY.find((d) => d.name === config.directProvider!.name);
+    resolvedEndpoint = envEndpoint || def?.baseUrl || 'direct';
+    providerLabel = config.directProvider.name;
+  } else {
+    resolvedEndpoint = envEndpoint || config.apiUrl || DEFAULT_API_URL;
+    providerLabel = 'auto';
+  }
   renderSessionHeader({
     status: 'new',
     startedAt: new Date().toISOString(),
-    provider: 'auto',
+    provider: providerLabel,
     model: sessionModel,
     mode: 'BUILD',
     routing: 'auto',

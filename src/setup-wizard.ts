@@ -1,24 +1,133 @@
 import * as p from '@clack/prompts';
-import type { FreeLLMConfig } from './config.js';
+import type { FreeLLMConfig, ProviderMode } from './config.js';
 import { getDefaultConfig, saveConfig, DEFAULT_API_URL } from './config.js';
 
 /**
  * Runs the interactive first-run setup wizard for FixO CLI.
- * Links the CLI terminal to the FreeLLMAPI SaaS cloud by prompting
- * for the master API key, destination URL, and saving it to the configuration.
- * Also offers to configure individual provider API keys for direct access.
+ *
+ * Asks the user to pick an authentication mode first:
+ *   1. Direct (recommended) — paste a provider key (OpenAI, Anthropic,
+ *      Groq, …) and the CLI talks straight to that provider. Zero
+ *      traffic transits a third-party proxy.
+ *   2. FreeLLMAPI proxy — opt-in convenience for users who want
+ *      load-balanced failover across free-tier providers without
+ *      managing individual keys.
+ *
+ * The direct path is the default for new installs (Phase 1 of the
+ * remediation plan). The proxy path remains fully supported.
  */
 export async function runSetupWizard(): Promise<FreeLLMConfig> {
   p.intro('🚀 Welcome to FixO CLI Setup');
 
+  const mode = (await p.select({
+    message: 'How would you like to authenticate?',
+    initialValue: 'direct',
+    options: [
+      {
+        value: 'direct',
+        label: 'Direct provider (recommended) — bring your own key',
+        hint: 'OpenAI, Anthropic, Groq, Google, etc. Zero proxy traffic.',
+      },
+      {
+        value: 'proxy',
+        label: 'FreeLLMAPI proxy (opt-in convenience)',
+        hint: 'Load-balanced failover across free-tier providers via the FreeLLMAPI SaaS.',
+      },
+    ],
+  })) as ProviderMode | symbol;
+
+  if (p.isCancel(mode)) {
+    p.outro('Setup cancelled.');
+    process.exit(1);
+  }
+
+  if (mode === 'direct') {
+    return await runDirectSetup();
+  }
+  return await runProxySetup();
+}
+
+/* ──────────────────────── Direct provider setup ──────────────────────── */
+
+async function runDirectSetup(): Promise<FreeLLMConfig> {
+  // Dynamic import keeps the proxy-only boot path free of provider
+  // registry load cost when the user picks proxy.
+  const { ProvidersManager, PROVIDER_REGISTRY } = await import('./agent/providers-manager.js');
+
+  const providerName = await p.select({
+    message: 'Pick a provider:',
+    initialValue: 'openai',
+    options: PROVIDER_REGISTRY.map((def) => ({
+      value: def.name,
+      label: def.displayName,
+      hint: def.docsUrl,
+    })),
+  });
+
+  if (p.isCancel(providerName)) {
+    p.outro('Setup cancelled.');
+    process.exit(1);
+  }
+
+  const def = PROVIDER_REGISTRY.find((d) => d.name === providerName)!;
+
+  const apiKey = await p.password({
+    message: `Paste your ${def.displayName} API key:`,
+    validate: (val) => {
+      if (!val || !val.trim()) return 'API key is required';
+      return;
+    },
+  });
+
+  if (p.isCancel(apiKey)) {
+    p.outro('Setup cancelled.');
+    process.exit(1);
+  }
+
+  // Persist the key and hydrate the in-memory vault so the very first
+  // request after setup can find it without a restart.
+  ProvidersManager.add(providerName as string, apiKey as string);
+
+  const modelOptions = def.models.slice(0, 12).map((m) => ({ value: m, label: m }));
+  const defaultModel = await p.select({
+    message: `Default model for ${def.displayName}:`,
+    initialValue: def.models[0],
+    options: modelOptions,
+  });
+
+  if (p.isCancel(defaultModel)) {
+    p.outro('Setup cancelled.');
+    process.exit(1);
+  }
+
+  const config = getDefaultConfig();
+  config.provider_mode = 'direct';
+  config.directProvider = {
+    name: providerName as string,
+    defaultModel: defaultModel as string,
+  };
+  config.defaultModel = defaultModel as string;
+  config._firstRunComplete = true;
+  // `freellmapi_api_key` and `apiUrl` deliberately left unset — the
+  // direct path must not touch the proxy.
+
+  saveConfig(config);
+  p.outro(
+    `✓ Configured ${def.displayName} (${defaultModel}). Config at ~/.fixocli/config.json, key at ~/.fixocli/providers.json.`,
+  );
+
+  return config;
+}
+
+/* ──────────────────────── Proxy setup ──────────────────────── */
+
+async function runProxySetup(): Promise<FreeLLMConfig> {
   console.log(`┌────────────────────────────────────────────────────────────────┐
-│  🚀 Welcome to FixO CLI!                                       │
-│  Let's link your CLI terminal to your FreeLLMAPI SaaS cloud.   │
+│  FreeLLMAPI proxy mode.                                        │
 │                                                                │
-│  1. Open your web browser and navigate to your dashboard.       │
-│  2. Sign in to your account.                                   │
-│  3. Navigate to the Profile / API Keys section.                │
-│  4. Copy your master 'FreeLLMAPI' API key.                     │
+│  1. Open your dashboard at the FreeLLMAPI host.                │
+│  2. Navigate to Profile / API Keys.                            │
+│  3. Copy your master 'freellmapi-…' key.                       │
 └────────────────────────────────────────────────────────────────┘\n`);
 
   const serverChoice = await p.select({
@@ -73,6 +182,7 @@ export async function runSetupWizard(): Promise<FreeLLMConfig> {
   }
 
   const config = getDefaultConfig();
+  config.provider_mode = 'proxy';
   config.freellmapi_api_key = apiKeyInput.trim();
   config.apiUrl = apiUrl;
   config._firstRunComplete = true;
@@ -81,19 +191,19 @@ export async function runSetupWizard(): Promise<FreeLLMConfig> {
 
   p.outro('✓ FreeLLMAPI configuration saved to ~/.fixocli/config.json');
 
-  // ──── Optional: Configure individual provider API keys ────
+  // Proxy users can still opt-in to direct provider keys as
+  // failover / hybrid usage (preserves the original v1.0 behaviour).
   const configureProviders = await p.confirm({
-    message: 'Would you like to add API keys for individual AI providers? (You can also do this later via /providers add)',
+    message: 'Also add direct provider keys? (You can do this later via /providers add)',
     initialValue: false,
   });
 
   if (configureProviders) {
-    // Dynamic import to avoid any module-load-time side effects
     const { ProvidersManager, PROVIDER_REGISTRY } = await import('./agent/providers-manager.js');
 
     const selectedProviders = await p.multiselect({
-      message: 'Select providers to configure (you can add more later via /providers add):',
-      options: PROVIDER_REGISTRY.map(def => ({
+      message: 'Select providers to configure:',
+      options: PROVIDER_REGISTRY.map((def) => ({
         value: def.name,
         label: def.displayName,
         hint: def.docsUrl,
@@ -104,7 +214,7 @@ export async function runSetupWizard(): Promise<FreeLLMConfig> {
     if (!p.isCancel(selectedProviders) && selectedProviders.length > 0) {
       let configuredCount = 0;
       for (const name of selectedProviders) {
-        const def = PROVIDER_REGISTRY.find(d => d.name === name)!;
+        const def = PROVIDER_REGISTRY.find((d) => d.name === name)!;
         const apiKey = await p.password({
           message: `Enter API key for ${def.displayName}:`,
           validate: (val) => {

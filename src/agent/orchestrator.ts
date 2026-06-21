@@ -10,7 +10,12 @@ export class Orchestrator {
 
   constructor(verbose = false) {
     const config = loadConfig();
-    this.client = new AgentClient(config.freellmapi_api_key || '', config.apiUrl, verbose);
+    this.client = new AgentClient(
+      config.freellmapi_api_key || '',
+      config.apiUrl,
+      verbose,
+      config.provider_mode,
+    );
     this.verbose = verbose;
   }
 

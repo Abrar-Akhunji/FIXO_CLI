@@ -5,6 +5,20 @@ import type { PolicyProfile } from './runtime/policy.js';
 
 export const DEFAULT_API_URL = 'https://freellm-liart.vercel.app/v1';
 
+/**
+ * How the CLI authenticates against an LLM backend.
+ *
+ *  - `direct` — Requests go straight to a provider (OpenAI, Anthropic,
+ *               Groq, etc.) using a key the user pasted at setup. Zero
+ *               traffic to the FreeLLMAPI proxy. This is the default
+ *               for fresh installs starting with v1.1.
+ *  - `proxy`  — Requests transit the FreeLLMAPI proxy at
+ *               {@link DEFAULT_API_URL} (or a custom URL). Opt-in
+ *               convenience for users who want load-balanced failover
+ *               across free-tier providers without managing keys.
+ */
+export type ProviderMode = 'direct' | 'proxy';
+
 /** Stream-resume policy. */
 export type StreamResumePolicy = 'auto' | 'never';
 
@@ -143,6 +157,24 @@ export interface ResilienceConfig {
  * Persisted at `~/.fixocli/config.json`.
  */
 export interface FreeLLMConfig {
+  /**
+   * Authentication mode. New installs default to `'direct'`. Existing
+   * configs that predate this field are inferred at load time:
+   * presence of `freellmapi_api_key` means `'proxy'`, absence means
+   * `'direct'`. Never undefined after {@link loadConfig} returns.
+   */
+  provider_mode: ProviderMode;
+  /**
+   * When `provider_mode === 'direct'`, identifies the provider the
+   * user selected at setup time and the default model to use for new
+   * sessions. The actual API key lives in the providers store
+   * (`~/.fixocli/providers.json`) and the in-memory credential vault,
+   * never here.
+   */
+  directProvider?: {
+    name: string;
+    defaultModel: string;
+  };
   freellmapi_api_key?: string;
   apiUrl?: string;
   defaultModel: string;
@@ -210,6 +242,7 @@ export function getHistoryPath(): string {
 /** Returns a complete default configuration object. */
 export function getDefaultConfig(): FreeLLMConfig {
   return {
+    provider_mode: 'direct',
     defaultModel: 'auto',
     preferences: {
       autoCommit: false,
@@ -286,9 +319,17 @@ export function loadConfig(): FreeLLMConfig {
         .semanticLoopTrap ?? {};
     const parsedToolCalls =
       (parsedSafety as { toolCalls?: Partial<ToolCallBudgetPolicy> }).toolCalls ?? {};
+    // Back-compat: existing configs predating v1.1 don't have
+    // `provider_mode`. If they have a FreeLLMAPI key they were
+    // implicitly proxy users; otherwise they're either fresh or
+    // explicitly direct. Never silently flip an existing user.
+    const inferredMode: ProviderMode =
+      parsed.provider_mode ?? (parsed.freellmapi_api_key ? 'proxy' : 'direct');
+
     return {
       ...defaults,
       ...parsed,
+      provider_mode: inferredMode,
       preferences: {
         ...defaults.preferences,
         ...parsedPreferences,

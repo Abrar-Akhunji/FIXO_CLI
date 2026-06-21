@@ -59,6 +59,10 @@ test('no source file (other than config.ts) embeds the canonical SaaS URL litera
     'config.ts',
     '__tests__/sprint2-stability.test.ts',
     '__tests__/api-url-regression.test.ts',
+    // Direct-mode tests deliberately assert that the proxy URL is
+    // NOT contacted; they need to name the host in their assertions.
+    '__tests__/direct-mode-bootstrap.test.ts',
+    '__tests__/direct-mode-config.test.ts',
   ]);
 
   const offenders: string[] = [];
