@@ -96,7 +96,10 @@ export function estimateReadCost(
     } catch {
       return { bytes, projectedTokens: Math.ceil(bytes / FALLBACK_BYTES_PER_TOKEN), exact: false };
     } finally {
-      try { fs.closeSync(fd); } catch { /* ignore */ }
+      // safe: closeSync after a failed openSync just means there was
+      // no fd to close, or the kernel already reaped it. Either way
+      // resource recovery is best-effort.
+      try { fs.closeSync(fd); } catch { /* safe: see above */ }
     }
   } catch {
     return { bytes: 0, projectedTokens: 0, exact: false };

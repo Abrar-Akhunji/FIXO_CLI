@@ -548,7 +548,9 @@ export class AgentClient {
         }
 
         const rawData = await response.json();
-        const data = isAnthropicDirect ? translateAnthropicToOpenAI(rawData) : rawData as ChatCompletionResponse;
+        const data = isAnthropicDirect
+          ? translateAnthropicToOpenAI(rawData as AnthropicResponse)
+          : (rawData as ChatCompletionResponse);
         const choice = data.choices[0];
 
         providerCooldown.recordSuccess(providerId);
@@ -1441,7 +1443,12 @@ function translateOpenAIToAnthropic(
   options: ChatOptions
 ): Record<string, any> {
   let system = '';
-  const anthropicMessages: any[] = [];
+  // Phase 4.6 — `any[]` paydown. The shape here is the Anthropic
+  // wire-format messages array. The narrower type doesn't capture
+  // every field the SDK accepts (tool_result, document blocks),
+  // but `unknown[]` lets us keep type-safety at this construction
+  // site without inventing a half-typed interface that drifts.
+  const anthropicMessages: Record<string, unknown>[] = [];
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -1460,7 +1467,8 @@ function translateOpenAIToAnthropic(
     } else if (msg.role === 'assistant') {
       const assistantText = extractTextFromContent(msg.content);
       if (msg.tool_calls && msg.tool_calls.length > 0) {
-        const contentBlocks: any[] = [];
+        // Phase 4.6 — see `anthropicMessages` comment for rationale.
+        const contentBlocks: Record<string, unknown>[] = [];
         if (assistantText.length > 0) {
           contentBlocks.push({ type: 'text', text: assistantText });
         }
@@ -1538,10 +1546,29 @@ function translateOpenAIToAnthropic(
   return body;
 }
 
-function translateAnthropicToOpenAI(anthropicRes: any): ChatCompletionResponse {
+// Anthropic response shape we actually rely on. The provider returns
+// many more fields; this is just enough for translation.
+interface AnthropicResponse {
+  content?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'tool_use'; id: string; name: string; input: unknown }
+  >;
+  stop_reason?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  model?: string;
+  id?: string;
+}
+
+interface OpenAIToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
+function translateAnthropicToOpenAI(anthropicRes: AnthropicResponse): ChatCompletionResponse {
   const contentBlocks = Array.isArray(anthropicRes.content) ? anthropicRes.content : [];
   let text = '';
-  const toolCalls: any[] = [];
+  const toolCalls: OpenAIToolCall[] = [];
 
   for (const block of contentBlocks) {
     if (block.type === 'text') {
@@ -1565,13 +1592,23 @@ function translateAnthropicToOpenAI(anthropicRes: any): ChatCompletionResponse {
     stop_sequence: 'stop',
   };
 
-  const choice: any = {
+  // Phase 4.6 — pay down the `choice: any` to a structured shape.
+  interface TranslatedChoice {
+    index: 0;
+    message: {
+      role: 'assistant';
+      content: string | null;
+      tool_calls?: OpenAIToolCall[];
+    };
+    finish_reason: string;
+  }
+  const choice: TranslatedChoice = {
     index: 0,
     message: {
       role: 'assistant',
       content: text || null,
     },
-    finish_reason: finishReasonMap[anthropicRes.stop_reason] || 'stop',
+    finish_reason: finishReasonMap[anthropicRes.stop_reason ?? ''] || 'stop',
   };
 
   if (toolCalls.length > 0) {

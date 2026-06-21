@@ -210,7 +210,11 @@ function saveStore(store: ProvidersStore): void {
     encoding: 'utf-8',
     mode: 0o600,
   });
-  try { fs.chmodSync(filePath, 0o600); } catch { /* ignore */ }
+  // safe: chmod is belt-and-braces — writeFileSync already created the
+  // file with mode 0o600. EPERM here only happens on filesystems that
+  // don't honour POSIX permissions (some FAT/NTFS-backed mounts), where
+  // the original create-with-mode also no-ops.
+  try { fs.chmodSync(filePath, 0o600); } catch { /* safe: see above */ }
 }
 
 function maskKey(key: string): string {
@@ -264,7 +268,8 @@ function saveModelsCache(store: ProviderModelsCacheStore): void {
     encoding: 'utf-8',
     mode: 0o600,
   });
-  try { fs.chmodSync(filePath, 0o600); } catch { /* ignore */ }
+  // safe: same belt-and-braces chmod as saveStore — see comment there.
+  try { fs.chmodSync(filePath, 0o600); } catch { /* safe: see saveStore */ }
 }
 
 /**
@@ -518,7 +523,11 @@ export const ProvidersManager = {
       // having to know whether a live fetch was ever attempted.
       const store = loadModelsCache();
       store[name] = { models: def.models.slice(), fetchedAt: now, source: 'registry-fallback' };
-      try { saveModelsCache(store); } catch { /* ignore */ }
+      // safe: cache persistence is a perf optimisation only — losing
+      // it means the next /model call re-runs the fallback, never
+      // user-visible breakage. ENOSPC / read-only $HOME are the only
+      // realistic causes.
+      try { saveModelsCache(store); } catch { /* safe: see above */ }
       return { models: def.models.slice(), source: 'registry-fallback', fetchedAt: now };
     };
 
