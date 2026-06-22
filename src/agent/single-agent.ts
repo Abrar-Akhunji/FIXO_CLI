@@ -14,7 +14,7 @@ import { isTrivialQuery } from '../planner.js';
 import { decideAutoVerify, classifyVerifyOutput, buildRepairMessage } from './auto-verifier.js';
 import { buildRepoMap } from './repo-map.js';
 import type { AgentContext, AgentResult } from '../types.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, getAgentLoopGuardConfig } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
 import {
   buildProjectInstructionsBlock,
@@ -500,7 +500,15 @@ export class SingleAgent {
     // detectors run in parallel; the semantic one covers the most
     // common accidental "stare at one file" failure mode.
     const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
-    const loopMitigation = new LoopMitigationTracker();
+    // Phase 1b — opt-in sliding-window block accounting. Default is OFF
+    // (legacy session-lifetime lockout) until Phase 7 flips the default
+    // after soak. Sliding mode prevents the "immortal file" deadlock
+    // observed in the June 22, 2026 log session.
+    const loopGuardConfig = getAgentLoopGuardConfig();
+    const loopMitigation = new LoopMitigationTracker({
+      useSlidingWindow: loopGuardConfig.useSlidingWindow,
+      blockWindowTurns: loopGuardConfig.blockWindowTurns,
+    });
     let pendingSafetyDirective: string | null = null;
 
     // Pillar 5 — per-turn background-job awareness. The LLM
@@ -519,6 +527,8 @@ export class SingleAgent {
 
     const indicator = new TaskStatusIndicator();
     indicator.start();
+
+    let lastUsage: any = null;
 
     try {
       while (toolCallCount < toolCallLimit) {
@@ -630,6 +640,7 @@ export class SingleAgent {
         totalUsage.prompt_tokens += result.usage.prompt_tokens;
         totalUsage.completion_tokens += result.usage.completion_tokens;
         totalUsage.total_tokens += result.usage.total_tokens;
+        lastUsage = result.usage;
 
         // No tool calls → potentially run the auto-verifier, then
         // either continue the loop (one repair pass) or return.
@@ -673,6 +684,9 @@ export class SingleAgent {
 
           indicator.stop();
           conversation.addTurn(context.task, response);
+          if (result.usage && result.usage.total_tokens) {
+            conversation.setProviderReportedTokens(result.usage.total_tokens);
+          }
           taskSession.finish('success', response);
 
           return {
@@ -724,12 +738,12 @@ export class SingleAgent {
                 `${colors.yellow}⚠  Semantic loop warning: ${verdict.target} ` +
                 `accessed ${verdict.count}× in the last ${verdict.windowSize} turns.${colors.reset}`,
               );
-              const nowBlocking = loopMitigation.recordWarn(verdict.target);
+              const nowBlocking = loopMitigation.recordWarn(verdict.target, toolCallCount);
               if (nowBlocking) {
-                console.log(
-                  `${colors.yellow}⚠  Further reads of ${verdict.target} will be ` +
-                    `rejected this session — agent will be forced to pivot.${colors.reset}`,
-                );
+                const blockMsg = loopGuardConfig.useSlidingWindow
+                  ? `Further reads of ${verdict.target} will be rejected for the next ${loopGuardConfig.blockWindowTurns} turns — agent will be forced to pivot.`
+                  : `Further reads of ${verdict.target} will be rejected this session — agent will be forced to pivot.`;
+                console.log(`${colors.yellow}⚠  ${blockMsg}${colors.reset}`);
               }
             } else if (verdict.state === 'hard-abort') {
               // Rollback any staged writes from this run before
@@ -767,9 +781,9 @@ export class SingleAgent {
           if (
             isReadTool(toolCall.function.name) &&
             typeof parsedArgs.path === 'string' &&
-            loopMitigation.isBlocked(parsedArgs.path)
+            loopMitigation.isBlocked(parsedArgs.path, toolCallCount)
           ) {
-            const warns = loopMitigation.warnsFor(parsedArgs.path);
+            const warns = loopMitigation.warnsFor(parsedArgs.path, toolCallCount);
             const blockedResult = buildLoopBlockedReadResult(parsedArgs.path, warns);
             console.log(
               `${colors.yellow}⚠  Loop-blocked read intercepted: ${parsedArgs.path}${colors.reset}`,
@@ -781,6 +795,24 @@ export class SingleAgent {
             });
             toolCallCount++;
             continue;
+          }
+
+          // Phase 1b — escape valve for the loop-mitigation deadlock.
+          // If the model is now trying to MUTATE a loop-blocked file
+          // (write, rename, delete, patch), the prior canMutate check
+          // would refuse it because the read was never satisfied. We
+          // register a forced read hash on the session so the next
+          // canMutate call succeeds — preserving the staleness-check
+          // intent without trapping the file as "immortal". Clearing
+          // the loop block as well prevents the lockout from carrying
+          // over after the pivot has already happened.
+          if (
+            MUTATING_TOOL_NAMES.has(toolCall.function.name) &&
+            typeof parsedArgs.path === 'string' &&
+            loopMitigation.isBlocked(parsedArgs.path, toolCallCount)
+          ) {
+            taskSession.noteReadForMutation(parsedArgs.path);
+            loopMitigation.reset(parsedArgs.path);
           }
 
           const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl, context.yes);
@@ -877,6 +909,9 @@ export class SingleAgent {
         context.task,
         `Task processed with ${toolCallCount} tool calls.`,
       );
+      if (lastUsage && lastUsage.total_tokens) {
+        conversation.setProviderReportedTokens(lastUsage.total_tokens);
+      }
 
       const limitResponse = `Completed with ${toolCallCount} tool calls (limit reached).`;
       taskSession.finish('success', limitResponse);

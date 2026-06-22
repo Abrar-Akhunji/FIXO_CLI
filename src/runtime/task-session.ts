@@ -180,6 +180,31 @@ export class TaskSession {
     return { ok: true };
   }
 
+  /**
+   * Phase 1b — escape valve for the loop-mitigation deadlock.
+   *
+   * When the loop-mitigation tracker (loop-mitigation.ts) has blocked
+   * reads on a target, subsequent write/rename/delete attempts fail
+   * because {@link canMutate} requires a prior read. This method
+   * registers a fresh read hash for the file WITHOUT going through
+   * the regular read tools — used by the agent loop when it has
+   * decided to proceed with a mutation despite the loop block.
+   *
+   * Distinct from {@link noteRead} only in its audit-trail label so
+   * the events.jsonl shows this was a recovery, not a normal read.
+   */
+  noteReadForMutation(file: string): void {
+    const resolved = this.guard.resolve(file, 'file');
+    if (!fs.existsSync(resolved)) return;
+    const hash = hashFile(resolved);
+    if (hash !== null) this.readFiles.set(resolved, hash);
+    this.record('file_read_forced', {
+      file: this.guard.relative(resolved),
+      hash,
+      reason: 'loop-mitigation-recovery',
+    });
+  }
+
   addVerification(message: string): void {
     this.summary.verification.push(redactSecrets(message));
     this.writeSummary();

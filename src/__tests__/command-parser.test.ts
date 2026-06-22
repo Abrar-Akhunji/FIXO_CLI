@@ -71,3 +71,85 @@ test('isCommandSafe permits trusted global binaries invoked by absolute path', a
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('isCommandSafe blocks scaffolding outside workspace and heuristics prompt', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-test-workspace-'));
+  const workspaceRoot = path.join(tempDir, 'root');
+  fs.mkdirSync(workspaceRoot);
+
+  // Safe npx create inside workspace
+  const safeRes = await isCommandSafe('npx create-next-app@latest ./my-app', workspaceRoot);
+  assert.equal(safeRes.safe, true);
+
+  // Dangerous npx create outside workspace
+  const unsafeRes1 = await isCommandSafe('npx create-next-app@latest ../my-app', workspaceRoot);
+  assert.equal(unsafeRes1.safe, false);
+  assert.match(unsafeRes1.reason || '', /attempts to create a project outside the workspace root/);
+
+  // Dangerous npm create outside workspace
+  const unsafeRes2 = await isCommandSafe('npm create vite@latest ~/Desktop/my-app', workspaceRoot);
+  assert.equal(unsafeRes2.safe, false);
+  assert.match(unsafeRes2.reason || '', /attempts to create a project outside the workspace root/);
+
+  // Dangerous git clone outside workspace
+  const unsafeRes3 = await isCommandSafe('git clone https://github.com/foo/bar.git ../bar', workspaceRoot);
+  assert.equal(unsafeRes3.safe, false);
+  assert.match(unsafeRes3.reason || '', /attempts to create a project outside the workspace root/);
+
+  // Heuristic blocking for unknown directory-creating tool
+  const unsafeRes4 = await isCommandSafe('rails new my-app', workspaceRoot);
+  assert.equal(unsafeRes4.safe, false);
+  assert.match(unsafeRes4.reason || '', /looks like it might create a new directory/);
+
+  // Clean up
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+// Phase 1a — sandbox heuristic must not flag `find -type f` and friends.
+// Reproduces the false positive observed in the June 22, 2026 log session.
+test('isCommandSafe: find with value-taking flags is not a false-positive directory create', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-test-workspace-'));
+  const workspaceRoot = path.join(tempDir, 'root');
+  fs.mkdirSync(workspaceRoot);
+
+  // The exact scenario from the log session: `find "test folder" -type f`.
+  // Before Phase 1a this was rejected because `f` (the value of -type)
+  // matched the directory-creation heuristic regex.
+  const findTypeF = await isCommandSafe('find . -type f', workspaceRoot);
+  assert.equal(findTypeF.safe, true, findTypeF.reason);
+
+  // Other common find predicates
+  const findName = await isCommandSafe('find . -name foo -type f', workspaceRoot);
+  assert.equal(findName.safe, true, findName.reason);
+
+  const findMaxDepth = await isCommandSafe('find . -maxdepth 2 -type d', workspaceRoot);
+  assert.equal(findMaxDepth.safe, true, findMaxDepth.reason);
+
+  // awk / sed / xargs / jq are also in the Phase 1a allowlist
+  const awkOk = await isCommandSafe('awk NR==1 file.txt', workspaceRoot);
+  assert.equal(awkOk.safe, true, awkOk.reason);
+
+  const xargsOk = await isCommandSafe('xargs ls', workspaceRoot);
+  assert.equal(xargsOk.safe, true, xargsOk.reason);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('isCommandSafe: heuristic still catches real directory-creating CLIs after Phase 1a', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-test-workspace-'));
+  const workspaceRoot = path.join(tempDir, 'root');
+  fs.mkdirSync(workspaceRoot);
+
+  // `rails new my-app` — `rails` is NOT in any allowlist; positional
+  // arg `my-app` matches the new-directory regex. Must still prompt.
+  const railsNew = await isCommandSafe('rails new my-app', workspaceRoot);
+  assert.equal(railsNew.safe, false);
+  assert.match(railsNew.reason || '', /looks like it might create a new directory/);
+
+  // Unknown CLI with a single bare-name arg
+  const someNewTool = await isCommandSafe('unknowncli newproject', workspaceRoot);
+  assert.equal(someNewTool.safe, false);
+  assert.match(someNewTool.reason || '', /looks like it might create a new directory/);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

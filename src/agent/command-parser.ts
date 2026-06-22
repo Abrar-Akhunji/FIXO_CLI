@@ -280,6 +280,76 @@ const DANGEROUS_READERS = new Set([
   'cat', 'less', 'more', 'grep', 'head', 'tail'
 ]);
 
+interface ScaffolderDefinition {
+  bin: string;
+  isScaffolder: (args: string[]) => boolean;
+  extractTargetPath: (args: string[]) => string | null;
+}
+
+const KNOWN_SCAFFOLDERS: ScaffolderDefinition[] = [
+  {
+    bin: 'npx',
+    isScaffolder: (args) => args.length > 0 && args[0].startsWith('create-'),
+    extractTargetPath: (args) => {
+      const posArgs = args.filter(a => !a.startsWith('-'));
+      return posArgs.length > 1 ? posArgs[1] : null;
+    }
+  },
+  {
+    bin: 'npm',
+    isScaffolder: (args) => args.length > 0 && (args[0] === 'create' || args[0] === 'init'),
+    extractTargetPath: (args) => {
+      const posArgs = args.filter(a => !a.startsWith('-'));
+      return posArgs.length > 2 ? posArgs[2] : null;
+    }
+  },
+  {
+    bin: 'yarn',
+    isScaffolder: (args) => args.length > 0 && args[0] === 'create',
+    extractTargetPath: (args) => {
+      const posArgs = args.filter(a => !a.startsWith('-'));
+      return posArgs.length > 2 ? posArgs[2] : null;
+    }
+  },
+  {
+    bin: 'pnpm',
+    isScaffolder: (args) => args.length > 0 && args[0] === 'create',
+    extractTargetPath: (args) => {
+      const posArgs = args.filter(a => !a.startsWith('-'));
+      return posArgs.length > 2 ? posArgs[2] : null;
+    }
+  },
+  {
+    bin: 'git',
+    isScaffolder: (args) => args.length > 0 && args[0] === 'clone',
+    extractTargetPath: (args) => {
+      const posArgs = args.filter(a => !a.startsWith('-'));
+      if (posArgs.length > 2) return posArgs[2];
+      if (posArgs.length === 2) {
+        const url = posArgs[1];
+        let base = url.split('/').pop() || '';
+        if (base.endsWith('.git')) base = base.slice(0, -4);
+        return base || null;
+      }
+      return null;
+    }
+  },
+  {
+    bin: 'degit',
+    isScaffolder: () => true,
+    extractTargetPath: (args) => {
+      const posArgs = args.filter(a => !a.startsWith('-'));
+      if (posArgs.length > 1) return posArgs[1];
+      if (posArgs.length === 1) {
+        const repo = posArgs[0];
+        const parts = repo.split('/');
+        return parts.length > 0 ? parts[parts.length - 1] : null;
+      }
+      return null;
+    }
+  }
+];
+
 /**
  * System binaries that the agent is permitted to invoke even when
  * referenced via an absolute or workspace-relative path that resolves
@@ -312,6 +382,52 @@ function expandHome(p: string): string {
     return path.join(os.homedir(), p.slice(2));
   }
   return p;
+}
+
+/**
+ * Phase 1a — value-arg-aware positional extraction.
+ *
+ * Given the raw arg list of a command, return the positional args
+ * (i.e. NOT flags AND NOT the value of a known value-taking flag).
+ *
+ * Without this, `find . -type f` would expose `f` as a positional —
+ * the directory-creation heuristic then mistakes it for a new
+ * directory name. The list covers the value-taking flags of the
+ * common POSIX inspection tools (`find`, `grep`, `awk`, etc.) that
+ * are most often confused.
+ */
+const VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
+  // `find` predicates that consume the next arg
+  '-type', '-name', '-iname', '-path', '-ipath', '-regex', '-iregex',
+  '-perm', '-newer', '-mtime', '-atime', '-ctime', '-mmin', '-amin', '-cmin',
+  '-size', '-user', '-group', '-uid', '-gid',
+  '-maxdepth', '-mindepth', '-depth',
+  '-exec', '-execdir', '-ok', '-okdir',
+  '-printf', '-fprintf', '-fprint',
+  // grep / ripgrep style
+  '-e', '-f', '--include', '--exclude', '--include-dir', '--exclude-dir',
+  '--max-count', '--max-depth', '--context', '--before-context', '--after-context',
+  // common short flags that take a value
+  '-A', '-B', '-C', '-o', '-n',
+  // sed/awk
+  '-F',
+]);
+
+function stripFlagValues(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('-')) {
+      // If this is a known value-taking flag AND there's a next arg
+      // that isn't itself a flag, skip the next arg too.
+      if (VALUE_TAKING_FLAGS.has(a) && i + 1 < args.length && !args[i + 1].startsWith('-')) {
+        i++; // consume the value
+      }
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
 }
 
 function describeKind(t: WriteTarget): string {
@@ -411,6 +527,71 @@ export async function isCommandSafe(command: string, workspaceRoot: string): Pro
           reason: `Attempt to execute an external binary located outside the workspace: ${cmd.binary}`,
           affectedPath: resolvedBin
         };
+      }
+    }
+
+    // Identify scaffolders and extract target path
+    const scaffolder = KNOWN_SCAFFOLDERS.find(s => s.bin === binBasename);
+    if (scaffolder && scaffolder.isScaffolder(cmd.arguments)) {
+      const targetPath = scaffolder.extractTargetPath(cmd.arguments);
+      if (targetPath) {
+        const cleanArg = unquote(targetPath);
+        // Expand home paths
+        let targetFullPath = cleanArg;
+        if (cleanArg === '~') {
+          targetFullPath = os.homedir();
+        } else if (cleanArg.startsWith('~/') || cleanArg.startsWith('~\\')) {
+          targetFullPath = path.join(os.homedir(), cleanArg.slice(2));
+        }
+        const resolved = path.resolve(workspaceRoot, targetFullPath);
+        if (!guard.isInside(resolved)) {
+          return {
+            safe: false,
+            reason: `Scaffolding command '${cmd.binary}' attempts to create a project outside the workspace root (${targetPath})`,
+            affectedPath: resolved
+          };
+        }
+      }
+    } else {
+      // Unknown command that might be directory-creating.
+      //
+      // Phase 1a — the original heuristic flagged every bare positional
+      // arg matching /^[a-zA-Z0-9_-]+$/ as "looks like a new directory".
+      // Two bugs:
+      //   1. Standard POSIX inspection tools (`find`, `awk`, `sed`, etc.)
+      //      were not in the non-scaffolder allowlist, so they fell into
+      //      this branch.
+      //   2. Value-args of known flags (`-type f`, `-name foo`) were
+      //      treated as positional. `find . -type f` flagged `f` as a
+      //      new directory name. Comically wrong; observed in the
+      //      June 22, 2026 log session.
+      //
+      // Fix: extend the allowlist for tools known never to create
+      // directories from a bare arg, AND strip value-args of known
+      // value-taking flags before computing positionals.
+      const COMMON_NON_SCAFFOLDERS = new Set([
+        'echo', 'git', 'node', 'npm', 'npx', 'yarn', 'pnpm', 'bash', 'sh',
+        'cat', 'grep', 'mkdir', 'rm', 'ls', 'cd', 'pwd', 'mv', 'cp', 'touch',
+        'python', 'python3', 'go', 'cargo', 'docker', 'docker-compose',
+        // Phase 1a additions — standard POSIX inspection/transform tools
+        // that take bare args as filters or input files, never as new
+        // directory targets.
+        'find', 'awk', 'sed', 'xargs', 'jq', 'tar', 'head', 'tail', 'sort',
+        'uniq', 'wc', 'tr', 'cut', 'tee', 'less', 'more', 'file', 'stat',
+        'basename', 'dirname', 'readlink', 'which', 'whereis',
+      ]);
+      if (!COMMON_NON_SCAFFOLDERS.has(binBasename) && !DANGEROUS_MODIFIERS.has(binBasename) && !DANGEROUS_READERS.has(binBasename) && cmd.arguments.length > 0) {
+        const positionalArgs = stripFlagValues(cmd.arguments);
+        if (positionalArgs.length > 0) {
+          const lastArg = unquote(positionalArgs[positionalArgs.length - 1]);
+          if (lastArg.match(/^[a-zA-Z0-9_-]+$/) && !lastArg.startsWith('./') && !lastArg.startsWith('/') && !lastArg.startsWith('~')) {
+            return {
+              safe: false,
+              reason: `Command '${cmd.binary}' looks like it might create a new directory ('${lastArg}'). Please confirm execution.`,
+              affectedPath: path.resolve(workspaceRoot, lastArg)
+            };
+          }
+        }
       }
     }
 
