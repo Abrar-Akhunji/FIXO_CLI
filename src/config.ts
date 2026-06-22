@@ -172,6 +172,81 @@ export interface SafetyConfig {
   autoVerifyMaxRepairs?: number;
 }
 
+/* ──────────────────────── Agent Subsystem Configuration ──────────────────────── */
+
+/**
+ * Phase 5 — Agent Pool tuning surface.
+ *
+ * Controls the concurrency and per-subtask budget of the orchestrator's
+ * parallel worker pool. All defaults match the constants that were
+ * hardcoded in `agent-pool.ts` before this namespace existed, so adding
+ * the namespace alone is a zero-behavior-change refactor.
+ */
+export interface AgentPoolConfig {
+  /** Maximum concurrent worker subtasks. Default 3. */
+  concurrencyLimit: number;
+  /** Tool-call budget per subtask. Default 12 (raised to 40 in Phase 4a). */
+  subtaskBudget: number;
+  /**
+   * When true, successful peer subtasks are committed even if siblings
+   * fail (Phase 2). Default false; flipped in Phase 7 after the regression
+   * harness validates the partial-commit path.
+   */
+  preservePartialOnFailure: boolean;
+}
+
+/**
+ * Phase 5 — loop-mitigation policy.
+ *
+ * The legacy `LoopMitigationTracker` (loop-mitigation.ts) blocks reads
+ * on a target permanently once the warn threshold trips. Phase 1b adds a
+ * sliding-window alternative; this config selects between them.
+ */
+export interface AgentLoopGuardConfig {
+  /**
+   * When true, block accounting uses a sliding window of tool calls
+   * instead of session-lifetime lockout. Default false in phase 1b;
+   * flipped to true in Phase 7 after soak.
+   */
+  useSlidingWindow: boolean;
+  /** Sliding-window size in tool calls. Default 10. Ignored when sliding is off. */
+  blockWindowTurns: number;
+  /**
+   * When true, the loop-mitigation tracker is reset between orchestrator
+   * subtasks so one stuck subtask cannot poison the rest of the run.
+   * Default true.
+   */
+  blockResetOnSubtask: boolean;
+}
+
+/**
+ * Phase 5 — routing-honor policy.
+ *
+ * The router currently surfaces a "model unverified for autonomous DAG
+ * execution" warning but routes to the Orchestrator anyway. Phase 6
+ * makes the warning actionable.
+ */
+export interface AgentRoutingConfig {
+  /**
+   * When true, Complex-classified tasks on models NOT in the
+   * verified-DAG list are routed to SingleAgent. Default false in
+   * Phase 0; flipped to true in Phase 6.
+   */
+  honorVerificationFlag: boolean;
+  /**
+   * Override that permits unverified-model DAG execution even when
+   * `honorVerificationFlag` is true. For power users who explicitly
+   * accept the risk. Default false.
+   */
+  allowUnverifiedDag: boolean;
+}
+
+export interface AgentConfig {
+  pool: AgentPoolConfig;
+  loopGuard: AgentLoopGuardConfig;
+  routing: AgentRoutingConfig;
+}
+
 /**
  * Phase 3.3 — repo-map scan caps.
  *
@@ -267,6 +342,12 @@ export interface FreeLLMConfig {
   freellmapi_api_key?: string;
   apiUrl?: string;
   defaultModel: string;
+  /** Persisted across launches so the next boot auto-reconnects. */
+  lastSession?: {
+    provider: string;      // e.g. "google"
+    model: string;         // e.g. "gemini-2.5-pro"
+    updatedAt: string;     // ISO timestamp
+  };
   preferences: {
     autoCommit: boolean;
     streaming: boolean;
@@ -311,6 +392,12 @@ export interface FreeLLMConfig {
      * {@link RepoMapConfig}.
      */
     repoMap?: RepoMapConfig;
+    /**
+     * Phase 5 — Agent subsystem tunables (pool, loop guard, routing).
+     * Optional. Missing fields fall through to the defaults in
+     * {@link getDefaultConfig}. See {@link AgentConfig}.
+     */
+    agent?: AgentConfig;
   };
   _firstRunComplete: boolean;
 }
@@ -388,6 +475,22 @@ export function getDefaultConfig(): FreeLLMConfig {
         autoVerify: true,
         autoVerifyMaxRepairs: 1,
       },
+      agent: {
+        pool: {
+          concurrencyLimit: 3,
+          subtaskBudget: 12,
+          preservePartialOnFailure: false,
+        },
+        loopGuard: {
+          useSlidingWindow: false,
+          blockWindowTurns: 10,
+          blockResetOnSubtask: true,
+        },
+        routing: {
+          honorVerificationFlag: false,
+          allowUnverifiedDag: false,
+        },
+      },
     },
     _firstRunComplete: false,
   };
@@ -421,6 +524,14 @@ export function loadConfig(): FreeLLMConfig {
         .semanticLoopTrap ?? {};
     const parsedToolCalls =
       (parsedSafety as { toolCalls?: Partial<ToolCallBudgetPolicy> }).toolCalls ?? {};
+    const parsedAgent =
+      (parsedPreferences as { agent?: Partial<AgentConfig> }).agent ?? {};
+    const parsedAgentPool =
+      (parsedAgent as { pool?: Partial<AgentPoolConfig> }).pool ?? {};
+    const parsedAgentLoopGuard =
+      (parsedAgent as { loopGuard?: Partial<AgentLoopGuardConfig> }).loopGuard ?? {};
+    const parsedAgentRouting =
+      (parsedAgent as { routing?: Partial<AgentRoutingConfig> }).routing ?? {};
     // Back-compat: existing configs predating v1.1 don't have
     // `provider_mode`. If they have a FreeLLMAPI key they were
     // implicitly proxy users; otherwise they're either fresh or
@@ -455,12 +566,53 @@ export function loadConfig(): FreeLLMConfig {
             ...parsedToolCalls,
           },
         },
+        agent: {
+          pool: {
+            ...defaults.preferences.agent!.pool,
+            ...parsedAgentPool,
+          },
+          loopGuard: {
+            ...defaults.preferences.agent!.loopGuard,
+            ...parsedAgentLoopGuard,
+          },
+          routing: {
+            ...defaults.preferences.agent!.routing,
+            ...parsedAgentRouting,
+          },
+        },
       },
     };
   } catch {
     // File missing, corrupt, or otherwise unreadable — use defaults.
     return getDefaultConfig();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Agent subsystem helpers (Phase 5 — see AgentConfig)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the resolved {@link AgentConfig} from the loaded config.
+ * Guaranteed non-null — falls back to defaults for old configs that
+ * predate this namespace.
+ */
+export function getAgentConfig(config?: FreeLLMConfig): AgentConfig {
+  const cfg = config ?? loadConfig();
+  if (cfg.preferences.agent) return cfg.preferences.agent;
+  return getDefaultConfig().preferences.agent!;
+}
+
+export function getAgentPoolConfig(config?: FreeLLMConfig): AgentPoolConfig {
+  return getAgentConfig(config).pool;
+}
+
+export function getAgentLoopGuardConfig(config?: FreeLLMConfig): AgentLoopGuardConfig {
+  return getAgentConfig(config).loopGuard;
+}
+
+export function getAgentRoutingConfig(config?: FreeLLMConfig): AgentRoutingConfig {
+  return getAgentConfig(config).routing;
 }
 
 /**

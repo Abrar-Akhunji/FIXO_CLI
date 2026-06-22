@@ -55,7 +55,12 @@ export type TelemetryEventType =
   | 'todo_mutation'
   | 'session_snapshot'
   | 'hook_fired'
-  | 'permission_decision';
+  | 'permission_decision'
+  | 'pool_subtask_budget_exhausted'
+  | 'pool_subtask_partial_committed'
+  | 'loop_guard_lockout_blocked'
+  | 'sandbox_heuristic_false_positive'
+  | 'dag_write_set_conflict_avoided';
 
 export interface TelemetryEvent {
   /** ISO timestamp the event was recorded. */
@@ -144,6 +149,22 @@ export const telemetry = {
   },
   permissionDecision(fields: { tool: string; pattern: string; decision: string }): TelemetryEvent {
     return makeEvent('permission_decision', fields);
+  },
+  // ── Phase 5 remediation counters ────────────────────────────────────────
+  poolSubtaskBudgetExhausted(fields: { subtaskId: string; persona: string; budget: number; toolCalls: number }): TelemetryEvent {
+    return makeEvent('pool_subtask_budget_exhausted', fields);
+  },
+  poolSubtaskPartialCommitted(fields: { runId: string; succeeded: number; failed: number; filesCommitted: number }): TelemetryEvent {
+    return makeEvent('pool_subtask_partial_committed', fields);
+  },
+  loopGuardLockoutBlocked(fields: { target: string; warns: number; tool: string; slidingWindow: boolean }): TelemetryEvent {
+    return makeEvent('loop_guard_lockout_blocked', fields);
+  },
+  sandboxHeuristicFalsePositive(fields: { binary: string; rejectedArg: string; commandLine: string }): TelemetryEvent {
+    return makeEvent('sandbox_heuristic_false_positive', fields);
+  },
+  dagWriteSetConflictAvoided(fields: { runId: string; file: string; serializedSubtasks: string[] }): TelemetryEvent {
+    return makeEvent('dag_write_set_conflict_avoided', fields);
   },
 };
 
@@ -462,10 +483,13 @@ export async function logTelemetry(payload: TelemetryPayload): Promise<void> {
 
   try {
     const config = loadConfig();
-    const baseUrl = config.apiUrl || 'http://localhost:3001/v1';
-    let logUrl = 'http://localhost:3001/api/mcp/log';
+    const baseUrl = config.apiUrl || 'https://api.free-llm.com/v1';
+    let logUrl = 'https://api.free-llm.com/api/mcp/log';
     try {
       const url = new URL(baseUrl);
+      if (url.protocol === 'http:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+        url.protocol = 'https:'; // force HTTPS for telemetry
+      }
       logUrl = `${url.protocol}//${url.host}/api/mcp/log`;
     } catch (err) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
