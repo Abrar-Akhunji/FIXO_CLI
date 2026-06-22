@@ -1,7 +1,46 @@
 import type { AgentContext, Subtask, TaskDAG } from '../types.js';
 import { WorkerAgent } from './worker-agent.js';
 import { colors } from '../ui/colors.js';
-import { logTelemetry } from './telemetry.js';
+import { logTelemetry, telemetry, recordTelemetry } from './telemetry.js';
+import { couldOverlapFile } from './orchestrator.js';
+import { getAgentDagConfig } from '../config.js';
+
+/**
+ * Phase 5.3 — would dispatching `candidate` conflict on writes with
+ * any of the currently in-flight subtasks?
+ *
+ * Pure function — runs at dispatch time as a defense-in-depth check
+ * against orchestrator output that the static `serializeWriteConflicts`
+ * pass missed (e.g. because it was disabled, or because a file was
+ * declared at runtime by a previous reviewer-feedback subtask). The
+ * conflict definition matches the static pass: file-set overlap, OR
+ * either side declares an empty file set under
+ * `serializeMissingFiles`.
+ *
+ * Returns the id of the in-flight blocker (for logging) or null.
+ */
+export function findInFlightConflict(
+  candidate: Subtask,
+  inFlight: readonly Subtask[],
+  options: { serializeMissingFiles?: boolean } = {},
+): string | null {
+  const serializeMissingFiles = options.serializeMissingFiles ?? true;
+  const candFiles = candidate.files ?? [];
+  for (const peer of inFlight) {
+    const peerFiles = peer.files ?? [];
+    if (candFiles.length > 0 && peerFiles.length > 0) {
+      for (const a of candFiles) {
+        for (const b of peerFiles) {
+          if (couldOverlapFile(a, b)) return peer.id;
+        }
+      }
+    } else if (serializeMissingFiles) {
+      // Either side has unknown writes — conservative defer.
+      return peer.id;
+    }
+  }
+  return null;
+}
 
 /**
  * Phase 5.2 — partition the run's touched files by subtask outcome.
@@ -128,13 +167,47 @@ export class AgentPool {
       status: 'started'
     });
 
+    // Phase 5.3 — runtime cross-check config. If the orchestrator's
+    // static pass missed a conflict (e.g. it was disabled, or a
+    // dynamically-added reviewer-repair subtask overlapped an
+    // in-flight peer), defer dispatch instead of racing.
+    const dagCfg = getAgentDagConfig();
+
     const runNext = async (): Promise<void> => {
-      const runnable = subtasks.filter(
+      const dependencySatisfied = subtasks.filter(
         s => s.status === 'pending' && s.dependencies.every(depId => {
           const dep = subtasks.find(x => x.id === depId);
           return dep && dep.status === 'completed';
         })
       );
+
+      if (dependencySatisfied.length === 0) {
+        return;
+      }
+
+      // Phase 5.3 — among dependency-ready candidates, drop any whose
+      // declared write set could conflict with an in-flight peer.
+      // Deferred candidates will be reconsidered on the next runNext()
+      // tick once their conflicting peer completes.
+      const inFlight = subtasks.filter(s => s.status === 'running');
+      const runnable = dagCfg.serializeWriteConflicts
+        ? dependencySatisfied.filter(candidate => {
+            const blocker = findInFlightConflict(candidate, inFlight, {
+              serializeMissingFiles: dagCfg.serializeMissingFiles,
+            });
+            if (blocker) {
+              try {
+                recordTelemetry(telemetry.dagWriteSetConflictAvoided({
+                  runId,
+                  file: candidate.files?.[0] ?? '<unknown>',
+                  serializedSubtasks: [blocker, candidate.id],
+                }));
+              } catch { /* never break dispatch */ }
+              return false;
+            }
+            return true;
+          })
+        : dependencySatisfied;
 
       if (runnable.length === 0) {
         return;

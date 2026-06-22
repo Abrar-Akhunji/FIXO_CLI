@@ -1,7 +1,146 @@
 import type { AgentContext, Subtask, TaskDAG } from '../types.js';
 import { AgentClient } from './agent-client.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, getAgentDagConfig } from '../config.js';
 import { C } from '../ui/colors.js';
+import { globToRegExp } from './permissions.js';
+import { telemetry, recordTelemetry } from './telemetry.js';
+
+/**
+ * Phase 5.3 — Subtask personas that may write to the workspace.
+ *
+ * Reviewer is read-only (it produces a verdict, not a diff). Code,
+ * test, and doc personas all have plausible write-shaped tool calls —
+ * `test` writes test files, `doc` writes README/JSDoc, and `code` is
+ * the obvious case. Only pairs of MUTATING_PERSONAS members are
+ * candidates for write-conflict serialization.
+ */
+const MUTATING_PERSONAS: ReadonlySet<Subtask['persona']> = new Set([
+  'code',
+  'test',
+  'doc',
+]);
+
+/**
+ * Phase 5.3 — could the two file references possibly resolve to the
+ * same on-disk path?
+ *
+ * Pure-string match is the easy case. When either side is a glob
+ * (contains `*` or `?`), we test the glob against the literal. When
+ * BOTH sides are globs we punt and return true — pattern-vs-pattern
+ * overlap is undecidable cheaply, and conservative serialization is
+ * the explicit Phase 5.3 default.
+ */
+export function couldOverlapFile(a: string, b: string): boolean {
+  if (a === b) return true;
+  const aIsGlob = a.includes('*') || a.includes('?');
+  const bIsGlob = b.includes('*') || b.includes('?');
+  if (aIsGlob && bIsGlob) return true; // can't cheaply decide; conservative
+  if (aIsGlob) return globToRegExp(a).test(b);
+  if (bIsGlob) return globToRegExp(b).test(a);
+  return false;
+}
+
+function fileSetsCouldOverlap(filesA: readonly string[], filesB: readonly string[]): boolean {
+  for (const a of filesA) {
+    for (const b of filesB) {
+      if (couldOverlapFile(a, b)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Phase 5.3 — DAG post-pass that injects dependency edges between
+ * subtasks whose write-sets could conflict.
+ *
+ * Algorithm:
+ *   1. Iterate subtasks in deterministic `id`-lexicographic order.
+ *   2. For each pair (a, b) where a < b and both are write-shaped:
+ *      a. If they're already directly ordered (a depends on b OR b
+ *         depends on a), skip.
+ *      b. If both declare non-empty `files` AND those sets could
+ *         overlap → serialize b after a.
+ *      c. If either declares empty `files` AND `serializeMissingFiles`
+ *         is true → serialize b after a (conservative: can't prove
+ *         disjoint write sets).
+ *   3. Each insertion is logged to telemetry so we can observe how
+ *      often the conflict pass kicks in.
+ *
+ * Mutates the subtasks array in place (consistent with
+ * `validateAndSortDAG` style) and returns the inserted edges for
+ * observability.
+ */
+export interface WriteConflictPlan {
+  /** Same array reference as input, with `dependencies` mutated. */
+  subtasks: Subtask[];
+  /** Edges injected by this pass; `from` blocks `to`. */
+  edgesInserted: Array<{ from: string; to: string; reason: string }>;
+}
+
+export function serializeWriteConflicts(
+  subtasks: Subtask[],
+  options: { serializeMissingFiles?: boolean } = {},
+): WriteConflictPlan {
+  const serializeMissingFiles = options.serializeMissingFiles ?? true;
+  const edges: Array<{ from: string; to: string; reason: string }> = [];
+
+  // Deterministic order — lexicographic `id`. Stable across runs so
+  // a re-plan produces the same DAG.
+  const ordered = [...subtasks].sort((a, b) => a.id.localeCompare(b.id));
+
+  for (let i = 0; i < ordered.length; i++) {
+    const a = ordered[i];
+    if (!MUTATING_PERSONAS.has(a.persona)) continue;
+    for (let j = i + 1; j < ordered.length; j++) {
+      const b = ordered[j];
+      if (!MUTATING_PERSONAS.has(b.persona)) continue;
+
+      // Skip if already directly ordered (in either direction).
+      if (b.dependencies.includes(a.id) || a.dependencies.includes(b.id)) continue;
+
+      const aFiles = a.files ?? [];
+      const bFiles = b.files ?? [];
+      let reason: string | null = null;
+      let conflictKey = '';
+
+      if (aFiles.length > 0 && bFiles.length > 0) {
+        if (fileSetsCouldOverlap(aFiles, bFiles)) {
+          // Find a representative overlapping pair for telemetry.
+          outer: for (const x of aFiles) {
+            for (const y of bFiles) {
+              if (couldOverlapFile(x, y)) {
+                conflictKey = x === y ? x : `${x} ↔ ${y}`;
+                break outer;
+              }
+            }
+          }
+          reason = `shared write target (${conflictKey})`;
+        }
+      } else if (serializeMissingFiles) {
+        reason = aFiles.length === 0 && bFiles.length === 0
+          ? `both subtasks declared no files; conservative serialization`
+          : `one subtask declared no files; conservative serialization`;
+        conflictKey = '<unknown>';
+      }
+
+      if (reason) {
+        b.dependencies = [...b.dependencies, a.id];
+        edges.push({ from: a.id, to: b.id, reason });
+        try {
+          recordTelemetry(telemetry.dagWriteSetConflictAvoided({
+            runId: 'plan-time',
+            file: conflictKey,
+            serializedSubtasks: [a.id, b.id],
+          }));
+        } catch {
+          // telemetry must never break planning
+        }
+      }
+    }
+  }
+
+  return { subtasks, edgesInserted: edges };
+}
 
 export class Orchestrator {
   private client: AgentClient;
@@ -74,10 +213,41 @@ JSON Schema:
 
         const content = response.content?.trim() || '';
         const jsonMatch = content.match(/\{[\s\S]*\}/);
-        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content) as TaskDAG;
+        
+        if (jsonMatch) {
+          const rawLength = content.length;
+          const matchLength = jsonMatch[0].length;
+          if (rawLength - matchLength > 50) {
+            throw new Error(`Model output contained too much conversational text (${rawLength - matchLength} chars outside JSON). Please output STRICTLY JSON without any conversational text or markdown formatting.`);
+          }
+        } else {
+          throw new Error('No JSON object found in response.');
+        }
+
+        const parsed = JSON.parse(jsonMatch[0]) as TaskDAG;
 
         if (parsed && Array.isArray(parsed.subtasks)) {
           this.validateAndSortDAG(parsed.subtasks);
+          // Phase 5.3 — inject write-conflict edges. Default is to
+          // serialize on both observed overlap AND declared-empty
+          // file sets (LLMs frequently omit `files`). The flag lives
+          // under `agent.dag.serializeWriteConflicts`.
+          const dagCfg = getAgentDagConfig();
+          if (dagCfg.serializeWriteConflicts) {
+            const { edgesInserted } = serializeWriteConflicts(parsed.subtasks, {
+              serializeMissingFiles: dagCfg.serializeMissingFiles,
+            });
+            if (edgesInserted.length > 0 && this.verbose) {
+              console.log(`${C.BLUE}[Orchestrator] Injected ${edgesInserted.length} write-conflict edge(s).${C.RESET}`);
+              for (const e of edgesInserted) {
+                console.log(`  ${C.DIM}${e.from} → ${e.to}: ${e.reason}${C.RESET}`);
+              }
+            }
+            // Re-validate to confirm acyclicity (insertion is by sorted
+            // id so a cycle is impossible, but we run validation again
+            // for defense in depth).
+            this.validateAndSortDAG(parsed.subtasks);
+          }
           return parsed;
         }
         feedback = 'Missing subtasks array';

@@ -9,7 +9,8 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AgentPool, computePartialCommitPlan } from '../agent/agent-pool.js';
+import { AgentPool, computePartialCommitPlan, findInFlightConflict } from '../agent/agent-pool.js';
+import { serializeWriteConflicts, couldOverlapFile } from '../agent/orchestrator.js';
 import type { Subtask } from '../types.js';
 import {
   getDefaultConfig,
@@ -17,6 +18,7 @@ import {
   getAgentPoolConfig,
   getAgentLoopGuardConfig,
   getAgentRoutingConfig,
+  getAgentDagConfig,
 } from '../config.js';
 
 // Test helper — build a Subtask quickly. Defaults match a minimal
@@ -67,6 +69,12 @@ test('AgentRouting defaults: verification flag NOT honored (Phase 6 flips)', () 
   const defaults = getAgentRoutingConfig(getDefaultConfig());
   assert.equal(defaults.honorVerificationFlag, false);
   assert.equal(defaults.allowUnverifiedDag, false);
+});
+
+test('AgentDag defaults: serializeWriteConflicts + serializeMissingFiles default ON', () => {
+  const defaults = getAgentDagConfig(getDefaultConfig());
+  assert.equal(defaults.serializeWriteConflicts, true);
+  assert.equal(defaults.serializeMissingFiles, true);
 });
 
 test('getAgentConfig falls back to defaults for configs predating the namespace', () => {
@@ -157,6 +165,154 @@ test('computePartialCommitPlan: subtasks with no touchedFiles are ignored cleanl
   // for runs where every successful subtask was non-mutating).
   assert.equal(plan.partialCommitPath, false);
   assert.deepEqual(plan.failureOnlyFiles.sort(), ['/ws/x.ts']);
+});
+
+// ── Phase 5.3 — couldOverlapFile ─────────────────────────────────────────
+
+test('couldOverlapFile: exact match', () => {
+  assert.equal(couldOverlapFile('src/a.ts', 'src/a.ts'), true);
+});
+
+test('couldOverlapFile: literal vs literal — disjoint', () => {
+  assert.equal(couldOverlapFile('src/a.ts', 'src/b.ts'), false);
+});
+
+test('couldOverlapFile: glob vs literal — matches', () => {
+  assert.equal(couldOverlapFile('src/*.ts', 'src/a.ts'), true);
+  assert.equal(couldOverlapFile('src/**/*.css', 'src/styles/main.css'), true);
+});
+
+test('couldOverlapFile: glob vs literal — disjoint', () => {
+  assert.equal(couldOverlapFile('src/*.ts', 'docs/readme.md'), false);
+});
+
+test('couldOverlapFile: glob vs glob — conservative true', () => {
+  // Pattern-vs-pattern overlap is undecidable cheaply.
+  assert.equal(couldOverlapFile('src/*.ts', 'src/*.tsx'), true);
+});
+
+// ── Phase 5.3 — serializeWriteConflicts ──────────────────────────────────
+
+test('serializeWriteConflicts: 3 subtasks writing the same file → 3-chain', () => {
+  // Replays the orchestration shape from the June 22, 2026 log session:
+  // "animations / palette / typography" all targeting style.css with
+  // no LLM-emitted dependencies.
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a-animations', status: 'pending', persona: 'code', files: ['style.css'] }),
+    makeSubtask({ id: 'b-palette', status: 'pending', persona: 'code', files: ['style.css'] }),
+    makeSubtask({ id: 'c-typography', status: 'pending', persona: 'code', files: ['style.css'] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks);
+  // Pair-wise: (a,b), (a,c), (b,c) — three edges, all forward by id sort.
+  assert.equal(edgesInserted.length, 3);
+  // Concrete check: b depends on a, c depends on a and b.
+  const a = subtasks.find(s => s.id === 'a-animations')!;
+  const b = subtasks.find(s => s.id === 'b-palette')!;
+  const c = subtasks.find(s => s.id === 'c-typography')!;
+  assert.deepEqual(a.dependencies, []);
+  assert.ok(b.dependencies.includes('a-animations'));
+  assert.ok(c.dependencies.includes('a-animations'));
+  assert.ok(c.dependencies.includes('b-palette'));
+});
+
+test('serializeWriteConflicts: disjoint files → still parallel', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'pending', persona: 'code', files: ['src/a.ts'] }),
+    makeSubtask({ id: 'b', status: 'pending', persona: 'code', files: ['src/b.ts'] }),
+    makeSubtask({ id: 'c', status: 'pending', persona: 'code', files: ['src/c.ts'] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks);
+  assert.equal(edgesInserted.length, 0);
+  for (const s of subtasks) assert.equal(s.dependencies.length, 0);
+});
+
+test('serializeWriteConflicts: reviewer is read-only — never serialized', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a-code', status: 'pending', persona: 'code', files: ['x.ts'] }),
+    makeSubtask({ id: 'b-reviewer', status: 'pending', persona: 'reviewer', files: ['x.ts'] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks);
+  assert.equal(edgesInserted.length, 0);
+});
+
+test('serializeWriteConflicts: respects existing dependencies', () => {
+  // If the LLM already linked b → a, the post-pass shouldn't add a
+  // duplicate or reverse edge.
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'pending', persona: 'code', files: ['x.ts'], dependencies: [] }),
+    makeSubtask({ id: 'b', status: 'pending', persona: 'code', files: ['x.ts'], dependencies: ['a'] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks);
+  assert.equal(edgesInserted.length, 0);
+});
+
+test('serializeWriteConflicts: missing files (LLM omission) → serialized when serializeMissingFiles=true', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'pending', persona: 'code', files: [] }),
+    makeSubtask({ id: 'b', status: 'pending', persona: 'code', files: [] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks, { serializeMissingFiles: true });
+  assert.equal(edgesInserted.length, 1);
+  assert.equal(edgesInserted[0].from, 'a');
+  assert.equal(edgesInserted[0].to, 'b');
+});
+
+test('serializeWriteConflicts: missing files + flag off → preserves parallelism', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'pending', persona: 'code', files: [] }),
+    makeSubtask({ id: 'b', status: 'pending', persona: 'code', files: [] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks, { serializeMissingFiles: false });
+  assert.equal(edgesInserted.length, 0);
+});
+
+test('serializeWriteConflicts: glob overlap is detected', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'pending', persona: 'code', files: ['src/styles/main.css'] }),
+    makeSubtask({ id: 'b', status: 'pending', persona: 'code', files: ['src/styles/**/*.css'] }),
+  ];
+  const { edgesInserted } = serializeWriteConflicts(subtasks);
+  assert.equal(edgesInserted.length, 1);
+});
+
+// ── Phase 5.3 — findInFlightConflict (pool runtime check) ────────────────
+
+test('findInFlightConflict: candidate disjoint from in-flight → null', () => {
+  const candidate = makeSubtask({ id: 'cand', status: 'pending', persona: 'code', files: ['src/a.ts'] });
+  const inFlight = [
+    makeSubtask({ id: 'peer', status: 'running', persona: 'code', files: ['src/b.ts'] }),
+  ];
+  assert.equal(findInFlightConflict(candidate, inFlight), null);
+});
+
+test('findInFlightConflict: candidate overlaps in-flight peer → returns peer id', () => {
+  const candidate = makeSubtask({ id: 'cand', status: 'pending', persona: 'code', files: ['x.css'] });
+  const inFlight = [
+    makeSubtask({ id: 'peer-a', status: 'running', persona: 'code', files: ['y.css'] }),
+    makeSubtask({ id: 'peer-b', status: 'running', persona: 'code', files: ['x.css'] }),
+  ];
+  assert.equal(findInFlightConflict(candidate, inFlight), 'peer-b');
+});
+
+test('findInFlightConflict: empty in-flight → null even with empty candidate files', () => {
+  const candidate = makeSubtask({ id: 'cand', status: 'pending', persona: 'code', files: [] });
+  assert.equal(findInFlightConflict(candidate, []), null);
+});
+
+test('findInFlightConflict: missing files + flag on → defers', () => {
+  const candidate = makeSubtask({ id: 'cand', status: 'pending', persona: 'code', files: [] });
+  const inFlight = [
+    makeSubtask({ id: 'peer', status: 'running', persona: 'code', files: ['x.ts'] }),
+  ];
+  assert.equal(findInFlightConflict(candidate, inFlight, { serializeMissingFiles: true }), 'peer');
+});
+
+test('findInFlightConflict: missing files + flag off → allows', () => {
+  const candidate = makeSubtask({ id: 'cand', status: 'pending', persona: 'code', files: [] });
+  const inFlight = [
+    makeSubtask({ id: 'peer', status: 'running', persona: 'code', files: ['x.ts'] }),
+  ];
+  assert.equal(findInFlightConflict(candidate, inFlight, { serializeMissingFiles: false }), null);
 });
 
 test('computePartialCommitPlan: all succeeded → trivially partial-eligible but caller will not enter that branch', () => {

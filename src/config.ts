@@ -241,10 +241,35 @@ export interface AgentRoutingConfig {
   allowUnverifiedDag: boolean;
 }
 
+/**
+ * Phase 5.3 — DAG-level conflict policy.
+ *
+ * The orchestrator currently parallelizes any subtasks that don't
+ * declare a dependency on each other. This causes write-conflicts
+ * when the LLM emits multiple subtasks targeting the same file (the
+ * "3 workers all writing style.css" race observed in the log).
+ *
+ * `serializeWriteConflicts`, when true, runs a post-pass on the
+ * generated DAG that injects dependency edges whenever two subtasks
+ * could write to overlapping files. Default true since the
+ * alternative is observed-broken; flag exists so users can opt out
+ * for benchmarks or future verified orchestrators.
+ *
+ * `serializeMissingFiles` extends the same policy to subtasks that
+ * declared no files at all (LLMs often omit). Conservative default
+ * trades parallelism for correctness — over-serialization is the
+ * worst case.
+ */
+export interface AgentDagConfig {
+  serializeWriteConflicts: boolean;
+  serializeMissingFiles: boolean;
+}
+
 export interface AgentConfig {
   pool: AgentPoolConfig;
   loopGuard: AgentLoopGuardConfig;
   routing: AgentRoutingConfig;
+  dag: AgentDagConfig;
 }
 
 /**
@@ -490,6 +515,10 @@ export function getDefaultConfig(): FreeLLMConfig {
           honorVerificationFlag: false,
           allowUnverifiedDag: false,
         },
+        dag: {
+          serializeWriteConflicts: true,
+          serializeMissingFiles: true,
+        },
       },
     },
     _firstRunComplete: false,
@@ -532,6 +561,8 @@ export function loadConfig(): FreeLLMConfig {
       (parsedAgent as { loopGuard?: Partial<AgentLoopGuardConfig> }).loopGuard ?? {};
     const parsedAgentRouting =
       (parsedAgent as { routing?: Partial<AgentRoutingConfig> }).routing ?? {};
+    const parsedAgentDag =
+      (parsedAgent as { dag?: Partial<AgentDagConfig> }).dag ?? {};
     // Back-compat: existing configs predating v1.1 don't have
     // `provider_mode`. If they have a FreeLLMAPI key they were
     // implicitly proxy users; otherwise they're either fresh or
@@ -579,6 +610,10 @@ export function loadConfig(): FreeLLMConfig {
             ...defaults.preferences.agent!.routing,
             ...parsedAgentRouting,
           },
+          dag: {
+            ...defaults.preferences.agent!.dag,
+            ...parsedAgentDag,
+          },
         },
       },
     };
@@ -613,6 +648,10 @@ export function getAgentLoopGuardConfig(config?: FreeLLMConfig): AgentLoopGuardC
 
 export function getAgentRoutingConfig(config?: FreeLLMConfig): AgentRoutingConfig {
   return getAgentConfig(config).routing;
+}
+
+export function getAgentDagConfig(config?: FreeLLMConfig): AgentDagConfig {
+  return getAgentConfig(config).dag;
 }
 
 /**
