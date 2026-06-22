@@ -3,32 +3,70 @@ import { WorkerAgent } from './worker-agent.js';
 import { colors } from '../ui/colors.js';
 import { logTelemetry } from './telemetry.js';
 
+/**
+ * Phase 5.2 — partition the run's touched files by subtask outcome.
+ *
+ * Given a DAG whose subtasks have been executed (so `status` is set
+ * and `touchedFiles` is populated for the ones that wrote something),
+ * compute:
+ *
+ *   - `successFiles`      — files touched by at least one completed
+ *                           subtask. These are preserved on disk when
+ *                           partial-commit is active.
+ *   - `failureOnlyFiles`  — files touched ONLY by failed subtasks
+ *                           (i.e. not also present in `successFiles`).
+ *                           These are the rollback targets.
+ *   - `partialCommitPath` — true when the flag is on AND at least one
+ *                           subtask succeeded. Caller uses this to
+ *                           decide whether to take the partial-commit
+ *                           branch or the legacy all-or-nothing branch.
+ *
+ * Conflict policy: a file touched by both a completed AND a failed
+ * subtask is attributed to the success side. Rationale: writes are
+ * sequential and the on-disk state is the last write; ties go to the
+ * subtask that succeeded. (Phase 3 will add write-set conflict
+ * detection to prevent the collision in the first place.)
+ *
+ * Pure function. No filesystem access, no git. Trivially unit-testable.
+ */
+export function computePartialCommitPlan(
+  subtasks: readonly Subtask[],
+  options: { preservePartialOnFailure: boolean },
+): {
+  successFiles: string[];
+  failureOnlyFiles: string[];
+  partialCommitPath: boolean;
+  completedCount: number;
+  failedCount: number;
+} {
+  const completed = subtasks.filter(s => s.status === 'completed');
+  const failed = subtasks.filter(s => s.status === 'failed');
+  const successSet = new Set<string>(completed.flatMap(s => s.touchedFiles ?? []));
+  const failureOnly = new Set<string>(
+    failed.flatMap(s => s.touchedFiles ?? []).filter(f => !successSet.has(f)),
+  );
+  return {
+    successFiles: Array.from(successSet),
+    failureOnlyFiles: Array.from(failureOnly),
+    partialCommitPath: options.preservePartialOnFailure && successSet.size > 0,
+    completedCount: completed.length,
+    failedCount: failed.length,
+  };
+}
+
 export class AgentPool {
   private concurrencyLimit: number;
   private activeRuns = 0;
   private worker: WorkerAgent;
-  private globalBudget: number;
-  private budgetConfigured: number;
+  private subtaskBudget: number;
 
   public tokensUsed = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   public toolCallCount = 0;
 
-  constructor(concurrencyLimit = 3, globalBudget = 12) {
+  constructor(concurrencyLimit = 3, subtaskBudget = 12) {
     this.concurrencyLimit = concurrencyLimit;
-    this.globalBudget = globalBudget;
-    this.budgetConfigured = globalBudget;
+    this.subtaskBudget = subtaskBudget;
     this.worker = new WorkerAgent();
-  }
-
-  getBudgetRemaining(): number {
-    return this.globalBudget;
-  }
-
-  decrementBudget(): void {
-    if (this.globalBudget <= 0) {
-      throw new Error(`Global tool call budget of ${this.budgetConfigured} exhausted! Terminating all parallel workers.`);
-    }
-    this.globalBudget--;
   }
 
   private renderProgressDashboard(subtasks: Subtask[]): void {
@@ -122,7 +160,7 @@ export class AgentPool {
           const res = await this.worker.run(
             context,
             task,
-            () => this.decrementBudget()
+            this.subtaskBudget
           );
 
           if (res.tokensUsed) {
@@ -132,6 +170,14 @@ export class AgentPool {
           }
           if (res.toolCallCount) {
             this.toolCallCount += res.toolCallCount;
+          }
+
+          // Phase 5.2 — attach per-subtask touched-files attribution so
+          // task-router can decide rollback granularity on peer failure.
+          // Captured on BOTH paths (success and failure) — even failed
+          // subtasks may have written something before they failed.
+          if (res.touchedFiles && res.touchedFiles.length > 0) {
+            task.touchedFiles = res.touchedFiles;
           }
 
           if (res.success) {
@@ -218,9 +264,7 @@ export class AgentPool {
             error: err.message || String(err)
           });
 
-          if (err.message && err.message.includes('Global tool call budget')) {
-            throw err;
-          }
+
         } finally {
           this.activeRuns--;
           await runNext();

@@ -82,6 +82,14 @@ export interface Subtask {
   files: string[]; // files relevant to this task
   status: 'pending' | 'running' | 'completed' | 'failed';
   result?: string;
+  /**
+   * Phase 5.2 — absolute paths of files this subtask wrote, renamed, or
+   * deleted (via tool-executor `event.affectedPath`). Populated by the
+   * pool when the worker returns. Used by task-router to decide which
+   * files to keep vs. roll back when other subtasks in the run fail.
+   * Undefined until the worker finishes.
+   */
+  touchedFiles?: string[];
 }
 
 export interface TaskDAG {

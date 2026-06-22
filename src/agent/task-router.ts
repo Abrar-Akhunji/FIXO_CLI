@@ -33,10 +33,31 @@ import type { Interface as ReadlineInterface } from 'node:readline';
 
 import { classifyComplexityHeuristic, classifyComplexityModel } from '../planner.js';
 import { GitManager } from '../git/git-manager.js';
+import { getAgentPoolConfig } from '../config.js';
+import { telemetry, recordTelemetry } from './telemetry.js';
 import type { SingleAgent } from './single-agent.js';
 import type { ConversationManager } from './conversation.js';
 import type { AgentContext, AgentResult, ProjectConfig } from '../types.js';
 import { colors as c } from '../ui/colors.js';
+
+function snapshotWorkspace(dir: string): Set<string> {
+  const walk = (currentDir: string): string[] => {
+    let results: string[] = [];
+    try {
+      const list = fs.readdirSync(currentDir, { withFileTypes: true });
+      for (const dirent of list) {
+        if (dirent.name === '.git' || dirent.name === 'node_modules') continue;
+        const full = path.join(currentDir, dirent.name);
+        results.push(full);
+        if (dirent.isDirectory()) {
+          results = results.concat(walk(full));
+        }
+      }
+    } catch {}
+    return results;
+  };
+  return new Set(walk(dir));
+}
 
 export interface RouteDeps {
   /**
@@ -136,11 +157,13 @@ async function runComplexPath(
   const { cwd, mode: currentMode } = context;
   const git = new GitManager(cwd);
 
+  const preRunSnapshot = snapshotWorkspace(cwd);
+
   console.log(`\n${c.cyan}[Routing Engine] Complex task detected (${reason}). Routing to Orchestrator...${c.reset}`);
 
   try {
     const { Orchestrator } = await import('./orchestrator.js');
-    const { AgentPool } = await import('./agent-pool.js');
+    const { AgentPool, computePartialCommitPlan } = await import('./agent-pool.js');
 
     console.log(`\n${c.cyan}[Orchestrator] Generating plan for complex task...${c.reset}`);
     const orchestrator = new Orchestrator(deps.verbose);
@@ -204,10 +227,59 @@ async function runComplexPath(
     const relativeModified = getModifiedFiles(cwd, getBranchPoint(cwd));
     const modifiedFiles = relativeModified.map((f) => path.resolve(cwd, f));
 
+    // Phase 5.2 — per-subtask attribution via the pure `computePartialCommitPlan`
+    // helper. The pool attaches `touchedFiles` to each subtask; the
+    // helper partitions them by subtask outcome. See agent-pool.ts.
+    const poolConfig = getAgentPoolConfig();
+    const plan = computePartialCommitPlan(dag.subtasks, {
+      preservePartialOnFailure: poolConfig.preservePartialOnFailure,
+    });
+    const completedSubtasks = dag.subtasks.filter(s => s.status === 'completed');
+    const failedSubtasks = dag.subtasks.filter(s => s.status === 'failed');
+    const successFiles = new Set<string>(plan.successFiles);
+    const failureOnlyFiles = new Set<string>(plan.failureOnlyFiles);
+    const partialCommitPath = plan.partialCommitPath;
+
     if (!success) {
       console.log(`\n${c.red}✗ Parallel workers failed to complete all subtasks.${c.reset}`);
-      if (git.isGitRepo()) {
-        // Phase 0.0 — scope rollback to worker-touched files only.
+
+      if (partialCommitPath && git.isGitRepo()) {
+        // Phase 5.2 — preserve successful peers' work; only roll back
+        // files attributable solely to failed subtasks.
+        console.log(
+          `\n${c.cyan}[Agent Pool] Partial completion: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded — preserving their work.${c.reset}`,
+        );
+        console.log(`  ${c.green}Files committed (${successFiles.size}):${c.reset}`);
+        for (const f of successFiles) console.log(`    + ${path.relative(cwd, f)}`);
+        if (failureOnlyFiles.size > 0) {
+          console.log(
+            `  ${c.yellow}Rolling back ${failureOnlyFiles.size} file(s) from failed subtasks:${c.reset}`,
+          );
+          for (const f of failureOnlyFiles) console.log(`    - ${path.relative(cwd, f)}`);
+          git.discardChangesIn(Array.from(failureOnlyFiles));
+        }
+        if (failedSubtasks.length > 0) {
+          console.log(`  ${c.red}Failed subtasks:${c.reset}`);
+          for (const s of failedSubtasks) {
+            console.log(`    ${c.red}✗${c.reset} [${s.persona.toUpperCase()}] ${s.title}`);
+            if (s.result) {
+              const trimmed = s.result.slice(0, 160);
+              console.log(`      ${c.dim}${trimmed}${s.result.length > 160 ? '…' : ''}${c.reset}`);
+            }
+          }
+        }
+        recordTelemetry(
+          telemetry.poolSubtaskPartialCommitted({
+            runId: `route-${startTime}`,
+            succeeded: completedSubtasks.length,
+            failed: failedSubtasks.length,
+            filesCommitted: successFiles.size,
+          }),
+        );
+      } else if (git.isGitRepo()) {
+        // Phase 0.0 (legacy default) — all-or-nothing rollback scoped
+        // to worker-touched files. Still the default when the new
+        // partial-commit flag is OFF or when no subtask succeeded.
         if (modifiedFiles.length > 0) {
           console.log(`\n${c.yellow}[Agent Pool] Rolling back ${modifiedFiles.length} file(s) the workers touched...${c.reset}`);
           git.discardChangesIn(modifiedFiles);
@@ -215,15 +287,60 @@ async function runComplexPath(
           console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
         }
       }
+
+      // Phase 6.2 — Rollback orphaned files/directories (untracked paths not present before run).
+      // Phase 5.2 — skip paths owned by successful subtasks so partial-commit doesn't offer to
+      // delete files we just committed.
+      const postRunSnapshot = snapshotWorkspace(cwd);
+      const newPaths: string[] = [];
+      for (const p of postRunSnapshot) {
+        if (!preRunSnapshot.has(p) && !successFiles.has(p)) newPaths.push(p);
+      }
+
+      const topLevelNew = newPaths.filter(p => !newPaths.some(parent => p !== parent && p.startsWith(parent + path.sep)));
+
+      if (topLevelNew.length > 0) {
+        console.log(`\n${c.yellow}Orphaned files/directories detected from failed run:${c.reset}`);
+        for (const p of topLevelNew) {
+          console.log(`  - ${path.relative(cwd, p)}`);
+        }
+        const answer = await new Promise<string>(resolve => {
+          deps.rl.question(`\nDelete these orphaned paths? (y/N): `, resolve);
+        });
+        if (answer.trim().toLowerCase() === 'y') {
+          for (const p of topLevelNew) {
+            try {
+              fs.rmSync(p, { recursive: true, force: true });
+            } catch {}
+          }
+          console.log(`${c.green}✓ Orphaned paths deleted.${c.reset}`);
+        }
+      }
     }
+
+    // Phase 5.2 — when partial-commit applied, the effective
+    // modifiedFiles is the set kept on disk (not the full git diff,
+    // which still includes paths we just rolled back).
+    const effectiveModifiedFiles = partialCommitPath
+      ? Array.from(successFiles)
+      : modifiedFiles;
+
+    const outcomeSummary = success
+      ? `Complex task completed successfully. Orchestrator planned and parallel agents executed the following subtasks:\n` + dag.subtasks.map(s => `- [${s.persona}] ${s.title}`).join('\n')
+      : partialCommitPath
+        ? `Complex task partially completed: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded. Files kept: ${successFiles.size}. Failed subtasks:\n` + failedSubtasks.map(s => `- [${s.persona}] ${s.title}: ${s.result ?? '(no error message)'}`).join('\n')
+        : `Complex task failed or partially completed. The orchestrator planned subtasks but execution did not fully succeed.`;
+    deps.conversation.addTurn(input, outcomeSummary);
 
     return {
       result: {
         success,
         response: success
           ? 'Successfully completed complex task via parallel agents.'
-          : 'Failed to complete all complex subtasks.',
-        modifiedFiles,
+          : partialCommitPath
+            ? `Partial completion: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded, ${failedSubtasks.length} failed. Successful peers' files were preserved.`
+            : 'Failed to complete all complex subtasks.',
+        modifiedFiles: effectiveModifiedFiles,
         tokensUsed: {
           prompt_tokens: totalPromptTokens,
           completion_tokens: totalCompletionTokens,
@@ -254,6 +371,37 @@ async function runComplexPath(
         console.log(`\n${c.dim}[Agent Pool] Rollback discovery failed — leaving workspace untouched as a precaution.${c.reset}`);
       }
     }
+
+    // Phase 6.2 — Rollback orphaned files/directories (untracked paths not present before run) on hard crash
+    const postRunSnapshot = snapshotWorkspace(cwd);
+    const newPaths: string[] = [];
+    for (const p of postRunSnapshot) {
+      if (!preRunSnapshot.has(p)) newPaths.push(p);
+    }
+    
+    const topLevelNew = newPaths.filter(p => !newPaths.some(parent => p !== parent && p.startsWith(parent + path.sep)));
+    
+    if (topLevelNew.length > 0) {
+      console.log(`\n${c.yellow}Orphaned files/directories detected from failed run:${c.reset}`);
+      for (const p of topLevelNew) {
+        console.log(`  - ${path.relative(cwd, p)}`);
+      }
+      const answer = await new Promise<string>(resolve => {
+        deps.rl.question(`\nDelete these orphaned paths? (y/N): `, resolve);
+      });
+      if (answer.trim().toLowerCase() === 'y') {
+        for (const p of topLevelNew) {
+          try {
+            fs.rmSync(p, { recursive: true, force: true });
+          } catch {}
+        }
+        console.log(`${c.green}✓ Orphaned paths deleted.${c.reset}`);
+      }
+    }
+
+    const outcomeSummary = `Complex task failed due to an error: ${message}`;
+    deps.conversation.addTurn(input, outcomeSummary);
+
     const durationMs = Date.now() - startTime;
     return {
       result: {

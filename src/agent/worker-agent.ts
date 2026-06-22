@@ -18,6 +18,8 @@ import {
   SemanticLoopAbortedError,
   toSafetyAlertDirective,
 } from '../runtime/loop-trap.js';
+import { ContextBudgetEnforcer } from './context-budget.js';
+import { ConversationManager } from './conversation.js';
 import * as p from '@clack/prompts';
 import { FILE_WRITING_RULES_BLOCK } from './file-writing-rules.js';
 
@@ -255,13 +257,15 @@ export class WorkerAgent {
   async run(
     context: AgentContext,
     subtask: Subtask,
-    globalBudgetDecrement: () => void,
+    subtaskBudget: number,
     rl?: readline.Interface
   ): Promise<{
     success: boolean;
     output: string;
     tokensUsed: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
     toolCallCount: number;
+    /** Phase 5.2 — absolute paths the worker wrote/renamed/deleted. */
+    touchedFiles: string[];
   }> {
     const { systemPrompt, filesToLoad } = await partitionContext(context.cwd, subtask.persona, subtask.files);
     
@@ -352,7 +356,14 @@ export class WorkerAgent {
 
     const tokensUsed = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
     let toolCallCount = 0;
-    const maxLocalToolCalls = 15;
+    const maxLocalToolCalls = subtaskBudget;
+    /**
+     * Phase 5.2 — files this subtask wrote/renamed/deleted. Populated
+     * from `event.affectedPath` on every successful write-shaped tool
+     * call. Returned in the result so the pool can attribute changes
+     * per subtask, enabling partial-commit on peer failure.
+     */
+    const touchedFilesSet = new Set<string>();
 
     // Pillar 2 — semantic loop detector for the worker. Mirrors
     // the wiring in single-agent.ts. The worker does not maintain
@@ -385,6 +396,20 @@ export class WorkerAgent {
         throw new Error('Worker task cancelled by user.');
       }
 
+      // Enforce context budget locally for the worker agent to prevent context drift
+      const enforcer = new ContextBudgetEnforcer(context.model);
+      // Determine context limit based on model (ConversationManager helper handles this)
+      const mockConversation = new ConversationManager();
+      mockConversation.setContextLimit(context.model);
+      const maxContextTokens = Math.max(10_000, mockConversation.getContextLimit());
+      const enforcedResult = enforcer.enforce(messages, { maxTokens: maxContextTokens });
+      if (!enforcedResult.report.withinBudget && enforcedResult.report.actions.includes('drop-oldest-turns')) {
+        console.log(`${colors.yellow}⚠  [Worker] Hard-truncating context to fit within ${maxContextTokens} tokens.${colors.reset}`);
+      }
+      // Reassign to the truncated messages
+      messages.length = 0;
+      messages.push(...enforcedResult.messages);
+
       const spinner = p.spinner();
       spinner.start(`🤖 Worker agent thinking (turn ${toolCallCount + 1})...`);
       let result;
@@ -411,7 +436,8 @@ export class WorkerAgent {
           success: true,
           output: result.content || 'Completed subtask successfully.',
           tokensUsed,
-          toolCallCount
+          toolCallCount,
+          touchedFiles: Array.from(touchedFilesSet),
         };
       }
 
@@ -526,12 +552,12 @@ export class WorkerAgent {
               success: false,
               output: `Lock timeout: failed to acquire ${lockType} lock on ${lockPaths.join(', ')}.`,
               tokensUsed,
-              toolCallCount
+              toolCallCount,
+              touchedFiles: Array.from(touchedFilesSet),
             };
           }
 
-          // Decrement budget on actual execution
-          globalBudgetDecrement();
+          // Budget decrement handled naturally by maxLocalToolCalls limit
 
           try {
             event = await executeTool(
@@ -567,6 +593,14 @@ export class WorkerAgent {
           }
         }
 
+        // Phase 5.2 — attribute write-shaped tool calls to this subtask
+        // so the pool/task-router can decide rollback granularity on
+        // peer failure. Captured here (the canonical post-execute
+        // point) regardless of which write tool was invoked.
+        if (event && event.isWrite && event.affectedPath) {
+          touchedFilesSet.add(event.affectedPath);
+        }
+
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
@@ -581,7 +615,8 @@ export class WorkerAgent {
       success: false,
       output: `Reached subtask tool call limit (${maxLocalToolCalls}).`,
       tokensUsed,
-      toolCallCount
+      toolCallCount,
+      touchedFiles: Array.from(touchedFilesSet),
     };
   }
 

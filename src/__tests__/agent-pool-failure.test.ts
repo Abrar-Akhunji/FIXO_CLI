@@ -9,7 +9,8 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AgentPool } from '../agent/agent-pool.js';
+import { AgentPool, computePartialCommitPlan } from '../agent/agent-pool.js';
+import type { Subtask } from '../types.js';
 import {
   getDefaultConfig,
   getAgentConfig,
@@ -17,6 +18,22 @@ import {
   getAgentLoopGuardConfig,
   getAgentRoutingConfig,
 } from '../config.js';
+
+// Test helper — build a Subtask quickly. Defaults match a minimal
+// valid Subtask so tests stay focused on the fields under inspection.
+function makeSubtask(overrides: Partial<Subtask> & Pick<Subtask, 'id' | 'status'>): Subtask {
+  return {
+    id: overrides.id,
+    title: overrides.title ?? `task-${overrides.id}`,
+    description: overrides.description ?? '',
+    persona: overrides.persona ?? 'code',
+    dependencies: overrides.dependencies ?? [],
+    files: overrides.files ?? [],
+    status: overrides.status,
+    result: overrides.result,
+    touchedFiles: overrides.touchedFiles,
+  };
+}
 
 test('AgentPool default concurrencyLimit is 3 (current behavior)', () => {
   const pool = new AgentPool();
@@ -69,4 +86,91 @@ test('AgentPool can be constructed with custom budget+concurrency (config-driven
   // proving the constructor accepts overrides locks in that contract.
   const pool = new AgentPool(5, 40);
   assert.ok(pool);
+});
+
+// ── Phase 5.2 — computePartialCommitPlan ─────────────────────────────────
+
+test('computePartialCommitPlan: flag off → never takes partial path', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'completed', touchedFiles: ['/ws/a.css'] }),
+    makeSubtask({ id: 'b', status: 'failed', touchedFiles: ['/ws/b.css'] }),
+  ];
+  const plan = computePartialCommitPlan(subtasks, { preservePartialOnFailure: false });
+  assert.equal(plan.partialCommitPath, false);
+  // Pure aggregation still works — useful for telemetry even when path is off.
+  assert.deepEqual(plan.successFiles.sort(), ['/ws/a.css']);
+  assert.deepEqual(plan.failureOnlyFiles.sort(), ['/ws/b.css']);
+});
+
+test('computePartialCommitPlan: flag on + no success → not partial', () => {
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'failed', touchedFiles: ['/ws/a.css'] }),
+    makeSubtask({ id: 'b', status: 'failed', touchedFiles: ['/ws/b.css'] }),
+  ];
+  const plan = computePartialCommitPlan(subtasks, { preservePartialOnFailure: true });
+  assert.equal(plan.partialCommitPath, false);
+  assert.equal(plan.successFiles.length, 0);
+  assert.deepEqual(plan.failureOnlyFiles.sort(), ['/ws/a.css', '/ws/b.css']);
+});
+
+test('computePartialCommitPlan: flag on + mixed → partial', () => {
+  // Reproduces the orchestration log shape: 3 subtasks, 1 succeeds, 2 fail.
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'animations', status: 'completed', touchedFiles: ['/ws/style.css', '/ws/script.js'] }),
+    makeSubtask({ id: 'palette', status: 'failed', touchedFiles: ['/ws/palette.txt'] }),
+    makeSubtask({ id: 'typography', status: 'failed' }),
+  ];
+  const plan = computePartialCommitPlan(subtasks, { preservePartialOnFailure: true });
+  assert.equal(plan.partialCommitPath, true);
+  assert.deepEqual(plan.successFiles.sort(), ['/ws/script.js', '/ws/style.css']);
+  assert.deepEqual(plan.failureOnlyFiles.sort(), ['/ws/palette.txt']);
+  assert.equal(plan.completedCount, 1);
+  assert.equal(plan.failedCount, 2);
+});
+
+test('computePartialCommitPlan: file touched by both → attributed to success', () => {
+  // Conflict policy: a file written by both a completed and a failed
+  // subtask is preserved (it's the final on-disk state if writes were
+  // sequential; the safer default). Phase 3 will prevent this from
+  // arising in the first place with write-set conflict detection.
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'completed', touchedFiles: ['/ws/shared.css'] }),
+    makeSubtask({ id: 'b', status: 'failed', touchedFiles: ['/ws/shared.css', '/ws/onlyB.css'] }),
+  ];
+  const plan = computePartialCommitPlan(subtasks, { preservePartialOnFailure: true });
+  assert.deepEqual(plan.successFiles.sort(), ['/ws/shared.css']);
+  // shared.css does NOT appear in failureOnlyFiles
+  assert.deepEqual(plan.failureOnlyFiles.sort(), ['/ws/onlyB.css']);
+});
+
+test('computePartialCommitPlan: subtasks with no touchedFiles are ignored cleanly', () => {
+  // Earlier in development a subtask may finish without writing
+  // anything (a reviewer/doc-only subtask, or one that hit the budget
+  // wall before getting to a write). The aggregator must not crash.
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'reviewer', status: 'completed' }),
+    makeSubtask({ id: 'doc', status: 'completed', touchedFiles: [] }),
+    makeSubtask({ id: 'code', status: 'failed', touchedFiles: ['/ws/x.ts'] }),
+  ];
+  const plan = computePartialCommitPlan(subtasks, { preservePartialOnFailure: true });
+  // No success files → no partial path (preserves "all rolled back" UX
+  // for runs where every successful subtask was non-mutating).
+  assert.equal(plan.partialCommitPath, false);
+  assert.deepEqual(plan.failureOnlyFiles.sort(), ['/ws/x.ts']);
+});
+
+test('computePartialCommitPlan: all succeeded → trivially partial-eligible but caller will not enter that branch', () => {
+  // Task-router only takes the partial-commit branch when `!success`
+  // (at least one subtask failed). This test confirms the helper still
+  // computes a sane partition for the all-success case, so a future
+  // caller doesn't get garbage if it inspects the plan unconditionally.
+  const subtasks: Subtask[] = [
+    makeSubtask({ id: 'a', status: 'completed', touchedFiles: ['/ws/a.css'] }),
+    makeSubtask({ id: 'b', status: 'completed', touchedFiles: ['/ws/b.css'] }),
+  ];
+  const plan = computePartialCommitPlan(subtasks, { preservePartialOnFailure: true });
+  assert.equal(plan.partialCommitPath, true);
+  assert.equal(plan.failureOnlyFiles.length, 0);
+  assert.equal(plan.completedCount, 2);
+  assert.equal(plan.failedCount, 0);
 });
