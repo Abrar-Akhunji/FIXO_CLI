@@ -76,21 +76,28 @@ export class GitManager {
   getDirtyFiles(): string[] {
     if (!this.isGitRepo()) return [];
     try {
-      const output = execFileSync('git', ['status', '--porcelain'], {
+      const output = execFileSync('git', ['status', '--porcelain', '-z'], {
         cwd: this.cwd,
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      return output.split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
-        .map(line => {
-          let p = line.slice(2).trim();
-          if (p.startsWith('"') && p.endsWith('"')) {
-            p = p.slice(1, -1).replace(/\\"/g, '"');
-          }
-          return p;
-        });
+      if (!output) return [];
+
+      const files: string[] = [];
+      const parts = output.split('\0');
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part) continue;
+        
+        const xy = part.slice(0, 2);
+        files.push(part.slice(3));
+        
+        // If it's a rename (R) or copy (C), skip the old path that follows
+        if (xy[0] === 'R' || xy[0] === 'C') {
+          i++;
+        }
+      }
+      return files;
     } catch {
       return [];
     }
@@ -299,11 +306,11 @@ export class GitManager {
       for (const rel of relativeFiles) {
         let status = '';
         try {
-          status = execFileSync('git', ['status', '--porcelain', '--', rel], {
+          status = execFileSync('git', ['status', '--porcelain', '-z', '--', rel], {
             cwd: this.cwd,
             encoding: 'utf-8',
             stdio: ['pipe', 'pipe', 'pipe'],
-          }).trim();
+          });
         } catch {
           // safe: file may have been deleted mid-run; treat as no-op
           continue;

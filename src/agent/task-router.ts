@@ -33,12 +33,13 @@ import type { Interface as ReadlineInterface } from 'node:readline';
 
 import { classifyComplexityHeuristic, classifyComplexityModel } from '../planner.js';
 import { GitManager } from '../git/git-manager.js';
-import { getAgentPoolConfig } from '../config.js';
+import { getAgentPoolConfig, loadConfig } from '../config.js';
 import { telemetry, recordTelemetry } from './telemetry.js';
 import type { SingleAgent } from './single-agent.js';
 import type { ConversationManager } from './conversation.js';
 import type { AgentContext, AgentResult, ProjectConfig } from '../types.js';
 import { colors as c } from '../ui/colors.js';
+import { MODEL_DAG_VERIFIED } from './providers-manager.js';
 
 function snapshotWorkspace(dir: string): Set<string> {
   const walk = (currentDir: string): string[] => {
@@ -120,6 +121,15 @@ export async function routeAndExecute(
   const startTime = Date.now();
 
   if (classification.complexity === 'complex') {
+    const config = loadConfig();
+    const isVerified = context.model && Array.from(MODEL_DAG_VERIFIED).some(m => context.model!.includes(m));
+    const routingConfig = config.preferences?.agent?.routing;
+
+    if (routingConfig?.honorVerificationFlag && !routingConfig?.allowUnverifiedDag && !isVerified) {
+      console.log(`\n${c.yellow}⚠ Task classified as complex, but model '${context.model}' is unverified for autonomous DAG execution.${c.reset}`);
+      console.log(`${c.dim}Routing to SingleAgent as a safety fallback. Set 'allowUnverifiedDag: true' in config to override.${c.reset}`);
+      return await runSimplePath(context, 'Unverified model fallback', startTime, deps);
+    }
     return await runComplexPath(input, context, classification.reason, startTime, deps);
   }
   return await runSimplePath(context, classification.reason, startTime, deps);
@@ -213,7 +223,7 @@ async function runComplexPath(
       };
     }
 
-    const budgetLimit = deps.projectConfig?.maxAttempts ?? 12;
+    const budgetLimit = deps.projectConfig?.maxAttempts ?? 40;
     const pool = new AgentPool(3, budgetLimit);
 
     console.log(`\n${c.cyan}[Agent Pool] Executing DAG of subtasks (concurrency limit: 3, budget: ${budgetLimit} tool calls)...${c.reset}`);

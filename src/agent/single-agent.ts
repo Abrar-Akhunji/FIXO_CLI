@@ -8,7 +8,7 @@
  */
 import type { ChatContentBlock, ChatMessage, TokenUsage } from '../shared/types.js';
 import { AgentClient, type ChatResult, type StreamChunk } from './agent-client.js';
-import { ConversationManager } from './conversation.js';
+import { ConversationManager, sanitizeUserContent } from './conversation.js';
 import { getActiveTools, TOOL_DEFINITIONS, executeTool, classifyExecutionRole, type ToolCallEvent } from './tool-executor.js';
 import { isTrivialQuery } from '../planner.js';
 import { decideAutoVerify, classifyVerifyOutput, buildRepairMessage } from './auto-verifier.js';
@@ -184,10 +184,11 @@ function formatPermissionPrompt(
  */
 function buildUserContent(context: AgentContext): string | ChatContentBlock[] {
   const attachments = context.pendingAttachments;
+  const sanitizedTask = sanitizeUserContent(context.task);
   if (!attachments || attachments.length === 0) {
-    return context.task;
+    return sanitizedTask;
   }
-  const blocks: ChatContentBlock[] = [{ type: 'text', text: context.task }];
+  const blocks: ChatContentBlock[] = [{ type: 'text', text: sanitizedTask }];
   for (const a of attachments) blocks.push(a);
   return blocks;
 }
@@ -882,7 +883,7 @@ export class SingleAgent {
             }
           }
 
-          let toolResult = event.result;
+          let toolResult = sanitizeUserContent(event.result);
           if (toolResult.length > MAX_TOOL_RESULT_LENGTH) {
             toolResult =
               toolResult.slice(0, MAX_TOOL_RESULT_LENGTH) +

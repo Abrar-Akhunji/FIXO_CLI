@@ -288,8 +288,7 @@ test('AgentPool executes hardcoded DAG concurrently respecting dependencies', as
   const executionOrder: string[] = [];
   
   (pool as any).worker = {
-    run: async (context: any, subtask: Subtask, budgetDec: any) => {
-      budgetDec();
+    run: async (context: any, subtask: Subtask, subtaskBudget: number) => {
       executionOrder.push(subtask.id);
       return {
         success: true,
@@ -321,8 +320,7 @@ test('AgentPool Reviewer Loop Integration schedules repair and follow-up review'
   let reviewCount = 0;
 
   (pool as any).worker = {
-    run: async (context: any, subtask: Subtask, budgetDec: any) => {
-      budgetDec();
+    run: async (context: any, subtask: Subtask, subtaskBudget: number) => {
       if (subtask.persona === 'reviewer') {
         reviewCount++;
         if (reviewCount === 1) {
@@ -362,35 +360,6 @@ test('AgentPool Reviewer Loop Integration schedules repair and follow-up review'
   assert.equal(reviewCount, 2);
   assert.equal(dag.subtasks.length, 3); // T1, repair task, follow-up reviewer task
   assert.equal(dag.subtasks.every(s => s.status === 'completed'), true);
-});
-
-test('AgentPool throws on global tool budget exhaustion', async () => {
-  const pool = new AgentPool(1, 2); // Budget limit = 2
-
-  (pool as any).worker = {
-    run: async (context: any, subtask: Subtask, budgetDec: any) => {
-      budgetDec(); // 1st tool call
-      budgetDec(); // 2nd tool call
-      budgetDec(); // 3rd tool call -> throws!
-      return {
-        success: true,
-        output: 'Never reached',
-        tokensUsed: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        toolCallCount: 3
-      };
-    }
-  };
-
-  const dag: TaskDAG = {
-    subtasks: [
-      { id: 'T1', title: 'Task 1', description: 'desc', persona: 'code', dependencies: [], files: [], status: 'pending' }
-    ]
-  };
-
-  await assert.rejects(
-    pool.execute({ cwd: '.', task: 'test', model: 'auto', verbose: false, selectedFiles: [] }, dag),
-    /Global tool call budget of 2 exhausted/
-  );
 });
 
 import { acquireLockWithRetryAndTimeout } from '../agent/worker-agent.js';

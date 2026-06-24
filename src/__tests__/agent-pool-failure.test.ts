@@ -53,21 +53,21 @@ test('AgentPool default subtaskBudget is 12 (Phase 4a will raise to 40)', () => 
   assert.equal(defaults.subtaskBudget, 12);
 });
 
-test('AgentPool.preservePartialOnFailure defaults to false (Phase 7 flips)', () => {
+test('AgentPool.preservePartialOnFailure defaults to true (Phase 7 flips)', () => {
   const defaults = getAgentPoolConfig(getDefaultConfig());
-  assert.equal(defaults.preservePartialOnFailure, false);
+  assert.equal(defaults.preservePartialOnFailure, true);
 });
 
 test('AgentLoopGuard defaults: legacy session-lifetime lockout (Phase 7 flips)', () => {
   const defaults = getAgentLoopGuardConfig(getDefaultConfig());
-  assert.equal(defaults.useSlidingWindow, false);
+  assert.equal(defaults.useSlidingWindow, true);
   assert.equal(defaults.blockWindowTurns, 10);
   assert.equal(defaults.blockResetOnSubtask, true);
 });
 
 test('AgentRouting defaults: verification flag NOT honored (Phase 6 flips)', () => {
   const defaults = getAgentRoutingConfig(getDefaultConfig());
-  assert.equal(defaults.honorVerificationFlag, false);
+  assert.equal(defaults.honorVerificationFlag, true);
   assert.equal(defaults.allowUnverifiedDag, false);
 });
 
@@ -85,8 +85,8 @@ test('getAgentConfig falls back to defaults for configs predating the namespace'
   const resolved = getAgentConfig(oldConfig);
   assert.equal(resolved.pool.concurrencyLimit, 3);
   assert.equal(resolved.pool.subtaskBudget, 12);
-  assert.equal(resolved.loopGuard.useSlidingWindow, false);
-  assert.equal(resolved.routing.honorVerificationFlag, false);
+  assert.equal(resolved.loopGuard.useSlidingWindow, true);
+  assert.equal(resolved.routing.honorVerificationFlag, true);
 });
 
 test('AgentPool can be constructed with custom budget+concurrency (config-driven)', () => {

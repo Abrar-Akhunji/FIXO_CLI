@@ -68,8 +68,8 @@ function inlineFormat(text: string): string {
   // Bold (**...**).
   out = out.replace(/\*\*([^*]+)\*\*/g, (_m, c: string) => `${C.BOLD}${C.SNOW}${c}${C.RESET}`);
   // Italic (*...* or _..._), skipping the bold escape we just emitted.
-  out = out.replace(/(?<![*\\])\*([^*\n]+)\*(?!\*)/g, (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`);
-  out = out.replace(/(?<![_\\])_([^_\n]+)_(?!_)/g, (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`);
+  out = out.replace(/(?<![*\\])\*([^*\n]{1,2000}?)\*(?!\*)/g, (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`);
+  out = out.replace(/(?<![_\\])_([^_\n]{1,2000}?)_(?!_)/g, (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`);
   // Warning keywords.
   out = out.replace(/\b(error|errors|failed|warning|warn)\b/gi, (m) => `${C.LAVA}${m}${C.RESET}`);
   return out;

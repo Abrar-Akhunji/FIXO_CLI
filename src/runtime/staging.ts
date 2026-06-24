@@ -36,6 +36,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WorkspaceGuard } from '../workspace-guard.js';
+import { getRunInventory } from './run-inventory.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -122,7 +123,7 @@ export class PreCommitHookRejectedError extends Error {
   public readonly id: string;
   public readonly cause: unknown;
   constructor(id: string, cause: unknown) {
-    super(`Pre-commit hook rejected staged write ${id}: ${String(cause)}`);
+    super(`Write rejected by pre-commit hook. Reason: ${String(cause)}. (Staged write id: ${id})`);
     this.name = 'PreCommitHookRejectedError';
     this.id = id;
     this.cause = cause;
@@ -402,6 +403,7 @@ export class AtomicStagingManager {
       const bytes = Buffer.byteLength(fs.readFileSync(target, 'utf-8'), 'utf-8');
       // Tidy up the meta sidecar.
       rmSafe(entry.metaPath);
+      getRunInventory(this.runId).invalidate(target);
 
       return {
         committed: true,
@@ -512,6 +514,7 @@ export class AtomicStagingManager {
       rmSafe(metaPath);
 
       const bytes = Buffer.byteLength(fs.readFileSync(resolved, 'utf-8'), 'utf-8');
+      getRunInventory(this.runId).invalidate(resolved);
       return { ok: true, path: resolved, bytes };
     } catch (err) {
       // Rollback: restore the backup, clean up the .pending if any.

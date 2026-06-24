@@ -102,7 +102,7 @@ export class AgentPool {
   public tokensUsed = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   public toolCallCount = 0;
 
-  constructor(concurrencyLimit = 3, subtaskBudget = 12) {
+  constructor(concurrencyLimit = 3, subtaskBudget = 40) {
     this.concurrencyLimit = concurrencyLimit;
     this.subtaskBudget = subtaskBudget;
     this.worker = new WorkerAgent();

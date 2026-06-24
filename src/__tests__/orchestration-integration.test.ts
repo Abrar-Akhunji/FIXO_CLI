@@ -46,12 +46,51 @@ test('Orchestrator and AgentPool Integration', async (t) => {
     }
   });
 
-  await t.test('AgentPool decrementBudget throws when budget is exhausted', () => {
-    const pool = new AgentPool(3, 1);
-    pool.decrementBudget();
-    assert.throws(() => {
-      pool.decrementBudget();
-    }, /budget of 1 exhausted/);
+  await t.test('Orchestrator plan method retries on non-conforming output', async () => {
+    let callCount = 0;
+    global.fetch = async (url, options) => {
+      callCount++;
+      const mockPlan = {
+        subtasks: [
+          {
+            id: 'task_1',
+            title: 'Write code',
+            description: 'Implement functionality',
+            persona: 'code',
+            dependencies: [],
+            files: ['src/app.ts']
+          }
+        ]
+      };
+      
+      let content = JSON.stringify(mockPlan);
+      // On the first call, wrap it in a lot of conversational text
+      if (callCount === 1) {
+        content = "Here is the plan for Emergant. As you can see, I have carefully designed it.\n" + content + "\n<ask_human_response>I will assume defaults</ask_human_response>";
+      }
+      
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content } }],
+        usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 }
+      }), { status: 200 });
+    };
+
+    try {
+      const orchestrator = new Orchestrator();
+      const context: AgentContext = {
+        task: 'implement dynamic layout',
+        model: 'auto',
+        cwd: '.',
+        verbose: false,
+        selectedFiles: [],
+        mode: 'BUILD'
+      };
+      const dag = await orchestrator.plan(context);
+      assert.equal(dag.subtasks.length, 1);
+      assert.equal(callCount, 2, 'Should have retried once due to conversational text');
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   await t.test('AgentPool reviewer feedback loop depth limit', async () => {
@@ -60,8 +99,7 @@ test('Orchestrator and AgentPool Integration', async (t) => {
     
     // Mock the worker to simulate reviewer returning non-approved
     (pool as any).worker = {
-      run: async (context: any, task: any, decrement: any) => {
-        decrement();
+      run: async (context: any, task: any, subtaskBudget: number) => {
         return {
           success: true,
           output: 'REJECTED: Code is bad.',

@@ -29,7 +29,22 @@ import { extractTextFromContent } from '../shared/content.js';
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 1500;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503]);
-const BASE_URL = process.env.FIXO_API_URL || DEFAULT_API_URL;
+
+function getValidatedApiUrl(urlStr: string | undefined): string | undefined {
+  if (!urlStr) return undefined;
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol === 'http:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+      console.warn(`[Security Warning] API URL is using an insecure HTTP protocol (${urlStr}). HTTPS is required for remote URLs. Falling back to default.`);
+      return undefined;
+    }
+    return urlStr;
+  } catch {
+    return undefined;
+  }
+}
+
+const BASE_URL = getValidatedApiUrl(process.env.FIXO_API_URL) || DEFAULT_API_URL;
 
 /** Wrapper around `providerCooldown.recordFailure` that also emits a
  *  telemetry event. Keeps the 6 callsites terse. */
@@ -275,7 +290,7 @@ export class AgentClient {
     providerMode: 'direct' | 'proxy' = 'proxy',
     modelRouting?: ModelRoutingConfig,
   ) {
-    this.baseUrl = process.env.FIXO_API_URL || apiUrl || BASE_URL;
+    this.baseUrl = getValidatedApiUrl(process.env.FIXO_API_URL) || getValidatedApiUrl(apiUrl) || BASE_URL;
     this.apiKey = apiKey;
     this.verbose = verbose;
     this.providerMode = providerMode;
@@ -389,15 +404,15 @@ export class AgentClient {
   }
 
   /**
-   * Maps a model id to the provider that will actually serve the
-   * request — used as the key for `providerCooldown` tracking. The
-   * `freellmapi` sentinel covers the proxy path; everything else
-   * routes through a direct provider.
+   * Maps a model id to the tracking key for `providerCooldown`.
+   * Model-specific isolation ensures a timeout on one model (e.g.
+   * `openrouter:claude-3`) does not poison other models on the
+   * same provider gateway.
    */
-  private getProviderId(model: string): string {
+  private getCooldownKey(model: string): string {
     const direct = this.resolveDirectConfig(model);
-    if (direct) return direct.providerName;
-    return 'freellmapi';
+    if (direct) return `${direct.providerName}:${model}`;
+    return `freellmapi:${model}`;
   }
 
   /* ─── Non-streaming chat ─── */
@@ -413,8 +428,8 @@ export class AgentClient {
     // the same name. No-op when no capabilities are tagged or no
     // tier is configured.
     model = this.applyCapabilityRouting(model, options.required_capabilities);
-    const providerId = this.getProviderId(model);
-    providerCooldown.assertAvailable(providerId);
+    const cooldownKey = this.getCooldownKey(model);
+    providerCooldown.assertAvailable(cooldownKey);
 
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = direct && direct.providerName === 'anthropic';
@@ -427,11 +442,9 @@ export class AgentClient {
       throw new DirectModelUnresolvedError(model);
     }
 
-    // Combine external abort signal with the internal 60s timeout so
-    // the request aborts on EITHER signal (timeout OR user cancellation).
-    const combinedSignal = externalSignal
-      ? AbortSignal.any([AbortSignal.timeout(60000), externalSignal])
-      : AbortSignal.timeout(60000);
+    // The timeout was removed to allow slow reasoning models to take as long as they need.
+    // The request will only abort if the user explicitly cancels it via `externalSignal`.
+    const combinedSignal = externalSignal;
 
     let requestUrl = `${this.baseUrl}/chat/completions`;
     let headers: Record<string, string> = {
@@ -502,7 +515,7 @@ export class AgentClient {
     }
 
     // Check for pre-flight cancellation
-    if (combinedSignal.aborted) {
+    if (combinedSignal?.aborted) {
       throw new Error('Task cancelled by user.');
     }
 
@@ -531,7 +544,7 @@ export class AgentClient {
 
         // Retryable errors
         if (RETRYABLE_STATUS_CODES.has(response.status)) {
-          trackProviderError(providerId, response.status, `HTTP ${response.status}`);
+          trackProviderError(cooldownKey, response.status, `HTTP ${response.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             console.log(
@@ -553,7 +566,7 @@ export class AgentClient {
           : (rawData as ChatCompletionResponse);
         const choice = data.choices[0];
 
-        providerCooldown.recordSuccess(providerId);
+        providerCooldown.recordSuccess(cooldownKey);
         // ChatResult.content is `string | null`. The widened
         // ChatMessage.content union allows blocks on input, but
         // every provider we ship returns text-only assistant
@@ -618,7 +631,7 @@ export class AgentClient {
         }
 
         if (isNetworkError && attempt < MAX_RETRIES) {
-          trackProviderError(providerId, 0, lastError.message.slice(0, 200));
+          trackProviderError(cooldownKey, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           console.log(
             `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
@@ -643,10 +656,10 @@ export class AgentClient {
     body: string,
     model: string,
     isAnthropicDirect: boolean,
-    signal: AbortSignal = AbortSignal.timeout(60000),
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
     // Pre-flight cancellation check
-    if (signal.aborted) {
+    if (signal?.aborted) {
       throw new Error('Task cancelled by user.');
     }
     const response = await fetch(requestUrl, {
@@ -933,12 +946,11 @@ export class AgentClient {
     const { signal: externalSignal, ...restOptions } = options;
     // Phase 2.4 — capability-tier substitution (see chat() comment).
     model = this.applyCapabilityRouting(model, options.required_capabilities);
-    const combinedSignal = externalSignal
-      ? AbortSignal.any([AbortSignal.timeout(60000), externalSignal])
-      : AbortSignal.timeout(60000);
+    // The timeout was removed to allow slow reasoning models to take as long as they need.
+    const combinedSignal = externalSignal;
 
-    const providerId = this.getProviderId(model);
-    providerCooldown.assertAvailable(providerId);
+    const cooldownKey = this.getCooldownKey(model);
+    providerCooldown.assertAvailable(cooldownKey);
 
     const direct = this.resolveDirectConfig(model);
     const isAnthropicDirect = !!(direct && direct.providerName === 'anthropic');
@@ -1033,7 +1045,7 @@ export class AgentClient {
           hasYielded = true;
           yield chunk;
         }
-        providerCooldown.recordSuccess(providerId);
+        providerCooldown.recordSuccess(cooldownKey);
         return; // Success — don't retry
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
@@ -1085,7 +1097,7 @@ export class AgentClient {
         }
 
         if (lastError instanceof HttpError && RETRYABLE_STATUS_CODES.has(lastError.status)) {
-          trackProviderError(providerId, lastError.status, `HTTP ${lastError.status}`);
+          trackProviderError(cooldownKey, lastError.status, `HTTP ${lastError.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             console.log(
@@ -1097,7 +1109,7 @@ export class AgentClient {
         }
 
         if (isNetworkError && attempt < MAX_RETRIES) {
-          trackProviderError(providerId, 0, lastError.message.slice(0, 200));
+          trackProviderError(cooldownKey, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           console.log(
             `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
@@ -1251,8 +1263,8 @@ export class AgentClient {
   }
 
   async getEmbedding(text: string, model = 'text-embedding-3-small'): Promise<number[]> {
-    const providerId = this.getProviderId(model);
-    providerCooldown.assertAvailable(providerId);
+    const cooldownKey = this.getCooldownKey(model);
+    providerCooldown.assertAvailable(cooldownKey);
 
     const direct = this.resolveDirectConfig(model);
     let requestUrl = `${this.baseUrl}/embeddings`;
@@ -1285,7 +1297,7 @@ export class AgentClient {
         });
 
         if (RETRYABLE_STATUS_CODES.has(response.status)) {
-          trackProviderError(providerId, response.status, `HTTP ${response.status}`);
+          trackProviderError(cooldownKey, response.status, `HTTP ${response.status}`);
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             if (this.verbose) {
@@ -1305,7 +1317,7 @@ export class AgentClient {
 
         const data = await response.json() as { data: Array<{ embedding: number[] }> };
         if (data.data && data.data[0] && data.data[0].embedding) {
-          providerCooldown.recordSuccess(providerId);
+          providerCooldown.recordSuccess(cooldownKey);
           return data.data[0].embedding;
         }
         throw new Error('Malformed embedding response structure');
@@ -1318,7 +1330,7 @@ export class AgentClient {
           error.message.includes('ETIMEDOUT')
         );
         if (isNetworkError) {
-          trackProviderError(providerId, 0, error.message.slice(0, 200));
+          trackProviderError(cooldownKey, 0, error.message.slice(0, 200));
         }
         const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
         await sleep(delayMs);

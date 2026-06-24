@@ -296,21 +296,36 @@ async function main(): Promise<void> {
     } catch (_err: unknown) {
       console.warn(`${C.YELLOW}⚠ Warning: Could not validate API key (connection failed). Proceeding in offline mode or assuming temporary network issue.${C.RESET}`);
     }
-  } else if (config.provider_mode === 'direct' && config.directProvider) {
-    // Direct mode: hydrate the in-memory vault from the persisted
-    // providers store and register a model→provider hint so the
-    // first request resolves correctly without the user having to
-    // visit the /model picker.
-    try {
-      const { ProvidersManager } = await import('./agent/providers-manager.js');
-      ProvidersManager.hydrateVault();
-      ProvidersManager.setModelProviderHint(
-        config.directProvider.defaultModel,
-        config.directProvider.name,
-      );
-    } catch (_err: unknown) {
-      // best-effort — vault hydration failure surfaces later as a
-      // clear "no key for provider X" error at request time.
+  } else if (config.provider_mode === 'direct') {
+    if (config.lastSession?.provider && config.lastSession?.model) {
+      try {
+        const { ProvidersManager } = await import('./agent/providers-manager.js');
+        ProvidersManager.hydrateVault();
+        ProvidersManager.setModelProviderHint(
+          config.lastSession.model,
+          config.lastSession.provider,
+        );
+        // Fire-and-forget background cache warm
+        ProvidersManager.fetchRemoteModels(config.lastSession.provider).catch(() => {});
+      } catch (_err: unknown) {
+        // best-effort
+      }
+    } else if (config.directProvider) {
+      // Direct mode: hydrate the in-memory vault from the persisted
+      // providers store and register a model→provider hint so the
+      // first request resolves correctly without the user having to
+      // visit the /model picker.
+      try {
+        const { ProvidersManager } = await import('./agent/providers-manager.js');
+        ProvidersManager.hydrateVault();
+        ProvidersManager.setModelProviderHint(
+          config.directProvider.defaultModel,
+          config.directProvider.name,
+        );
+      } catch (_err: unknown) {
+        // best-effort — vault hydration failure surfaces later as a
+        // clear "no key for provider X" error at request time.
+      }
     }
   }
 
@@ -368,7 +383,7 @@ async function main(): Promise<void> {
   });
 
   // ──── Apply CLI overrides ────
-  const model = args.model ?? projectConfig?.model ?? config.defaultModel;
+  const model = args.model ?? projectConfig?.model ?? config.lastSession?.model ?? config.defaultModel;
   const verbose = args.verbose;
 
   // ──── Step 4: Launch ────
@@ -413,11 +428,12 @@ async function main(): Promise<void> {
   const envEndpoint = process.env.FIXO_API_URL?.trim();
   let resolvedEndpoint: string;
   let providerLabel: string;
-  if (config.provider_mode === 'direct' && config.directProvider) {
+  if (config.provider_mode === 'direct') {
     const { PROVIDER_REGISTRY } = await import('./agent/providers-manager.js');
-    const def = PROVIDER_REGISTRY.find((d) => d.name === config.directProvider!.name);
+    const providerName = config.lastSession?.provider ?? config.directProvider?.name;
+    const def = providerName ? PROVIDER_REGISTRY.find((d) => d.name === providerName) : undefined;
     resolvedEndpoint = envEndpoint || def?.baseUrl || 'direct';
-    providerLabel = config.directProvider.name;
+    providerLabel = providerName ?? 'auto';
   } else {
     resolvedEndpoint = envEndpoint || config.apiUrl || DEFAULT_API_URL;
     providerLabel = 'auto';

@@ -504,15 +504,15 @@ export function getDefaultConfig(): FreeLLMConfig {
         pool: {
           concurrencyLimit: 3,
           subtaskBudget: 12,
-          preservePartialOnFailure: false,
+          preservePartialOnFailure: true,
         },
         loopGuard: {
-          useSlidingWindow: false,
+          useSlidingWindow: true,
           blockWindowTurns: 10,
           blockResetOnSubtask: true,
         },
         routing: {
-          honorVerificationFlag: false,
+          honorVerificationFlag: true,
           allowUnverifiedDag: false,
         },
         dag: {

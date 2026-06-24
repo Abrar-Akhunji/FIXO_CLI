@@ -65,8 +65,12 @@ function makeStubAgent(stubResult: AgentResult): {
 }
 
 function makeDeps(agent: SingleAgent, overrides: Partial<RouteDeps> = {}): RouteDeps {
-  const conversation = {} as unknown as ConversationManager;
-  const rl = {} as unknown as ReadlineInterface;
+  const conversation = {
+    addTurn: () => {},
+  } as unknown as ConversationManager;
+  const rl = {
+    question: (query: string, cb: (ans: string) => void) => cb('y'),
+  } as unknown as ReadlineInterface;
   return {
     agent,
     conversation,

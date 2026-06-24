@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import {
   getProviderKeyVault,
   resetProviderKeyVault,
@@ -24,6 +25,17 @@ import {
 } from '../runtime/credential-vault.js';
 
 /* ──────────────────────── Provider Registry ──────────────────────── */
+
+/**
+ * Known-good models that reliably follow the multi-agent DAG orchestration contract.
+ * Used by the router when `modelRouting === 'auto'` to prevent task deadlocks.
+ */
+export const MODEL_DAG_VERIFIED = new Set([
+  'claude-3-5-sonnet-20241022',
+  'gemini-2.5-pro',
+  'gpt-4o',
+  'o3-mini',
+]);
 
 export interface ProviderDefinition {
   /** Short ID used as the key in providers.json */
@@ -189,12 +201,56 @@ function getProvidersFilePath(): string {
   return path.join(os.homedir(), '.fixocli', 'providers.json');
 }
 
+function getMachineKey(): Buffer {
+  const p = path.join(os.homedir(), '.fixocli', '.machine_key');
+  if (fs.existsSync(p)) {
+    return Buffer.from(fs.readFileSync(p, 'utf-8').trim(), 'hex');
+  }
+  const key = crypto.randomBytes(32);
+  fs.writeFileSync(p, key.toString('hex') + '\n', { mode: 0o600 });
+  return key;
+}
+
+function encryptKey(key: string): string {
+  if (key.startsWith('ENC:')) return key;
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getMachineKey(), iv);
+  let encrypted = cipher.update(key, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag().toString('hex');
+  return `ENC:${iv.toString('hex')}:${authTag}:${encrypted}`;
+}
+
+function decryptKey(val: string): string {
+  if (!val.startsWith('ENC:')) return val;
+  const parts = val.split(':');
+  if (parts.length !== 4) return val;
+  const iv = Buffer.from(parts[1], 'hex');
+  const authTag = Buffer.from(parts[2], 'hex');
+  const encrypted = parts[3];
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getMachineKey(), iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (err) {
+    return val;
+  }
+}
+
 function loadStore(): ProvidersStore {
   const filePath = getProvidersFilePath();
   try {
     if (!fs.existsSync(filePath)) return {};
     const raw = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(raw) as ProvidersStore;
+    const store = JSON.parse(raw) as ProvidersStore;
+    for (const k of Object.keys(store)) {
+      if (store[k].apiKey) {
+        store[k].apiKey = decryptKey(store[k].apiKey);
+      }
+    }
+    return store;
   } catch {
     return {};
   }
@@ -206,14 +262,16 @@ function saveStore(store: ProvidersStore): void {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const filePath = getProvidersFilePath();
-  fs.writeFileSync(filePath, JSON.stringify(store, null, 2) + '\n', {
+  const toSave = JSON.parse(JSON.stringify(store)); // deep copy
+  for (const k of Object.keys(toSave)) {
+    if (toSave[k].apiKey) {
+      toSave[k].apiKey = encryptKey(toSave[k].apiKey);
+    }
+  }
+  fs.writeFileSync(filePath, JSON.stringify(toSave, null, 2) + '\n', {
     encoding: 'utf-8',
     mode: 0o600,
   });
-  // safe: chmod is belt-and-braces — writeFileSync already created the
-  // file with mode 0o600. EPERM here only happens on filesystems that
-  // don't honour POSIX permissions (some FAT/NTFS-backed mounts), where
-  // the original create-with-mode also no-ops.
   try { fs.chmodSync(filePath, 0o600); } catch { /* safe: see above */ }
 }
 
@@ -308,6 +366,30 @@ function parseModelsResponse(payload: unknown): string[] | null {
   return ids.length > 0 ? ids : null;
 }
 
+function getModelHintsPath(): string {
+  return path.join(os.homedir(), '.fixocli', 'model-hints.json');
+}
+
+function loadModelProviderHints(): Map<string, string> {
+  try {
+    const raw = fs.readFileSync(getModelHintsPath(), 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return new Map(Object.entries(parsed));
+  } catch {
+    return new Map();
+  }
+}
+
+function persistModelProviderHints(hints: Map<string, string>): void {
+  const dir = path.join(os.homedir(), '.fixocli');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    getModelHintsPath(),
+    JSON.stringify(Object.fromEntries(hints), null, 2) + '\n',
+    { encoding: 'utf-8', mode: 0o600 },
+  );
+}
+
 /**
  * Maps model IDs to their explicitly-selected provider name.
  * Populated when the user picks a model from a provider's list
@@ -315,12 +397,13 @@ function parseModelsResponse(payload: unknown): string[] | null {
  * AgentClient.resolveDirectConfig() before heuristic matching,
  * which makes live-fetched models route to their correct provider.
  */
-let modelProviderHints = new Map<string, string>();
+let modelProviderHints = loadModelProviderHints();
 
 export const ProvidersManager = {
   /** Set an explicit model-to-provider association. */
   setModelProviderHint(model: string, provider: string): void {
     modelProviderHints.set(model.toLowerCase().trim(), provider);
+    persistModelProviderHints(modelProviderHints);
   },
 
   /** Get the explicit provider hint for a model, if one exists. */
@@ -331,6 +414,7 @@ export const ProvidersManager = {
   /** Clear all model-provider hints (e.g. when context resets). */
   clearModelProviderHints(): void {
     modelProviderHints = new Map<string, string>();
+    persistModelProviderHints(modelProviderHints);
   },
 
   /** List all connected providers with masked keys. */
@@ -438,6 +522,22 @@ export const ProvidersManager = {
   hydrateVault(): void {
     const store = loadStore();
     const vault = getProviderKeyVault();
+    let needsMigration = false;
+    
+    // We read directly from file without decrypting to check if any are unencrypted
+    try {
+      const raw = fs.readFileSync(getProvidersFilePath(), 'utf-8');
+      const rawStore = JSON.parse(raw) as ProvidersStore;
+      for (const entry of Object.values(rawStore)) {
+        if (entry.apiKey && !entry.apiKey.startsWith('ENC:')) {
+          needsMigration = true;
+          break;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     for (const [name, entry] of Object.entries(store)) {
       const def = PROVIDER_REGISTRY.find((p) => p.name === name);
       vault.ingest(
@@ -446,6 +546,10 @@ export const ProvidersManager = {
         def ? def.baseUrl : '',
         def ? def.displayName : name,
       );
+    }
+
+    if (needsMigration) {
+      saveStore(store);
     }
   },
 

@@ -148,9 +148,9 @@ async function runSubagentInline(
     status: 'running' as const,
   };
   const worker = new WorkerAgent(subagentCtx.verbose);
-  const noopBudget = () => undefined;
+  const subtaskBudget = 15;
   try {
-    const inner = await worker.run(subagentCtx, subtask, noopBudget);
+    const inner = await worker.run(subagentCtx, subtask, subtaskBudget);
     const durationMs = Date.now() - start;
     const tokensUsed = inner.tokensUsed;
     const summary = extractSummary(inner.output);

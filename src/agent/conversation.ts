@@ -122,6 +122,22 @@ Rules:
 - Do not mention the summary process or that context was compacted.`;
 
 // ---------------------------------------------------------------------------
+// Sanitization
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips known model-special tokens from user content or tool results.
+ * Prevents prompt-injection-style early termination or role switching.
+ */
+export function sanitizeUserContent(text: string): string {
+  if (!text) return text;
+  return text.replace(
+    /<\|(?:endoftext|im_start|im_end|fim_[a-zA-Z0-9_]+|user|assistant|system)\|>/gi,
+    '[SPECIAL_TOKEN_REMOVED]'
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ConversationManager
 // ---------------------------------------------------------------------------
 
@@ -134,9 +150,11 @@ export class ConversationManager {
   /**
    * When set (>0), `getTotalTokens()` returns this value instead of
    * summing the history. Used by `--resume` so the restored session
-   * shows the same token count the user saw at save time.
+   * shows the same token count the user saw at save time. It is also
+   * used to cache the provider-reported total tokens for accurate UI.
    */
   private tokenOverride: number = 0;
+  private lastSystemTokens: number = 0;
 
   constructor(maxTokenBudget: number = DEFAULT_MAX_TOKEN_BUDGET) {
     this.maxTokenBudget = maxTokenBudget;
@@ -196,13 +214,24 @@ export class ConversationManager {
 
   /**
    * Calculate the total estimated token count across the entire history.
+   * Includes system prompt and summary tokens if known.
    */
   getTotalTokens(): number {
     if (this.tokenOverride > 0) return this.tokenOverride;
-    return this.history.reduce(
+    const historyTokens = this.history.reduce(
       (sum, msg) => sum + this.estimateMessageTokens(msg),
       0,
     );
+    const summaryTokens = this.summary ? this.estimateTokens(this.summary) : 0;
+    return historyTokens + this.lastSystemTokens + summaryTokens;
+  }
+
+  /**
+   * Update the UI's understanding of our token usage by feeding back
+   * the exact count reported by the LLM provider.
+   */
+  setProviderReportedTokens(tokens: number): void {
+    this.tokenOverride = Math.max(0, tokens);
   }
 
   /**
@@ -228,11 +257,13 @@ export class ConversationManager {
    * This is what actually matters for context overflow detection.
    */
   estimateNextRequestTokens(systemPrompt: string, userMessage: string): number {
-    const systemTokens = this.estimateTokens(systemPrompt);
-    const historyTokens = this.getTotalTokens();
+    this.lastSystemTokens = this.estimateTokens(systemPrompt);
+    // Explicitly recalculate from history rather than calling getTotalTokens()
+    // to bypass tokenOverride, which may represent a stale provider report.
+    const historyTokens = this.history.reduce((sum, msg) => sum + this.estimateMessageTokens(msg), 0);
     const userTokens = this.estimateTokens(userMessage);
     const summaryTokens = this.summary ? this.estimateTokens(this.summary) : 0;
-    return systemTokens + summaryTokens + historyTokens + userTokens;
+    return this.lastSystemTokens + summaryTokens + historyTokens + userTokens;
   }
 
   // ---------------------------------------------------------------------------
@@ -268,6 +299,7 @@ export class ConversationManager {
     const { messages, report } = enforcer.enforce(this.history, { maxTokens, model });
     if (report.actions[0] !== 'none') {
       this.history = messages;
+      this.tokenOverride = 0;
     }
     return {
       trimmed: report.actions[0] !== 'none',
@@ -291,8 +323,8 @@ export class ConversationManager {
    */
   addTurn(userMessage: string, assistantResponse: string): void {
     this.history.push(
-      { role: 'user', content: userMessage },
-      { role: 'assistant', content: assistantResponse },
+      { role: 'user', content: sanitizeUserContent(userMessage) },
+      { role: 'assistant', content: sanitizeUserContent(assistantResponse) },
     );
     this.pruneToFitBudget();
   }
@@ -302,7 +334,11 @@ export class ConversationManager {
    * non-standard messages), then prune if the budget is exceeded.
    */
   addMessage(message: ChatMessage): void {
-    this.history.push(message);
+    const sanitized = {
+      ...message,
+      content: sanitizeUserContent(message.content),
+    };
+    this.history.push(sanitized);
     this.pruneToFitBudget();
   }
 
