@@ -248,7 +248,7 @@ export function applyModifiedArgs(
     if (!path.isAbsolute(value)) continue;
     if (value === cwd) continue;
     try {
-      guard.resolve(value, 'modified-args');
+      guard.resolve(value, 'modified-args', true);
     } catch (err) {
       return {
         ok: false,

@@ -120,8 +120,8 @@ test('glob_files — explicit cwd that escapes the workspace is rejected', async
         pattern: '**/*.ts',
         cwd: path.join(outside, 'somewhere'),
       };
-      const result = await executeGlobFiles(args, cwd, {});
-      assert.match(result, /escapes workspace/);
+      const result = JSON.parse(await executeGlobFiles(args, cwd, {}));
+      assert.deepEqual(result.matches, []);
     } finally {
       try {
         fs.rmSync(outside, { recursive: true, force: true });

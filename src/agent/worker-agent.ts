@@ -9,6 +9,7 @@ import { WorkspaceGuard } from '../workspace-guard.js';
 import { AgentClient } from './agent-client.js';
 import { loadConfig } from '../config.js';
 import { executeTool, getActiveTools, type ToolCallEvent } from './tool-executor.js';
+import { MUTATING_TOOL_NAMES } from './single-agent.js';
 import { colors } from '../ui/colors.js';
 import { workspaceLockManager } from '../workspace-lock.js';
 import { logTelemetry } from './telemetry.js';
@@ -632,7 +633,6 @@ export class WorkerAgent {
     rl?: readline.Interface,
     context?: AgentContext
   ): Promise<boolean> {
-    if (this.allowAll) return true;
     const action = name === 'run_command'
       ? 'command'
       : name === 'read_file' || name === 'search_code' || name === 'list_dir'
@@ -640,24 +640,49 @@ export class WorkerAgent {
         : name === 'delete_file'
           ? 'delete'
           : 'write';
-    
+
+    let isOutsideWorkspace = false;
+    let resolvedOutsidePath: string | undefined;
+    if (MUTATING_TOOL_NAMES.has(name) && context?.cwd) {
+      const guard = new WorkspaceGuard(context.cwd);
+      const targetPath = args.path || args.to || args.file || args.target || (name === 'run_command' && args.cwd);
+      if (targetPath) {
+        const resolved = path.resolve(context.cwd, targetPath);
+        if (!guard.isInside(resolved)) {
+          isOutsideWorkspace = true;
+          resolvedOutsidePath = resolved;
+        }
+      }
+    }
+
+    if (!isOutsideWorkspace && this.allowAll) return true;
+
     const check = checkPermission(name, args as Record<string, unknown>, context?.cwd ?? process.cwd(), context?.policy ?? 'shell-confirm');
     if (check.decision === 'deny') return false;
-    if (context?.yes) return true;
-    if (check.decision === 'allow') return true;
+    if (!isOutsideWorkspace && context?.yes) return true;
+    if (!isOutsideWorkspace && check.decision === 'allow') return true;
     if (action === 'read') return true;
 
     if (!rl) return false; // If needs confirmation but no interactive RL, deny.
 
     return new Promise((resolve) => {
-      rl.question(`[Worker] Allow executing tool "${name}" with args ${JSON.stringify(args)}? (y/n/all) `, (answer) => {
+      let promptMsg = `[Worker] Allow executing tool "${name}" with args ${JSON.stringify(args)}? (y/n/all) `;
+      if (isOutsideWorkspace) {
+        promptMsg = `[Worker] ⚠️ OUTSIDE WORKSPACE: Allow executing tool "${name}" on external path? (y/n) `;
+      }
+      rl.question(promptMsg, (answer) => {
         const cleanAnswer = answer.toLowerCase().trim();
-        if (cleanAnswer === 'all' || cleanAnswer === 'a') {
-          this.allowAll = true;
-          resolve(true);
-        } else {
-          resolve(cleanAnswer.startsWith('y') || cleanAnswer === '');
+        const isApproved = cleanAnswer === 'all' || cleanAnswer === 'a' || cleanAnswer.startsWith('y') || cleanAnswer === '';
+        
+        if (isApproved && isOutsideWorkspace && resolvedOutsidePath && context) {
+          context.allowedOutsidePaths = context.allowedOutsidePaths || new Set();
+          context.allowedOutsidePaths.add(resolvedOutsidePath);
         }
+        
+        if (!isOutsideWorkspace && (cleanAnswer === 'all' || cleanAnswer === 'a')) {
+          this.allowAll = true;
+        }
+        resolve(isApproved);
       });
     });
   }

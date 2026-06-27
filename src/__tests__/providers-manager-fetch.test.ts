@@ -196,3 +196,73 @@ test('fetchRemoteModels — unconfigured provider falls back without attempting 
     ctx.restore();
   }
 });
+
+/* ──────────────────── verifyKeyAndFetchModels tests ──────────────────── */
+
+test('verifyKeyAndFetchModels — success fetches models and caches them', async () => {
+  const ctx = mkHome();
+  try {
+    const capture: { url?: string; headers?: Record<string, string> } = {};
+    globalThis.fetch = mockFetchOk(
+      { data: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] },
+      capture,
+    );
+
+    const models = await ProvidersManager.verifyKeyAndFetchModels('openai', 'sk-test-key-555');
+    assert.deepEqual(models, ['gpt-4o', 'gpt-4o-mini']);
+    assert.equal(capture.headers?.['Authorization'], 'Bearer sk-test-key-555');
+
+    // Cache should be updated
+    const cached = ProvidersManager.getCachedModels('openai');
+    assert.ok(cached);
+    assert.equal(cached.source, 'live');
+    assert.deepEqual(cached.models, ['gpt-4o', 'gpt-4o-mini']);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test('verifyKeyAndFetchModels — HTTP error throws descriptive error', async () => {
+  const ctx = mkHome();
+  try {
+    globalThis.fetch = (async () => {
+      return {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: async () => ({ error: { message: 'Invalid API Key' } }),
+      } as unknown as Response;
+    }) as FetchFn;
+
+    await assert.rejects(
+      async () => {
+        await ProvidersManager.verifyKeyAndFetchModels('openai', 'invalid-key');
+      },
+      (err: any) => {
+        assert.ok(err.message.includes('API returned status 401 Unauthorized: Invalid API Key'), `unexpected error message: ${err.message}`);
+        return true;
+      }
+    );
+  } finally {
+    ctx.restore();
+  }
+});
+
+test('verifyKeyAndFetchModels — network error throws descriptive error', async () => {
+  const ctx = mkHome();
+  try {
+    globalThis.fetch = mockFetchThrows();
+
+    await assert.rejects(
+      async () => {
+        await ProvidersManager.verifyKeyAndFetchModels('openai', 'some-key');
+      },
+      (err: any) => {
+        assert.ok(err.message.includes('Network error or timeout connecting to OpenAI'), `unexpected error message: ${err.message}`);
+        return true;
+      }
+    );
+  } finally {
+    ctx.restore();
+  }
+});

@@ -470,7 +470,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'todo_write',
       description:
-        'Mutate the project todo list. Operations: add (content+blockedBy optional), set_status (id+status), remove (id), clear_done. Persisted atomically to <cwd>/.fixo/todo_list.json. Rejected in PLAN mode.',
+        'Mutate the project todo list. Operations: add (content+blockedBy optional), set_status (id+status), remove (id), clear_done. Persisted atomically to <cwd>/.fixo/todo_list.json. Rejected in PLAN mode. IMPORTANT: Do NOT provide an `id` when using `op: "add"`, the system generates it. Only use `id` for `set_status` or `remove` using IDs from `todo_read`.',
       parameters: {
         type: 'object',
         properties: {
@@ -485,7 +485,7 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
           },
           id: {
             type: 'string',
-            description: 'Item id (op=set_status, op=remove).',
+            description: 'Item id (op=set_status, op=remove). OMIT FOR op=add.',
           },
           status: {
             type: 'string',

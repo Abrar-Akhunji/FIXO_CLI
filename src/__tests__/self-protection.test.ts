@@ -59,14 +59,14 @@ test('isPlatformPath allows regular project files', () => {
 });
 
 test('assertNotPlatformPath throws PlatformPathLockedError on locked targets', () => {
-  const cwd = makeWorkspace();
+  const cwd = makeWorkspace({ 'src/workspace-guard.ts': '', 'package.json': '' });
   try {
     const guard = new WorkspaceGuard(cwd);
     assert.throws(
       () => guard.assertNotPlatformPath('src/agent/tool-executor.ts'),
       (err: unknown) => {
         assert.ok(err instanceof PlatformPathLockedError);
-        assert.match((err as Error).message, /Fixo CLI core architecture/);
+        assert.match((err as Error).message, /STOP TRYING TO EDIT THIS FILE/);
         return true;
       },
     );
@@ -76,14 +76,14 @@ test('assertNotPlatformPath throws PlatformPathLockedError on locked targets', (
 });
 
 test('assertNotPlatformPath does not throw on regular project files', () => {
-  const cwd = makeWorkspace();
+  const cwd = makeWorkspace({ 'src/workspace-guard.ts': '', 'package.json': '' });
   const guard = new WorkspaceGuard(cwd);
   assert.doesNotThrow(() => guard.assertNotPlatformPath('README.md'));
   assert.doesNotThrow(() => guard.assertNotPlatformPath('app/routes.ts'));
 });
 
 test('PlatformPathLockedError carries a useful message with the offending path', () => {
-  const cwd = makeWorkspace();
+  const cwd = makeWorkspace({ 'src/workspace-guard.ts': '', 'package.json': '' });
   const guard = new WorkspaceGuard(cwd);
   try {
     guard.assertNotPlatformPath('package.json');
@@ -92,12 +92,12 @@ test('PlatformPathLockedError carries a useful message with the offending path',
     assert.ok(err instanceof PlatformPathLockedError);
     const msg = (err as Error).message;
     assert.match(msg, /package\.json/);
-    assert.match(msg, /Fixo CLI core architecture/);
+    assert.match(msg, /STOP TRYING TO EDIT THIS FILE/);
   }
 });
 
 test('Absolute paths that resolve under src/ are also locked', () => {
-  const cwd = makeWorkspace();
+  const cwd = makeWorkspace({ 'src/workspace-guard.ts': '', 'package.json': '' });
   const guard = new WorkspaceGuard(cwd);
   const absolute = join(cwd, 'src', 'planner.ts');
   try {

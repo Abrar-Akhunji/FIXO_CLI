@@ -6,6 +6,8 @@
  *   User Input → Complexity Check → Agentic Tool Loop → Result
  *   (trivial queries skip the tool loop entirely)
  */
+import path from 'path';
+import { WorkspaceGuard } from '../workspace-guard.js';
 import type { ChatContentBlock, ChatMessage, TokenUsage } from '../shared/types.js';
 import { AgentClient, type ChatResult, type StreamChunk } from './agent-client.js';
 import { ConversationManager, sanitizeUserContent } from './conversation.js';
@@ -293,6 +295,7 @@ export class SingleAgent {
   /** Set true once the user requests cancellation so the tool loop
    *  produces a clean "Task cancelled" message. */
   private markedForCancellation = false;
+  private activeAnimation: LoadingAnimation | null = null;
 
   constructor(verbose = false) {
     const config = loadConfig();
@@ -326,7 +329,7 @@ export class SingleAgent {
     this.markedForCancellation = false;
   }
 
-  async runStreaming(
+  private async runStreamingImpl(
     context: AgentContext,
     conversation: ConversationManager,
     rl?: readline.Interface,
@@ -336,6 +339,9 @@ export class SingleAgent {
     let toolCallCount = 0;
     const modifiedFiles: string[] = [];
     let resolvedModel = context.model;
+
+    this.activeAnimation = new LoadingAnimation();
+    this.activeAnimation.start();
 
     // Set model context limit for accurate overflow detection
     conversation.setContextLimit(context.model);
@@ -526,8 +532,7 @@ export class SingleAgent {
     // Instructions] directive on the next chat().
     const fixoMdWatcher = new FixoMdWatcher(context.cwd);
 
-    const indicator = new LoadingAnimation();
-    indicator.start();
+    const indicator = this.activeAnimation!;
 
     let lastUsage: any = null;
 
@@ -683,6 +688,7 @@ export class SingleAgent {
           }
 
           indicator.stop();
+          this.activeAnimation = null;
           conversation.addTurn(context.task, response);
           if (result.usage && result.usage.total_tokens) {
             conversation.setProviderReportedTokens(result.usage.total_tokens);
@@ -815,7 +821,7 @@ export class SingleAgent {
             loopMitigation.reset(parsedArgs.path);
           }
 
-          const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl, context.yes);
+          const allowed = await this.askPermission(toolCall.function.name, parsedArgs, context.cwd, rl, context.yes, context);
 
           let event: ToolCallEvent;
           if (!allowed) {
@@ -912,6 +918,7 @@ export class SingleAgent {
       }
 
       indicator.stop();
+      this.activeAnimation = null;
 
       console.log(
         `${colors.yellow}⚠  Tool call limit reached (${toolCallLimit}).${colors.reset}`,
@@ -938,10 +945,44 @@ export class SingleAgent {
         model: resolvedModel,
       };
     } catch (error: unknown) {
-      indicator.stop();
+      if (this.markedForCancellation) {
+        indicator.markCancelled();
+      } else {
+        indicator.stop();
+      }
+      this.activeAnimation = null;
       const errorMsg = error instanceof Error ? error.message : String(error);
       taskSession.finish('error', errorMsg);
       throw error;
+    }
+  }
+
+  /**
+   * Public runStreaming API with outer catch/finally block to handle any errors
+   * thrown during early simple paths or the tool loop itself.
+   */
+  async runStreaming(
+    context: AgentContext,
+    conversation: ConversationManager,
+    rl?: readline.Interface,
+  ): Promise<AgentResult> {
+    try {
+      return await this.runStreamingImpl(context, conversation, rl);
+    } catch (error: unknown) {
+      if (this.activeAnimation) {
+        if (this.markedForCancellation) {
+          this.activeAnimation.markCancelled();
+        } else {
+          this.activeAnimation.stop();
+        }
+        this.activeAnimation = null;
+      }
+      throw error;
+    } finally {
+      if (this.activeAnimation) {
+        this.activeAnimation.stop();
+        this.activeAnimation = null;
+      }
     }
   }
 
@@ -957,14 +998,28 @@ export class SingleAgent {
   private async askPermission(
     name: string,
     args: Record<string, string>,
+    workspaceRoot: string,
     rl?: readline.Interface,
     allowWithoutPrompt?: boolean,
+    context?: AgentContext
   ): Promise<boolean> {
     if (!MUTATING_TOOL_NAMES.has(name)) {
       return true;
     }
 
-    if (allowWithoutPrompt || this.allowAll) {
+    let isOutsideWorkspace = false;
+    let resolvedOutsidePath: string | undefined;
+    const guard = new WorkspaceGuard(workspaceRoot);
+    const targetPath = args.path || args.to || args.file || args.target || (name === 'run_command' && args.cwd);
+    if (targetPath) {
+      const resolved = path.resolve(workspaceRoot, targetPath);
+      if (!guard.isInside(resolved)) {
+        isOutsideWorkspace = true;
+        resolvedOutsidePath = resolved;
+      }
+    }
+
+    if (!isOutsideWorkspace && (allowWithoutPrompt || this.allowAll)) {
       return true;
     }
 
@@ -972,25 +1027,34 @@ export class SingleAgent {
 
     try {
       const message = formatPermissionPrompt(name, args);
+      const options: any[] = [
+        { value: 'yes', label: 'Yes, allow' },
+        { value: 'no', label: 'No, deny' }
+      ];
+      if (!isOutsideWorkspace) {
+        options.push({ value: 'all', label: 'Yes to all (trust session)' });
+      }
 
       const choice = await promptsWrapper.select({
         message,
-        options: [
-          { value: 'yes', label: 'Yes, allow' },
-          { value: 'no', label: 'No, deny' },
-          { value: 'all', label: 'Yes to all (trust session)' },
-        ],
+        options,
         initialValue: 'yes',
       });
 
       if (promptsWrapper.isCancel(choice) || choice === 'no') {
         return false;
       }
-      if (choice === 'all') {
-        this.allowAll = true;
-        return true;
+      
+      const isApproved = choice === 'yes' || choice === 'all';
+      if (isApproved && isOutsideWorkspace && resolvedOutsidePath && context) {
+        context.allowedOutsidePaths = context.allowedOutsidePaths || new Set();
+        context.allowedOutsidePaths.add(resolvedOutsidePath);
       }
-      return choice === 'yes';
+      
+      if (choice === 'all' && !isOutsideWorkspace) {
+        this.allowAll = true;
+      }
+      return isApproved;
     } finally {
       if (rl) rl.resume();
     }
@@ -1030,21 +1094,31 @@ export class SingleAgent {
       !!process.env.DEBUG || !!process.env.VERBOSE || process.argv.includes('--verbose');
     let thinkingAnnounced = false;
 
-    for await (const chunk of stream) {
-      if (chunk.type === 'content' && chunk.content) {
-        renderer.write(chunk.content);
-        fullText += chunk.content;
-      }
-      if (chunk.type === 'thinking' && chunk.thinking) {
-        if (showThinking) {
-          // Dim secondary colour so the thought stream is visually
-          // subordinate to the actual response.
-          process.stdout.write(`${colors.dim}${chunk.thinking}${colors.reset}`);
-        } else if (!thinkingAnnounced) {
-          process.stdout.write(`  ${colors.dim}⚡ Agent is reasoning…${colors.reset}\n`);
-          thinkingAnnounced = true;
+    let firstChunkReceived = false;
+
+    try {
+      for await (const chunk of stream) {
+        if (!firstChunkReceived) {
+          firstChunkReceived = true;
+          if (this.activeAnimation) {
+            this.activeAnimation.stop();
+            this.activeAnimation = null;
+          }
         }
-      }
+        if (chunk.type === 'content' && chunk.content) {
+          renderer.write(chunk.content);
+          fullText += chunk.content;
+        }
+        if (chunk.type === 'thinking' && chunk.thinking) {
+          if (showThinking) {
+            // Dim secondary colour so the thought stream is visually
+            // subordinate to the actual response.
+            process.stdout.write(`${colors.dim}${chunk.thinking}${colors.reset}`);
+          } else if (!thinkingAnnounced) {
+            process.stdout.write(`  ${colors.dim}⚡ Agent is reasoning…${colors.reset}\n`);
+            thinkingAnnounced = true;
+          }
+        }
       if (chunk.type === 'done') {
         if (chunk.usage) {
           usage.prompt_tokens += chunk.usage.prompt_tokens;
@@ -1060,6 +1134,13 @@ export class SingleAgent {
     if (fullText) {
       if (!fullText.endsWith('\n')) renderer.write('\n');
       renderer.flush();
+    }
+
+    } finally {
+      if (this.activeAnimation) {
+        this.activeAnimation.stop();
+        this.activeAnimation = null;
+      }
     }
 
     return { responseText: fullText, resolvedModel };

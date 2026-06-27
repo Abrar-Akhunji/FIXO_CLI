@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import * as p from '@clack/prompts';
+import { colors } from '../ui/colors.js';
 import { LspClient, getLanguageId } from './lsp-client.js';
 
 function findBinaryInPath(binaryName: string): string | null {
@@ -81,12 +83,26 @@ export class LspManager {
       return null;
     }
 
-    const binaryPath = findBinaryInPath(binaryName);
+    let binaryPath = findBinaryInPath(binaryName);
 
-    // If JS/TS and not found, we no longer forcefully globally install.
-    // Let it fail gracefully and inform the user.
     if (!binaryPath && (binaryName === 'typescript-language-server')) {
-      console.warn(`\n[LSP Manager] JS/TS language server not found on PATH. Run 'npm install -g typescript-language-server typescript' to enable LSP features.`);
+      const s = p.spinner();
+      const shouldInstall = await p.confirm({
+        message: `${colors.yellow}JS/TS language server not found.${colors.reset} Do you want to automatically install it via npm? (Requires npm)`,
+        initialValue: true,
+      });
+      if (p.isCancel(shouldInstall)) return null;
+
+      if (shouldInstall) {
+        s.start('Installing typescript-language-server globally...');
+        try {
+          execSync('npm install -g typescript-language-server typescript', { stdio: 'ignore' });
+          s.stop(`${colors.green}Successfully installed typescript-language-server.${colors.reset}`);
+          binaryPath = findBinaryInPath(binaryName);
+        } catch (err) {
+          s.stop(`${colors.red}Failed to install typescript-language-server.${colors.reset} Please install manually: npm install -g typescript-language-server typescript`);
+        }
+      }
     }
 
     if (!binaryPath) {

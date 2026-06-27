@@ -181,7 +181,7 @@ export class BackgroundJobRegistry {
     const guard = new WorkspaceGuard(this.cwd);
     let resolvedCwd: string;
     try {
-      resolvedCwd = guard.resolve(input.cwd, 'background-job cwd');
+      resolvedCwd = guard.resolve(input.cwd, 'background-job cwd', true);
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }

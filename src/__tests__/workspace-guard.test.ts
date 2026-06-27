@@ -24,7 +24,7 @@ test('WorkspaceGuard Boundary and Symlink Tests', async (t) => {
 
   await t.test('rejects path traversal escaping root', () => {
     assert.throws(() => {
-      guard.resolve('../escaped.txt');
+      guard.resolve('../escaped', 'path', true);
     }, /escapes workspace/);
 
     assert.equal(guard.isInside(path.join(parent, 'escaped.txt')), false);
@@ -45,7 +45,7 @@ test('WorkspaceGuard Boundary and Symlink Tests', async (t) => {
     // WorkspaceGuard should resolve the symlink real path and detect that it is outside root
     assert.equal(guard.isInside(linkPath), false);
     assert.throws(() => {
-      guard.resolve('symlink.txt');
+      guard.resolve('symlink.txt', 'path', true);
     }, /escapes workspace/);
   });
 

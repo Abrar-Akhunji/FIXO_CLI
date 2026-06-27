@@ -75,27 +75,44 @@ async function runDirectSetup(): Promise<FreeLLMConfig> {
     process.exit(1);
   }
 
-  const apiKey = await p.password({
-    message: `Paste your ${def.displayName} API key:`,
-    validate: (val) => {
-      if (!val || !val.trim()) return 'API key is required';
-      return;
-    },
-  });
+  let apiKey: string | symbol = '';
+  let fetchedModels: string[] = [];
 
-  if (p.isCancel(apiKey)) {
-    p.outro('Setup cancelled.');
-    process.exit(1);
+  while (true) {
+    apiKey = await p.password({
+      message: `Paste your ${def.displayName} API key:`,
+      validate: (val) => {
+        if (!val || !val.trim()) return 'API key is required';
+        return;
+      },
+    });
+
+    if (p.isCancel(apiKey)) {
+      p.outro('Setup cancelled.');
+      process.exit(1);
+    }
+
+    const s = p.spinner();
+    s.start(`Verifying connection and fetching models for ${def.displayName}...`);
+
+    try {
+      fetchedModels = await ProvidersManager.verifyKeyAndFetchModels(providerName as string, apiKey as string);
+      s.stop(`✓ Verification successful. Found ${fetchedModels.length} models.`);
+      break;
+    } catch (err: any) {
+      s.stop(`✗ Verification failed: ${err.message || err}`);
+    }
   }
 
   // Persist the key and hydrate the in-memory vault so the very first
   // request after setup can find it without a restart.
   ProvidersManager.add(providerName as string, apiKey as string);
 
-  const modelOptions = def.models.slice(0, 12).map((m) => ({ value: m, label: m }));
+  const modelOptions = fetchedModels.map((m) => ({ value: m, label: m }));
+  const initialModel = fetchedModels.find((m) => def.models.includes(m)) || fetchedModels[0];
   const defaultModel = await p.select({
     message: `Default model for ${def.displayName}:`,
-    initialValue: def.models[0],
+    initialValue: initialModel,
     options: modelOptions,
   });
 

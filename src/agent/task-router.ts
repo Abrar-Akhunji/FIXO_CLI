@@ -40,6 +40,7 @@ import type { ConversationManager } from './conversation.js';
 import type { AgentContext, AgentResult, ProjectConfig } from '../types.js';
 import { colors as c } from '../ui/colors.js';
 import { MODEL_DAG_VERIFIED } from './providers-manager.js';
+import { promptsWrapper } from './single-agent.js';
 
 function snapshotWorkspace(dir: string): Set<string> {
   const walk = (currentDir: string): string[] => {
@@ -129,8 +130,27 @@ export async function routeAndExecute(
 
     if (routingConfig?.honorVerificationFlag && !routingConfig?.allowUnverifiedDag && !isVerified) {
       console.log(`\n${c.yellow}⚠ Task classified as complex, but model '${context.model}' is unverified for autonomous DAG execution.${c.reset}`);
-      console.log(`${c.dim}Routing to SingleAgent as a safety fallback. Set 'allowUnverifiedDag: true' in config to override.${c.reset}`);
-      return await runSimplePath(context, 'Unverified model fallback', startTime, deps);
+      
+      let useComplex = false;
+      if (deps.rl) {
+        deps.rl.pause();
+        try {
+          const choice = await promptsWrapper.confirm({
+            message: `Do you want to run the complex DAG on this unverified model? (This setting will not be saved)`,
+            initialValue: false
+          });
+          if (!promptsWrapper.isCancel(choice) && choice === true) {
+            useComplex = true;
+          }
+        } finally {
+          deps.rl.resume();
+        }
+      }
+
+      if (!useComplex) {
+        console.log(`${c.dim}Routing to SingleAgent as a safety fallback. Set 'allowUnverifiedDag: true' in config to override permanently.${c.reset}`);
+        return await runSimplePath(context, 'Unverified model fallback', startTime, deps);
+      }
     }
     return await runComplexPath(input, context, classification.reason, startTime, deps);
   }

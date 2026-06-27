@@ -281,6 +281,8 @@ export interface ToolExecutionOptions {
    * tools default to allowing execution.
    */
   mode?: 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT';
+  /** Paths outside the workspace that have been temporarily whitelisted by user prompt. */
+  allowedOutsidePaths?: Set<string>;
   /**
    * Callback returning the current conversation token count.
    * Used by the predictive context-budget gate (Phase 4) to
@@ -411,7 +413,7 @@ async function applyAtomicWrite(
   session: TaskSession | undefined,
 ): Promise<{ result: string; staged: boolean; created: boolean }> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', true);
   const existed = fs.existsSync(resolved);
 
   if (!safety?.atomicStaging) {
@@ -680,8 +682,8 @@ export async function executeTool(
     switch (name) {
       case 'read_file': {
         if (options.signal?.aborted) { event.result = 'Error: Task cancelled by user.'; return event; }
-        const guard = new WorkspaceGuard(cwd);
-        const resolved = guard.resolve(args.path, 'file');
+        const guard = new WorkspaceGuard(cwd, options?.allowedOutsidePaths);
+        const resolved = guard.resolve(args.path, 'file', false);
         setSpinner({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });
         const budgetPct = options.safety?.predictiveBudgetPct ?? DEFAULT_PREDICTIVE_BUDGET_PCT;
         // Skip the predictive gate when it is explicitly disabled
@@ -718,20 +720,20 @@ export async function executeTool(
       case 'extract_symbols':
         setSpinner({ kind: 'read', name: 'Symbols', detail: shortenPath(args.path, cwd) });
         event.result = await executeExtractSymbols(args.path, cwd, options.session);
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'extract_imports':
         setSpinner({ kind: 'read', name: 'Imports', detail: shortenPath(args.path, cwd) });
         event.result = await executeExtractImports(args.path, cwd, options.session);
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'write_file':
         setSpinner({ kind: 'write', name: 'Write', detail: shortenPath(args.path, cwd) });
         event.result = await executeWriteFile(args.path, args.content, cwd, options);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'run_command':
@@ -787,7 +789,7 @@ export async function executeTool(
         setSpinner({ kind: 'write', name: 'Delete', detail: shortenPath(args.path, cwd) });
         event.result = executeDeleteFile(args.path, cwd, options.session);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'apply_patch':
@@ -800,21 +802,21 @@ export async function executeTool(
         setSpinner({ kind: 'write', name: 'Replace', detail: shortenPath(args.path, cwd) });
         event.result = await executeReplaceRange(args.path, Number(args.startLine), Number(args.endLine), args.content, cwd, options);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'insert_after':
         setSpinner({ kind: 'write', name: 'Insert', detail: shortenPath(args.path, cwd) });
         event.result = await executeInsertAfter(args.path, args.anchor, args.content, cwd, options);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'rename_file':
         setSpinner({ kind: 'write', name: 'Rename', detail: `${args.from} -> ${args.to}` });
         event.result = await executeRenameFile(args.from, args.to, cwd, options);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.to, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.to, 'file');
         break;
 
       case 'create_branch':
@@ -851,7 +853,7 @@ export async function executeTool(
         setSpinner({ kind: 'read', name: 'Definition', detail: `${fileBasename}:${line}:${char}` });
 
         const manager = getLspManager(cwd);
-        const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        const resolvedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         const def = await manager.gotoDefinition(resolvedPath, line, char);
         event.result = JSON.stringify(def || null, null, 2);
         break;
@@ -864,7 +866,7 @@ export async function executeTool(
         setSpinner({ kind: 'read', name: 'References', detail: `${fileBasename}:${line}:${char}` });
 
         const manager = getLspManager(cwd);
-        const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        const resolvedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         const refs = await manager.findReferences(resolvedPath, line, char);
         event.result = JSON.stringify(refs || null, null, 2);
         break;
@@ -877,7 +879,7 @@ export async function executeTool(
         setSpinner({ kind: 'read', name: 'Hover', detail: `${fileBasename}:${line}:${char}` });
 
         const manager = getLspManager(cwd);
-        const resolvedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        const resolvedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         const hoverRes = await manager.hover(resolvedPath, line, char);
         event.result = JSON.stringify(hoverRes || null, null, 2);
         break;
@@ -897,7 +899,7 @@ export async function executeTool(
         setSpinner({ kind: 'write', name: 'Surgical', detail: shortenPath(args.path, cwd) });
         event.result = await executeStrReplace(args as unknown as StrReplaceArgs, cwd, options);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
         break;
 
       case 'glob_files':
@@ -992,7 +994,7 @@ function executeReadFile(
   largeFileGateLines: number = 350,
 ): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', false);
 
   if (!fs.existsSync(resolved)) {
     return `Error: File not found: ${filePath}`;
@@ -1113,7 +1115,7 @@ async function executeExtractSymbols(
   session?: TaskSession,
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', true);
   if (!fs.existsSync(resolved)) {
     return `Error: File not found: ${filePath}`;
   }
@@ -1140,7 +1142,7 @@ async function executeExtractImports(
   session?: TaskSession,
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', true);
   if (!fs.existsSync(resolved)) {
     return `Error: File not found: ${filePath}`;
   }
@@ -1170,7 +1172,7 @@ function executeWriteFile(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', false);
 
   const baseName = path.basename(resolved).toLowerCase();
   const lowerPath = resolved.toLowerCase();
@@ -1236,7 +1238,7 @@ function executeRunCommand(
   sandboxMode?: import('../config.js').SandboxMode,
 ): string {
   const guard = new WorkspaceGuard(workspaceRoot);
-  const commandCwd = guard.resolve(requestedCwd, 'command cwd');
+  const commandCwd = guard.resolve(requestedCwd, 'command cwd', false);
   try {
     let result;
     if (sandboxMode === 'os-sandbox') {
@@ -1289,7 +1291,7 @@ function executeSearchCode(
   cwd: string,
 ): string {
   const guard = new WorkspaceGuard(cwd);
-  const targetDir = searchPath ? guard.resolve(searchPath, 'search path') : cwd;
+  const targetDir = searchPath ? guard.resolve(searchPath, 'search path', false) : cwd;
 
   // Try ripgrep first
   let hasRg = false;
@@ -1354,7 +1356,7 @@ function executeSearchCode(
 
 function executeListDir(dirPath: string | undefined, cwd: string): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = dirPath ? guard.resolve(dirPath, 'directory') : cwd;
+  const resolved = dirPath ? guard.resolve(dirPath, 'directory', false) : cwd;
 
   if (!fs.existsSync(resolved)) {
     return `Error: Directory not found: ${dirPath ?? '.'}`;
@@ -1412,7 +1414,7 @@ function resolvePath(filePath: string, cwd: string): string {
 function shortenPath(filePath: string, cwd: string): string {
   try {
     const guard = new WorkspaceGuard(cwd);
-    return guard.relative(guard.resolve(filePath, 'path'));
+    return guard.relative(guard.resolve(filePath, 'path', false));
   } catch {
     return filePath;
   }
@@ -1431,7 +1433,7 @@ function formatSize(bytes: number): string {
 
 function executeDeleteFile(filePath: string, cwd: string, session?: TaskSession): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', true);
   const mutation = session?.canMutate(resolved);
   if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
   session?.captureBefore(resolved);
@@ -1460,7 +1462,7 @@ function executeApplyPatch(
   // succeed in corrupting our own source.
   for (const file of filesFromPatch(patch)) {
     try {
-      const resolved = guard.resolve(file, 'patch target');
+      const resolved = guard.resolve(file, 'patch target', true);
       guard.assertNotPlatformPath(resolved);
     } catch (err: unknown) {
       if (err instanceof PlatformPathLockedError) {
@@ -1498,7 +1500,7 @@ function executeReplaceRange(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', false);
   try {
     guard.assertNotPlatformPath(resolved);
   } catch (err: unknown) {
@@ -1526,7 +1528,7 @@ function executeInsertAfter(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file');
+  const resolved = guard.resolve(filePath, 'file', false);
   try {
     guard.assertNotPlatformPath(resolved);
   } catch (err: unknown) {
@@ -1552,8 +1554,8 @@ function executeRenameFile(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const source = guard.resolve(from, 'source file');
-  const target = guard.resolve(to, 'target file');
+  const source = guard.resolve(from, 'source file', true);
+  const target = guard.resolve(to, 'target file', true);
   try {
     guard.assertNotPlatformPath(source);
     guard.assertNotPlatformPath(target);
@@ -2002,6 +2004,43 @@ export function listAllBackgroundJobs(cwd: string): JobSnapshot[] {
 
 /* ──────────────────── str_replace implementation ──────────────────── */
 
+function escapeRegExp(string: string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findFuzzyMatches(haystack: string, needle: string): { start: number, end: number, match: string }[] {
+  const tokens = needle.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [];
+
+  const pattern = tokens.map(escapeRegExp).join('\\s+');
+  const regex = new RegExp(pattern, 'g');
+  
+  const matches: { start: number, end: number, match: string }[] = [];
+  let match;
+  while ((match = regex.exec(haystack)) !== null) {
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      match: match[0],
+    });
+  }
+  return matches;
+}
+
+function adaptNewStringForFuzzy(oldString: string, newString: string): string {
+  const oldLeading = oldString.match(/^\s*/)?.[0] || '';
+  const oldTrailing = oldString.match(/\s*$/)?.[0] || '';
+  
+  let adapted = newString;
+  if (oldLeading && adapted.startsWith(oldLeading)) {
+    adapted = adapted.substring(oldLeading.length);
+  }
+  if (oldTrailing && adapted.endsWith(oldTrailing)) {
+    adapted = adapted.substring(0, adapted.length - oldTrailing.length);
+  }
+  return adapted;
+}
+
 /**
  * Count non-overlapping occurrences of `needle` inside `haystack`.
  * Linear scan with a moving cursor — no regex, no allocation.
@@ -2056,7 +2095,7 @@ export async function executeStrReplace(
   cwd: string,
   options: ToolExecutionOptions = {},
 ): Promise<string> {
-  const guard = new WorkspaceGuard(cwd);
+  const guard = new WorkspaceGuard(cwd, options?.allowedOutsidePaths);
 
   // Validate the input.
   if (typeof args.path !== 'string' || args.path.length === 0) {
@@ -2082,7 +2121,7 @@ export async function executeStrReplace(
   // Workspace boundary check.
   let resolved: string;
   try {
-    resolved = guard.resolve(args.path, 'str_replace target');
+    resolved = guard.resolve(args.path, 'str_replace target', true);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `Error: str_replace: ${msg}`;
@@ -2106,22 +2145,41 @@ export async function executeStrReplace(
 
   // Load the current content.
   const content = fs.readFileSync(resolved, 'utf-8');
-  const occurrences = countOccurrences(content, args.oldString);
+  let exactOccurrences = countOccurrences(content, args.oldString);
   const replaceAll = args.replaceAll === true;
-  // The uniqueness gate only fires when the caller has not already
-  // opted in to non-unique semantics via `replaceAll` or by
-  // explicitly setting `expectUnique: false`.
   const expectUnique = !replaceAll && args.expectUnique !== false;
+  
+  let fuzzyMatches: { start: number, end: number, match: string }[] = [];
+  if (exactOccurrences === 0) {
+    fuzzyMatches = findFuzzyMatches(content, args.oldString);
+  }
+  
+  const occurrences = exactOccurrences > 0 ? exactOccurrences : fuzzyMatches.length;
 
   if (occurrences === 0) {
-    return `Error: str_replace: oldString not found in ${args.path}.`;
+    return `Error: str_replace: oldString not found in ${args.path}. (No exact or fuzzy match found)`;
   }
   if (occurrences > 1 && expectUnique) {
-    return `Error: str_replace: oldString appears ${occurrences} times in ${args.path}. ` +
+    const matchType = exactOccurrences > 0 ? 'exact' : 'fuzzy';
+    return `Error: str_replace: oldString appears ${occurrences} times (${matchType} matches) in ${args.path}. ` +
       `Pass replaceAll=true or expectUnique=false to proceed.`;
   }
 
-  const newContent = applyReplacement(content, args.oldString, args.newString, replaceAll);
+  let newContent = content;
+  let wasFuzzy = false;
+  if (exactOccurrences > 0) {
+    newContent = applyReplacement(content, args.oldString, args.newString, replaceAll);
+  } else {
+    wasFuzzy = true;
+    const matchesToReplace = replaceAll ? fuzzyMatches : [fuzzyMatches[0]];
+    const adaptedNewString = adaptNewStringForFuzzy(args.oldString, args.newString);
+    // Iterate backwards so replacement doesn't shift earlier indices
+    for (let i = matchesToReplace.length - 1; i >= 0; i--) {
+      const match = matchesToReplace[i];
+      newContent = newContent.substring(0, match.start) + adaptedNewString + newContent.substring(match.end);
+    }
+  }
+  
   const bytes = Buffer.byteLength(newContent, 'utf-8');
 
   // Pillar 3 — LSP pre-save compilation gate. The gate's
@@ -2227,10 +2285,10 @@ export async function executeGlobFiles(
     return `Error: glob_files: "pattern" is required.`;
   }
 
-  const guard = new WorkspaceGuard(cwd);
+  const guard = new WorkspaceGuard(cwd, _options?.allowedOutsidePaths);
   let scope: string;
   try {
-    scope = args.cwd ? guard.resolve(args.cwd, 'glob scope') : cwd;
+    scope = args.cwd ? guard.resolve(args.cwd, 'glob scope', false) : cwd;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `Error: glob_files: ${msg}`;

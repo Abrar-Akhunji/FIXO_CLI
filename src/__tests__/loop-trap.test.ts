@@ -180,7 +180,7 @@ test('record — diverging turn resets the consecutive counter', () => {
   d.record(snapshotAt(0, { file: 'a' }, 'result', 'w0'));
   d.record(snapshotAt(1, { file: 'a' }, 'result', 'w0'));
   d.record(snapshotAt(2, { file: 'a' }, 'result', 'w0')); // trap-detected
-  const v = d.record(snapshotAt(3, { file: 'b' }, 'result', 'w0'));
+  const v = d.record(snapshotAt(3, { file: 'b' }, 'diverging-result', 'w0'));
   assert.equal(v.state, 'ok');
 });
 

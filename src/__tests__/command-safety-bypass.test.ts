@@ -12,6 +12,7 @@ function makeWorkspace(): string {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-bypass-'));
   // Mimic the platform layout that triggers PlatformPathLockedError.
   fs.mkdirSync(path.join(tmp, 'src', 'components'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'workspace-guard.ts'), '');
   fs.writeFileSync(path.join(tmp, 'package.json'), '{}');
   fs.writeFileSync(path.join(tmp, 'src', 'components', 'BookingCTA.jsx'), '');
   return tmp;

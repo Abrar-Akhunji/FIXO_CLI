@@ -147,13 +147,14 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let currentMatches: AutocompleteOption[] = [];
   let highlightedIndex = 0;
   let workspaceFiles: string[] = [];
-  try {
-    const { loadIndex } = await import('../indexer.js');
-    const index = await loadIndex(cwd);
-    workspaceFiles = index.files.map(f => f.path);
-  } catch (err) {
-    // Ignore
-  }
+  import('../indexer.js')
+    .then(({ loadIndex }) => loadIndex(cwd))
+    .then((index) => {
+      workspaceFiles = index.files.map(f => f.path);
+    })
+    .catch(() => {
+      // Ignore
+    });
 
   let lastPromptRow = 0;
   let mouseReportingEnabled = false;
@@ -997,7 +998,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           await handleInput(trimmed);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
-          console.log(`\n${c.red}✗ Error: ${msg}${c.reset}`);
+          const isAbort = msg.includes('aborted') || msg.includes('cancelled') || msg.includes('cancel');
+          if (!isAbort) {
+            console.log(`\n${c.red}✗ Error: ${msg}${c.reset}`);
+          }
 
           // Actionable error suggestions
           if (msg.includes('ECONNREFUSED')) {

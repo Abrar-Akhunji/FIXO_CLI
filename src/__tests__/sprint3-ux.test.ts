@@ -7,12 +7,12 @@ test('Sprint 3 UX Polish Tests', async (t) => {
   await t.test('SingleAgent askPermission allowWithoutPrompt and allowAll flags', async () => {
     const agent = new SingleAgent();
     // 1. allowWithoutPrompt should bypass
-    const res1 = await (agent as any).askPermission('write_file', { path: 'test.txt' }, undefined, true);
+    const res1 = await (agent as any).askPermission('write_file', { path: 'test.txt' }, '/tmp', undefined, true);
     assert.equal(res1, true);
 
     // 2. allowAll should bypass
     (agent as any).allowAll = true;
-    const res2 = await (agent as any).askPermission('write_file', { path: 'test.txt' });
+    const res2 = await (agent as any).askPermission('write_file', { path: 'test.txt' }, '/tmp');
     assert.equal(res2, true);
   });
 
@@ -26,7 +26,7 @@ test('Sprint 3 UX Polish Tests', async (t) => {
     };
 
     try {
-      const res = await (agent as any).askPermission('write_file', { path: 'test.txt' });
+      const res = await (agent as any).askPermission('write_file', { path: 'test.txt' }, '/tmp');
       assert.equal(res, true);
       assert.equal((agent as any).allowAll, true);
       assert.ok(selectCalledWith.message.includes('test.txt'));

@@ -181,7 +181,7 @@ export class GitManager {
       const message = `${prefix}: ${taskSummary}`;
 
       for (const file of modifiedFiles) {
-        const relativePath = this.guard.relative(this.guard.resolve(file, 'commit file'));
+        const relativePath = this.guard.relative(this.guard.resolve(file, 'commit file', true));
         execFileSync('git', ['add', '--', relativePath], {
           cwd: this.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -189,7 +189,7 @@ export class GitManager {
       }
 
       const fileListForGit = modifiedFiles
-        .map((f) => this.guard.relative(this.guard.resolve(f, 'commit file')));
+        .map((f) => this.guard.relative(this.guard.resolve(f, 'commit file', true)));
 
       execFileSync('git', ['commit', '-m', `${message} [fixo-run:auto]`, '--', ...fileListForGit], {
         cwd: this.cwd,

@@ -364,16 +364,33 @@ export class LoopTrapDetector {
       }
     }
 
-    if (consecutive >= this.prefs.hardAbortCount) {
-      return { state: 'hard-abort', fingerprint: composite, consecutiveCount: consecutive };
+    let identicalResultAndWorkspaceCount = 1;
+    if (this.history.length >= 2) {
+      for (let i = this.history.length - 2; i >= 0; i--) {
+        const h = this.history[i]!;
+        if (
+          h.toolResultFingerprint === snapshot.toolResultFingerprint &&
+          h.workspaceFingerprint === snapshot.workspaceFingerprint
+        ) {
+          identicalResultAndWorkspaceCount += 1;
+        } else {
+          break;
+        }
+      }
     }
-    if (consecutive >= this.prefs.triggerCount) {
+
+    const effectiveConsecutive = Math.max(consecutive, identicalResultAndWorkspaceCount);
+
+    if (effectiveConsecutive >= this.prefs.hardAbortCount) {
+      return { state: 'hard-abort', fingerprint: composite, consecutiveCount: effectiveConsecutive };
+    }
+    if (effectiveConsecutive >= this.prefs.triggerCount) {
       return {
         state: 'trap-detected',
         fingerprint: composite,
-        layers,
+        layers: identicalResultAndWorkspaceCount > consecutive ? ['tool-result', 'workspace'] : layers,
         turnIndex: snapshot.turnIndex,
-        consecutiveCount: consecutive,
+        consecutiveCount: effectiveConsecutive,
       };
     }
     return { state: 'ok' };

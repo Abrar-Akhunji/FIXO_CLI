@@ -20,7 +20,7 @@ test('WorkspaceGuard rejects sibling-prefix escapes', () => {
 
   assert.equal(guard.isInside(path.join(root, 'file.ts')), true);
   assert.equal(guard.isInside(path.join(sibling, 'file.ts')), false);
-  assert.throws(() => guard.resolve('../cli-malicious/file.ts'));
+  assert.throws(() => guard.resolve('../cli-malicious/file.ts', 'path', true));
 });
 
 test('command classifier marks safe checks and high-risk shell forms', () => {

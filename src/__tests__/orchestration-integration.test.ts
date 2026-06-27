@@ -1,11 +1,23 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert';
+import fs from 'node:fs';
 import { AgentPool } from '../agent/agent-pool.js';
 import { Orchestrator } from '../agent/orchestrator.js';
 import type { TaskDAG, Subtask, AgentContext } from '../types.js';
 
 test('Orchestrator and AgentPool Integration', async (t) => {
   const originalFetch = global.fetch;
+  const originalReadFileSync = fs.readFileSync;
+  (fs as any).readFileSync = (path: any, options: any) => {
+    if (typeof path === 'string' && path.includes('config.json')) {
+      return JSON.stringify({ provider_mode: 'proxy' });
+    }
+    return originalReadFileSync(path, options);
+  };
+
+  t.after(() => {
+    (fs as any).readFileSync = originalReadFileSync;
+  });
 
   await t.test('Orchestrator plan method parses subtasks', async () => {
     global.fetch = async (url, options) => {
@@ -38,6 +50,7 @@ test('Orchestrator and AgentPool Integration', async (t) => {
         mode: 'BUILD'
       };
       const dag = await orchestrator.plan(context);
+      if (dag.subtasks[0]?.id === 'fallback-task') console.log('Orchestrator failed with DAG:', dag);
       assert.equal(dag.subtasks.length, 1);
       assert.equal(dag.subtasks[0].id, 'task_1');
       assert.equal(dag.subtasks[0].persona, 'code');

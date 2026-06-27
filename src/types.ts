@@ -22,6 +22,8 @@ export interface AgentContext {
   checkCommand?: string;
   /** Permission policy for this invocation. */
   policy?: PolicyProfile;
+  /** Paths outside the workspace that have been temporarily whitelisted by user prompt. */
+  allowedOutsidePaths?: Set<string>;
   /** Allow low-risk actions without repeated prompts. */
   yes?: boolean;
   /** Execution mode: PLAN (read-only), BUILD (mutating allowed), EXPLORE (read+lsp), or SCOUT (web only) */

@@ -214,7 +214,7 @@ export class AtomicStagingManager {
   private resolveTarget(relativeOrAbsolute: string): string {
     const guard = new WorkspaceGuard(this.cwd);
     try {
-      return guard.resolve(relativeOrAbsolute, 'file');
+      return guard.resolve(relativeOrAbsolute, 'file', true);
     } catch {
       throw new StagingPathEscapeError(relativeOrAbsolute);
     }

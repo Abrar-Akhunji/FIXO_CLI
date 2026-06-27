@@ -130,13 +130,15 @@ test('str_replace — relative escape (../../etc/passwd) is rejected', async () 
 
 test('str_replace — platform-locked path is rejected', async () => {
   await withTempCwd(async (cwd) => {
+    writeFixture(cwd, 'package.json', '"name": "fixo"');
+    writeFixture(cwd, 'src/workspace-guard.ts', '');
     const args: StrReplaceArgs = {
       path: 'package.json',
       oldString: '"name":',
       newString: '"name":',
     };
     const result = await executeStrReplace(args, cwd, { mode: 'BUILD' });
-    assert.match(result, /strictly prohibited/);
+    assert.match(result, /STOP TRYING TO EDIT THIS FILE/);
   });
 });
 
