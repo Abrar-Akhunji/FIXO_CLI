@@ -128,14 +128,18 @@ export class ContextBudgetEnforcer {
     const tokensBefore = this.counter.countMessages(messages);
     let tokens = this.counter.countMessages(working);
 
+    const compactionThreshold = options.maxTokens * 0.6;
+
     if (tokens <= options.maxTokens) {
+      const markForCompaction = tokens > compactionThreshold;
+      const finalActions = markForCompaction ? (['mark-for-compaction'] as BudgetAction[]) : (['none'] as BudgetAction[]);
       return {
         messages: working,
         report: {
           tokensBefore,
           tokensAfter: tokens,
-          actions: ['none'],
-          markForCompaction: false,
+          actions: finalActions,
+          markForCompaction,
           withinBudget: true,
         },
       };
@@ -147,7 +151,7 @@ export class ContextBudgetEnforcer {
     if (tokensAfterTier1 < tokens) actions.push('prune-tool-outputs');
     tokens = tokensAfterTier1;
     if (tokens <= options.maxTokens) {
-      return finish(working, tokensBefore, tokens, actions);
+      return finish(working, tokensBefore, tokens, actions, compactionThreshold);
     }
 
     // Tier 2: drop oldest turn-pairs.
@@ -156,7 +160,7 @@ export class ContextBudgetEnforcer {
     if (working.length < lengthBeforeTier2) actions.push('drop-oldest-turns');
     tokens = this.counter.countMessages(working);
     if (tokens <= options.maxTokens) {
-      return finish(working, tokensBefore, tokens, actions);
+      return finish(working, tokensBefore, tokens, actions, compactionThreshold);
     }
 
     // Tier 3: truncate remaining tool-call arguments.
@@ -166,7 +170,7 @@ export class ContextBudgetEnforcer {
     if (afterTier3.length < beforeTier3.length) actions.push('truncate-tool-args');
     tokens = this.counter.countMessages(working);
     if (tokens <= options.maxTokens) {
-      return finish(working, tokensBefore, tokens, actions);
+      return finish(working, tokensBefore, tokens, actions, compactionThreshold);
     }
 
     // Tier 4: nothing else we can do without an LLM. Tell the caller to
@@ -278,14 +282,19 @@ function finish(
   tokensBefore: number,
   tokensAfter: number,
   actions: BudgetAction[],
+  compactionThreshold: number,
 ): { messages: ChatMessage[]; report: BudgetReport } {
+  const markForCompaction = tokensAfter > compactionThreshold;
+  if (markForCompaction && !actions.includes('mark-for-compaction')) {
+    actions = [...actions, 'mark-for-compaction'];
+  }
   return {
     messages,
     report: {
       tokensBefore,
       tokensAfter,
       actions,
-      markForCompaction: false,
+      markForCompaction,
       withinBudget: true,
     },
   };

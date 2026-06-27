@@ -57,6 +57,27 @@ const MAX_TARGETS = 8;
 const MAX_LSP_WAIT_MS = 1500;
 
 /**
+ * Returns framework-specific guidance to inject into the system prompt.
+ * Currently detects Vite and provides Vite 8 / Rolldown manualChunks rules.
+ */
+export function getFrameworkGuidance(cwd: string): string {
+  const hasVite =
+    fs.existsSync(path.join(cwd, 'vite.config.ts')) ||
+    fs.existsSync(path.join(cwd, 'vite.config.js')) ||
+    fs.existsSync(path.join(cwd, 'vite.config.mjs')) ||
+    fs.existsSync(path.join(cwd, 'vite.config.cjs'));
+
+  if (!hasVite) return '';
+
+  return [
+    '## Vite 8 / Rolldown Guidance',
+    'This project uses Vite. Note that Vite 8 relies on Rolldown as the underlying bundler.',
+    'When configuring `manualChunks`, follow Rolldown\'s chunking conventions.',
+    'Keep chunking logic simple and avoid aggressive over-splitting to prevent circular dependencies or chunking errors.',
+  ].join('\n');
+}
+
+/**
  * Build a markdown block describing cross-file references for the
  * given targets. Returns an empty string when no targets, no LSP
  * support, or no references were found — making this safe to splice

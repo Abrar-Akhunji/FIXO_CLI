@@ -8,3 +8,11 @@ tsconfig.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.github/
+.gemini/
+docs/
+CLAUDE.md
+GEMINI.md
+GRAPHIFY_RULES.md
+*.ts
+!*.d.ts

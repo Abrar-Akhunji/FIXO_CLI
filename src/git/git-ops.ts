@@ -21,6 +21,10 @@ export function createBranch(cwd: string, branchName: string): string {
 }
 
 export function commitChanges(cwd: string, message: string): string {
+  const isDetached = runGit(cwd, ['branch', '--show-current']) === '';
+  if (isDetached) {
+    throw new Error('Commit refused: Workspace is in a detached HEAD state. Please checkout a branch first.');
+  }
   runGit(cwd, ['add', '-A']);
   runGit(cwd, ['commit', '-m', message]);
   const hash = runGit(cwd, ['rev-parse', '--short', 'HEAD']);

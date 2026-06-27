@@ -382,27 +382,43 @@ export class SingleAgent {
     }
 
     // ──── Complex task → tool loop ────
-    const repoMap = await buildRepoMap(context.cwd, {
-      maxDepth: loadConfig().preferences.repoMap?.maxDepth,
-      maxFiles: loadConfig().preferences.repoMap?.maxFiles,
-    });
-
-    // Phase 3.2 — auto-collect cross-file references for the files
-    // this run is likely to mutate (user-pinned files via /select).
-    // The block is empty if no LSP server is on $PATH, so adding it
-    // unconditionally is safe on machines without an LSP installed.
+    let repoMap = '';
     let referencesBlock = '';
-    if (context.selectedFiles && context.selectedFiles.length > 0) {
+
+    if (!(context as any).isResume) {
+      repoMap = await buildRepoMap(context.cwd, {
+        maxDepth: loadConfig().preferences.repoMap?.maxDepth,
+        maxFiles: loadConfig().preferences.repoMap?.maxFiles,
+      });
+
+      // Phase 3.2 — auto-collect cross-file references for the files
+      // this run is likely to mutate (user-pinned files via /select).
+      // The block is empty if no LSP server is on $PATH, so adding it
+      // unconditionally is safe on machines without an LSP installed.
+      if (context.selectedFiles && context.selectedFiles.length > 0) {
+        try {
+          const { gatherReferencesForTargets } = await import('./context-builder.js');
+          const { getLspManager } = await import('./tool-executor.js');
+          referencesBlock = await gatherReferencesForTargets(
+            context.cwd,
+            context.selectedFiles.map((f) => ({ file: f })),
+            () => getLspManager(context.cwd),
+          );
+        } catch {
+          // safe: any failure in the LSP path must not block the run
+        }
+      }
+
       try {
-        const { gatherReferencesForTargets } = await import('./context-builder.js');
-        const { getLspManager } = await import('./tool-executor.js');
-        referencesBlock = await gatherReferencesForTargets(
-          context.cwd,
-          context.selectedFiles.map((f) => ({ file: f })),
-          () => getLspManager(context.cwd),
-        );
+        const { getFrameworkGuidance } = await import('./context-builder.js');
+        const frameworkBlock = getFrameworkGuidance(context.cwd);
+        if (frameworkBlock) {
+          referencesBlock = referencesBlock 
+            ? `${referencesBlock}\n\n${frameworkBlock}`
+            : frameworkBlock;
+        }
       } catch {
-        // safe: any failure in the LSP path must not block the run
+        // safe: dynamic import failure won't block the run
       }
     }
 

@@ -123,6 +123,19 @@ export async function routeAndExecute(
   }
   const startTime = Date.now();
 
+  const cleanInput = input.trim().toLowerCase();
+  const isContinue = cleanInput === 'continue' || cleanInput === 'go on' || cleanInput === 'keep going';
+  const msgs = deps.conversation.getMessages();
+  const lastMsg = msgs[msgs.length - 1];
+  const isFollowingLimit = lastMsg?.role === 'assistant' && typeof lastMsg.content === 'string' && lastMsg.content.includes('(limit reached)');
+
+  if (isContinue && isFollowingLimit) {
+    context.systemPromptOverride = (context.systemPromptOverride ? context.systemPromptOverride + '\n\n' : '') +
+      'DIRECTIVE: You are resuming exactly from your last known state and Todo item. Do not re-read or scan the workspace.';
+    (context as any).isResume = true;
+    return await runSimplePath(context, 'Resume from tool-limit pause', startTime, deps);
+  }
+
   if (classification.complexity === 'complex') {
     const config = loadConfig();
     const isVerified = context.model && Array.from(MODEL_DAG_VERIFIED).some(m => context.model!.includes(m));

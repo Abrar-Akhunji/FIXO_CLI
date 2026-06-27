@@ -1798,7 +1798,15 @@ export async function executeTodoWrite(
       }
       const exists = list.items.some((it) => it.id === args.id);
       if (!exists) {
-        throw new TodoWriteError(`todo_write: item id "${args.id}" not found`, 'not_found');
+        const content = typeof args.content === 'string' && args.content.trim().length > 0 ? args.content : `Task ${args.id}`;
+        list = addItem(list, { content, blockedBy: args.blockedBy });
+        const newId = list.items[list.items.length - 1].id;
+        list = setItemStatus(list, { id: newId, status: args.status });
+        const save = saveTodoList(cwd, list);
+        if (!save.ok) {
+          throw new TodoWriteError(`todo_write: failed to persist: ${save.error ?? 'unknown'}`, 'io_failure', { path: save.path });
+        }
+        return `Successfully appended new item with auto-assigned ID: ${newId}`;
       }
       list = setItemStatus(list, { id: args.id, status: args.status });
       break;
@@ -2145,7 +2153,7 @@ export async function executeStrReplace(
 
   // Load the current content.
   const content = fs.readFileSync(resolved, 'utf-8');
-  let exactOccurrences = countOccurrences(content, args.oldString);
+  const exactOccurrences = countOccurrences(content, args.oldString);
   const replaceAll = args.replaceAll === true;
   const expectUnique = !replaceAll && args.expectUnique !== false;
   

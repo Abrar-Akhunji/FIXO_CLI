@@ -150,6 +150,20 @@ export class GitManager {
     }
   }
 
+  /** Check if the repository is in a detached HEAD state. */
+  isDetachedHead(): boolean {
+    if (!this.isGitRepo()) return false;
+    try {
+      execFileSync('git', ['symbolic-ref', '-q', 'HEAD'], {
+        cwd: this.cwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
   /**
    * Auto-commit all changes with a generated commit message.
    * Returns the short commit hash, or null if nothing to commit.
@@ -157,6 +171,10 @@ export class GitManager {
   autoCommit(task: string, modifiedFiles: string[]): string | null {
     if (modifiedFiles.length === 0) return null;
     if (!this.isGitRepo()) return null;
+    if (this.isDetachedHead()) {
+      console.log(`  ${colors.yellow}⚠ Auto-commit refused: Workspace is in a detached HEAD state. Please checkout a branch first to prevent data loss.${colors.reset}`);
+      return null;
+    }
 
     try {
       const status = execFileSync('git', ['status', '--porcelain'], {
@@ -370,6 +388,10 @@ export class GitManager {
   createSnapshot(label: string): string | null {
     if (!this.isGitRepo()) {
       console.log(`${colors.red}  ✗ Not a git repository — cannot create snapshot.${colors.reset}`);
+      return null;
+    }
+    if (this.isDetachedHead()) {
+      console.log(`${colors.yellow}  ⚠ Snapshot refused: Workspace is in a detached HEAD state. Please checkout a branch first.${colors.reset}`);
       return null;
     }
     try {
