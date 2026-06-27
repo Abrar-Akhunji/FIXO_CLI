@@ -536,6 +536,15 @@ export function loadConfig(): FreeLLMConfig {
   try {
     const raw = fs.readFileSync(configPath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<FreeLLMConfig>;
+    
+    let migrated = false;
+    const isLegacyLiart = parsed.apiUrl && parsed.apiUrl.includes('freellm-' + 'liart.vercel.app');
+    const isLegacyFreeLLM = parsed.apiUrl && parsed.apiUrl.includes('api.' + 'freellmapi.com');
+    if (parsed.apiUrl && (isLegacyLiart || isLegacyFreeLLM)) {
+      parsed.apiUrl = DEFAULT_API_URL;
+      migrated = true;
+    }
+
     const defaults = getDefaultConfig();
 
     // Merge top-level keys while keeping nested `preferences` safe.
@@ -570,7 +579,7 @@ export function loadConfig(): FreeLLMConfig {
     const inferredMode: ProviderMode =
       parsed.provider_mode ?? (parsed.freellmapi_api_key ? 'proxy' : 'direct');
 
-    return {
+    const config = {
       ...defaults,
       ...parsed,
       provider_mode: inferredMode,
@@ -617,6 +626,15 @@ export function loadConfig(): FreeLLMConfig {
         },
       },
     };
+
+    if (migrated) {
+      try {
+        saveConfig(config);
+      } catch {
+        // ignore
+      }
+    }
+    return config;
   } catch {
     // File missing, corrupt, or otherwise unreadable — use defaults.
     return getDefaultConfig();
