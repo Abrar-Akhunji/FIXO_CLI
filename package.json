@@ -1,6 +1,6 @@
 {
   "name": "fixo-cli",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "FixO CLI — Autonomous Free Multi-Provider LLM Coding Tool",
   "type": "module",
   "bin": {
