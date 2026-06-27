@@ -12,3 +12,7 @@ yarn-error.log*
 /image.png
 /FIXO.md
 /temp/
+
+# Graphify — local knowledge graph (not committed)
+graphify-out/
+.graphifyignore

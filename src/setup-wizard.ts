@@ -69,7 +69,11 @@ async function runDirectSetup(): Promise<FreeLLMConfig> {
     process.exit(1);
   }
 
-  const def = PROVIDER_REGISTRY.find((d) => d.name === providerName)!;
+  const def = PROVIDER_REGISTRY.find((d) => d.name === providerName);
+  if (!def) {
+    p.outro('Setup cancelled — unknown provider selected.');
+    process.exit(1);
+  }
 
   const apiKey = await p.password({
     message: `Paste your ${def.displayName} API key:`,
@@ -214,7 +218,8 @@ async function runProxySetup(): Promise<FreeLLMConfig> {
     if (!p.isCancel(selectedProviders) && selectedProviders.length > 0) {
       let configuredCount = 0;
       for (const name of selectedProviders) {
-        const def = PROVIDER_REGISTRY.find((d) => d.name === name)!;
+        const def = PROVIDER_REGISTRY.find((d) => d.name === name);
+        if (!def) continue;
         const apiKey = await p.password({
           message: `Enter API key for ${def.displayName}:`,
           validate: (val) => {

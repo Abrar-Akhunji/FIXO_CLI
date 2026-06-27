@@ -8,8 +8,9 @@ function runGit(cwd: string, args: string[]): string {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
-  } catch (error: any) {
-    const stderr = error.stderr?.trim() || error.message;
+  } catch (error: unknown) {
+    const err = error as { stderr?: string; message?: string };
+    const stderr = err.stderr?.trim() || err.message || String(error);
     throw new Error(`Git error (git ${args.join(' ')}): ${stderr}`);
   }
 }

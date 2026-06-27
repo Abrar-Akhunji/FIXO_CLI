@@ -43,24 +43,7 @@ import {
 } from '../context/todo.js';
 import { renderStatusBar, type CLIState } from './render-primitives.js';
 
-const c = {
-  ...colors,
-};
-
-
-
-/* ──────────────────────── Welcome Banner ──────────────────────── */
-
-
-
-
-
-/* ──────────────────────── Prompt Builder ──────────────────────── */
-
-
-
-/* ──────────────────────── File Path Formatting ──────────────────────── */
-
+const c = colors;
 
 
 /* ──────────────────────── Stats Tracker ──────────────────────── */
@@ -184,10 +167,16 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   };
 
   // ──── Paste State ────
+  interface PasteAttachment { id: number; content: string; lines: number; }
+  let pendingPastes: PasteAttachment[] = [];
+  let pasteIdCounter = 1;
   let isPasting = false;
   let pasteBuffer = '';
-  let pasteCount = 0;
-  const pastedBlocks = new Map<string, string>();
+
+  /** Builds the inline token string that goes INTO the rl line buffer. */
+  function pasteToken(id: number, lineCount: number): string {
+    return `[Paste #${id} +${lineCount} lines]`;
+  }
 
   // The welcome screen (lava logo + command grid) is printed by
   // `src/index.ts` before the REPL starts; the startREPL entry
@@ -203,9 +192,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     if (fs.existsSync(historyFile)) {
       commandHistory = fs.readFileSync(historyFile, 'utf-8').split('\n').filter(Boolean);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      console.warn(`[Debug Warning] Failed to read command history from ${historyFile}: ${error.message || error}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[Debug Warning] Failed to read command history from ${historyFile}: ${msg}`);
     }
   }
 
@@ -238,10 +228,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   // existing /mode command semantics intact while still letting
   // the new bar visualise the live mode.
   const buildLavaStatusState = (): CLIState => {
-    const modeForState: CLIState['mode'] =
-      currentMode === 'PLAN' ? 'PLAN' :
-      currentMode === 'BUILD' ? 'BUILD' :
-      'BUILD';
+    const modeForState: CLIState['mode'] = currentMode === 'PLAN' ? 'PLAN' : 'BUILD';
     let contextPercent = 0;
     try {
       const used = conversation.getTotalTokens();
@@ -269,7 +256,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       branch: currentBranch || '(detached HEAD)',
       contextPercent,
       providersCount,
-      transport: 'freellmapi',
+      transport: config.provider_mode === 'direct' ? 'direct' : 'freellmapi',
     };
   };
 
@@ -281,6 +268,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // returns.
     renderStatusBar(buildLavaStatusState());
     process.stdout.write('\n');
+    if (pendingPastes.length > 0) {
+      const tokens = pendingPastes.map(p => pasteToken(p.id, p.lines)).join('  ');
+      process.stdout.write(`${c.dim}  ${tokens}${c.reset}\n`);
+    }
   };
 
   // Surface the result of a live model fetch as a one-line status.
@@ -340,15 +331,20 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       if (process.stdout.isTTY) {
         fs.writeSync(1, '\x1b[?2004l');
       }
-    } catch (e) {}
+    } catch (e) {
+      if (process.env.DEBUG || process.env.VERBOSE) {
+        console.warn('[exit] writeSync failed:', e);
+      }
+    }
     try {
       const hist = (rl as any).history;
       if (Array.isArray(hist)) {
         fs.writeFileSync(historyFile, hist.join('\n'), 'utf-8');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-        console.warn(`[Debug Warning] Failed to write history file on exit: ${error.message || error}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Debug Warning] Failed to write history file on exit: ${msg}`);
       }
     }
     disableMouseReportingSync();
@@ -372,8 +368,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let sigintCount = 0;
   let lastSigintTime = 0;
   let sigintResetTimer: NodeJS.Timeout | null = null;
+  // Dedup guard: prevents double-firing when both `rl` and `process` SIGINT listeners fire.
+  let sigintHandling = false;
 
   const sigintHandler = () => {
+    if (sigintHandling) return;
+    sigintHandling = true;
+    try {
     if (isTaskRunning && currentRunningAgent) {
       // A task is running — cancel it instead of exiting
       currentRunningAgent.abort();
@@ -407,6 +408,9 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     exitCleanup();
     console.log('\n\n👋 FixO CLI session ended safely. Core engine offline.');
     process.exit(0);
+  } finally {
+    sigintHandling = false;
+  }
   };
   // Listen on both the readline interface (catches Ctrl+C during rl.question())
   // and the process (fallback for non-readline scenarios).
@@ -449,7 +453,6 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     const currentCursor = rl.cursor;
     let output = '\n';
     
-    const width = 60;
     const borderTop = `${c.snow}┌────────────────────────────────────────────────────────┐${c.reset}\n`;
     const borderBottom = `${c.snow}└────────────────────────────────────────────────────────┘${c.reset}`;
     output += borderTop;
@@ -579,9 +582,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             });
           }
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-          console.warn(`[Debug Warning] Failed to load skills list: ${error.message || error}`);
+          const msg = error instanceof Error ? error.message : String(error);
+          console.warn(`[Debug Warning] Failed to load skills list: ${msg}`);
         }
       }
 
@@ -652,6 +656,32 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   let mouseBuffer = '';
 
+  function getPasteTokenAtCursorForBackspace(line: string, cursor: number) {
+    const regex = /\[Paste #(\d+) \+\d+ lines\]/g;
+    let match;
+    while ((match = regex.exec(line)) !== null) {
+      const start = match.index;
+      const end = regex.lastIndex;
+      if (cursor > start && cursor <= end) {
+        return { id: parseInt(match[1], 10), start, end };
+      }
+    }
+    return null;
+  }
+
+  function getPasteTokenAtCursorForDelete(line: string, cursor: number) {
+    const regex = /\[Paste #(\d+) \+\d+ lines\]/g;
+    let match;
+    while ((match = regex.exec(line)) !== null) {
+      const start = match.index;
+      const end = regex.lastIndex;
+      if (cursor >= start && cursor < end) {
+        return { id: parseInt(match[1], 10), start, end };
+      }
+    }
+    return null;
+  }
+
   // Monkey-patch process.stdin.emit to intercept keypress and mouse events
   const originalEmit = process.stdin.emit as any;
   (process.stdin as any).emit = function (event: string, ...args: any[]) {
@@ -661,9 +691,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         let str = mouseBuffer + rawData.toString();
         mouseBuffer = '';
 
-        // Bracketed Paste Interception
+        // ── Bracketed Paste Interception ──────────────────────────────
+        // This fires when the terminal supports bracketed paste mode
+        // (\x1b[?2004h is enabled in promptForInput on every render).
         if (str.includes('\x1b[200~')) {
           const parts = str.split('\x1b[200~');
+          // Any characters before the paste-start marker are real keystrokes
           if (parts[0]) {
             originalEmit.apply(this, ['data', Buffer.from(parts[0])]);
           }
@@ -677,23 +710,59 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             const parts = str.split('\x1b[201~');
             pasteBuffer += parts[0];
             isPasting = false;
-            
-            const lines = pasteBuffer.split(/\r?\n/);
-            if (lines.length > 1) {
-              pasteCount++;
-              const placeholder = `[Pasted text #${pasteCount} +${lines.length} lines]`;
-              pastedBlocks.set(placeholder, pasteBuffer);
-              rl.write(placeholder);
+
+            const rawLines = pasteBuffer.split(/\r\n|\r|\n/);
+            // Trim a single trailing empty line that terminals often append
+            if (rawLines.length > 0 && rawLines[rawLines.length - 1] === '') {
+              rawLines.pop();
+            }
+
+            if (rawLines.length > 1) {
+              // Multi-line paste → attachment
+              const id = pasteIdCounter++;
+              pendingPastes.push({ id, content: pasteBuffer.replace(/\r\n/g, '\n'), lines: rawLines.length });
+              injectTokenIntoPrompt(pasteToken(id, rawLines.length));
             } else {
+              // Single line → let it flow into rl normally
               rl.write(pasteBuffer);
             }
-            
+
             pasteBuffer = '';
             str = parts.slice(1).join('\x1b[201~');
             if (str.length === 0) return true;
           } else {
+            // Still accumulating paste data
             pasteBuffer += str;
             return true;
+          }
+        }
+
+        // ── Heuristic Paste Fallback ──────────────────────────────────
+        // For terminals that strip bracketed paste codes, multi-line
+        // pastes arrive as a single large data chunk containing \n chars.
+        // Humans cannot produce this pattern; only paste events do.
+        //
+        // Guards:
+        //   1. Not already in isPasting mode (handled above).
+        //   2. The chunk is NOT a bare Enter keypress.
+        //   3. At least 3 non-empty lines AND total length > 80 chars.
+        //      (Prevents firing on "2\n" or any short accidental newline.)
+        if (!isPasting && str.includes('\n')) {
+          const isJustEnter = (str === '\r' || str === '\n' || str === '\r\n');
+          if (!isJustEnter && str.length > 80) {
+            const rawLines = str.split(/\r\n|\r|\n/);
+            // Remove a single trailing empty line
+            if (rawLines.length > 0 && rawLines[rawLines.length - 1] === '') {
+              rawLines.pop();
+            }
+            const nonEmptyLines = rawLines.filter(l => l.trim().length > 0);
+            if (nonEmptyLines.length >= 3) {
+              const id = pasteIdCounter++;
+              pendingPastes.push({ id, content: str.replace(/\r\n/g, '\n'), lines: rawLines.length });
+              injectTokenIntoPrompt(pasteToken(id, rawLines.length));
+              // Swallow the chunk so readline never sees the \n characters
+              return true;
+            }
           }
         }
 
@@ -797,6 +866,40 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     if (event === 'keypress') {
       const [char, key] = args;
 
+      if (isPrompting && key) {
+        if (key.name === 'backspace') {
+          const line = rl.line;
+          const cursor = rl.cursor;
+          const tokenMatch = getPasteTokenAtCursorForBackspace(line, cursor);
+          if (tokenMatch) {
+            const { id, start, end } = tokenMatch;
+            pendingPastes = pendingPastes.filter(p => p.id !== id);
+            const newLine = line.slice(0, start) + line.slice(end);
+            const newCursor = start;
+            (rl as any).line = newLine;
+            (rl as any).cursor = newCursor;
+            
+            (rl as any)._refreshLine();
+            return true;
+          }
+        } else if (key.name === 'delete') {
+          const line = rl.line;
+          const cursor = rl.cursor;
+          const tokenMatch = getPasteTokenAtCursorForDelete(line, cursor);
+          if (tokenMatch) {
+            const { id, start, end } = tokenMatch;
+            pendingPastes = pendingPastes.filter(p => p.id !== id);
+            const newLine = line.slice(0, start) + line.slice(end);
+            const newCursor = start;
+            (rl as any).line = newLine;
+            (rl as any).cursor = newCursor;
+            
+            (rl as any)._refreshLine();
+            return true;
+          }
+        }
+      }
+
       // Intercept Escape or Ctrl+C to cancel a running task (when not prompting)
       if (key && key.name === 'escape' && isTaskRunning && currentRunningAgent) {
         currentRunningAgent.abort();
@@ -831,11 +934,40 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     return originalEmit.apply(this, [event, ...args]);
   };
 
+  /**
+   * Injects `token` into the readline line buffer and redraws the prompt line.
+   * Any text already in rl.line is preserved and appended after the token
+   * with a space separator.
+   *
+   * This produces the Claude Code / Antigravity pattern:
+   *   > [Paste #1 +45 lines] <any pre-paste text the user was typing>
+   */
+  function injectTokenIntoPrompt(token: string): void {
+    // 1. Capture whatever the user had typed before pasting
+    const preTyped = (rl.line ?? '').trimEnd();
+
+    // 2. Clear the entire current line visually
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+
+    // 3. Wipe rl's internal buffer with Ctrl-U so readline tracks zero length
+    rl.write(null, { ctrl: true, name: 'u' });
+
+    // 4. Write the token (+ pre-typed text if any) back into rl
+    const newLine = preTyped.length > 0 ? `${token} ${preTyped}` : token;
+    rl.write(newLine);
+    // rl.write() both updates rl.line and echoes the characters to stdout,
+    // so the user sees:   > [Paste #1 +45 lines] Refactor th
+    // with the cursor positioned after the last character.
+  }
+
   // ──── REPL loop ────
   const promptForInput = (): void => {
     // Restore raw mode and resume streams to recover from any clack/spinner interactions
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
+      // Explicitly re-enable Bracketed Paste Mode just in case a spinner disabled it
+      process.stdout.write('\x1b[?2004h');
     }
     process.stdin.resume();
     rl.resume();
@@ -845,11 +977,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // row entirely. Mode + model + branch + context usage are all
     // visible in the bar; the prompt itself is the lava `›` glyph.
     drawLavaStatusBar();
-    process.stdout.write(`${c.dim}─────────────────────────────────────────────────────────────────${c.reset}\n`);
 
     isPrompting = true;
+    const promptPrefix = `\n${C.SNOW4}╭─${C.RESET} 👤 ${C.LAVA}${C.BOLD}User${C.RESET}\n${C.SNOW4}╰─❯${C.RESET} `;
     rl.question(
-      `> `,
+      promptPrefix,
       async (input) => {
         isPrompting = false;
         disableMouseReporting();
@@ -900,15 +1032,22 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   // ──── Input handler ────
   async function handleInput(rawInput: string): Promise<void> {
-    // Reconstitute pasted text
-    let input = rawInput;
-    for (const [placeholder, text] of pastedBlocks.entries()) {
-      if (input.includes(placeholder)) {
-        input = input.replace(placeholder, text);
-      }
+    // ── Payload assembly ─────────────────────────────────────────────
+    // Strip paste tokens from the user's typed text so the LLM only
+    // sees the clean question, not "[Paste #1 +45 lines]" literally.
+    const tokenPattern = /\[Paste #\d+ \+\d+ lines\]\s*/g;
+    const cleanRawInput = rawInput.replace(tokenPattern, '').trim();
+
+    // Build final LLM payload: question first, context blocks after.
+    let input = cleanRawInput;
+    if (pendingPastes.length > 0) {
+      const contextBlocks = pendingPastes
+        .map(p => `<pasted_context id="${p.id}">\n${p.content}\n</pasted_context>`)
+        .join('\n\n');
+      input = cleanRawInput.length > 0
+        ? `${cleanRawInput}\n\n${contextBlocks}`
+        : contextBlocks;
     }
-    pastedBlocks.clear();
-    pasteCount = 0;
 
     // ─── Slash commands ───
     if (input.startsWith('/')) {
@@ -933,6 +1072,93 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         case '/help':
           printHelp();
           return;
+
+        case '/view': {
+          const id = parseInt(args[0] ?? '', 10);
+          if (isNaN(id)) {
+            console.log(`\n${c.yellow}⚠ Usage: /view <paste-id>${c.reset}`);
+            promptForInput();
+            return;
+          }
+          const paste = pendingPastes.find(p => p.id === id);
+          if (!paste) {
+            console.log(`\n${c.yellow}⚠ Paste #${id} not found. Active pastes: ${
+              pendingPastes.length > 0
+                ? pendingPastes.map(p => `#${p.id}`).join(', ')
+                : 'none'
+            }${c.reset}`);
+            promptForInput();
+            return;
+          }
+          const border = `${c.dim}${'─'.repeat(60)}${c.reset}`;
+          console.log(`\n${border}`);
+          console.log(`${c.cyan}Paste #${paste.id} — ${paste.lines} lines${c.reset}`);
+          console.log(border);
+          console.log(paste.content);
+          console.log(border);
+          promptForInput();
+          return;
+        }
+
+        case '/edit': {
+          const id = parseInt(args[0] ?? '', 10);
+          if (isNaN(id)) {
+            console.log(`\n${c.yellow}⚠ Usage: /edit <paste-id>${c.reset}`);
+            promptForInput();
+            return;
+          }
+          const paste = pendingPastes.find(p => p.id === id);
+          if (!paste) {
+            console.log(`\n${c.yellow}⚠ Paste #${id} not found.${c.reset}`);
+            promptForInput();
+            return;
+          }
+          const tmpFile = path.join(os.tmpdir(), `fixo-paste-${id}-${Date.now()}.txt`);
+          try {
+            fs.writeFileSync(tmpFile, paste.content, 'utf-8');
+
+            // Release the terminal before handing it to the external editor
+            if (process.stdin.isTTY) process.stdin.setRawMode(false);
+            process.stdout.write('\x1b[?2004l');  // disable bracketed paste while editor is open
+
+            const editor = process.env.VISUAL ?? process.env.EDITOR ?? (os.platform() === 'win32' ? 'notepad' : 'nano');
+            const { spawnSync } = await import('child_process');
+            spawnSync(editor, [tmpFile], { stdio: 'inherit' });
+
+            const edited = fs.readFileSync(tmpFile, 'utf-8');
+            fs.unlinkSync(tmpFile);
+
+            if (edited.trim().length === 0) {
+              console.log(`\n${c.yellow}⚠ Editor returned empty content — paste #${id} unchanged.${c.reset}`);
+            } else {
+              paste.content = edited;
+              paste.lines = edited.split(/\r?\n/).filter(l => l.length > 0).length;
+              console.log(`\n${c.green}✓ Updated Paste #${id} (${paste.lines} lines)${c.reset}`);
+            }
+          } catch (err: any) {
+            console.log(`\n${c.red}✗ /edit failed: ${err.message}${c.reset}`);
+            try { fs.unlinkSync(tmpFile); } catch { /* already gone */ }
+          } finally {
+            // Reclaim raw mode and bracketed paste before returning to REPL
+            if (process.stdin.isTTY) process.stdin.setRawMode(true);
+            process.stdout.write('\x1b[?2004h');
+          }
+          promptForInput();
+          return;
+        }
+
+        case '/pastes': {
+          if (pendingPastes.length === 0) {
+            console.log(`\n${c.dim}No active paste attachments.${c.reset}`);
+          } else {
+            console.log(`\n${c.cyan}Active paste attachments:${c.reset}`);
+            for (const p of pendingPastes) {
+              console.log(`  ${c.bold}#${p.id}${c.reset}  ${p.lines} lines  /view ${p.id} · /edit ${p.id}`);
+            }
+          }
+          promptForInput();
+          return;
+        }
 
         default: {
           const handler = commandRegistry[cmd];
@@ -1031,12 +1257,46 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         });
         const output = redactSecrets([result.stdout ?? '', result.stderr ?? ''].filter(Boolean).join('\n'));
         if (output.trim()) console.log(output);
-      } catch (error: any) {
-        if (error.stdout) console.log(error.stdout);
-        if (error.stderr) console.error(`${c.red}${error.stderr}${c.reset}`);
+      } catch (error: unknown) {
+        const err = error as { stdout?: string; stderr?: string };
+        if (err.stdout) console.log(err.stdout);
+        if (err.stderr) console.error(`${c.red}${err.stderr}${c.reset}`);
       }
       return;
     }
+
+
+
+    // ─── Conversation echo (paste expansion) ──────────────────────────
+    // When the submitted input contains paste attachments, overwrite the
+    // readline-echoed `> [Paste #N +M lines]` line with a proper
+    // conversation block so the user can see what they sent.
+    // Mirrors the Claude Code / Antigravity transcript pattern.
+    if (pendingPastes.length > 0) {
+      // Step 1: reconstruct the original input as it would have looked without folding
+      let unfoldedInput = rawInput;
+      for (const paste of pendingPastes) {
+        const token = `[Paste #${paste.id} +${paste.lines} lines]`;
+        unfoldedInput = unfoldedInput.replace(token, paste.content);
+      }
+
+      // Step 2: move up ONE line and erase it — this erases the readline-
+      // echoed token line ("> [Paste #2 +4 lines]") that is already on screen.
+      process.stdout.write('\x1b[1A\x1b[2K');
+
+      // Step 3: print the prompt and the unfolded input
+      const lines = unfoldedInput.split(/\r\n|\r|\n/);
+      if (lines.length > 0) {
+        console.log(`> ${lines[0]}`);
+        for (let i = 1; i < lines.length; i++) {
+          console.log(lines[i]);
+        }
+      }
+
+      // Blank line before the agent spinner starts
+      console.log('');
+    }
+    // ─────────────────────────────────────────────────────────────────
 
     // ─── Agent task ───
     // Format any paths in the input for display
@@ -1091,9 +1351,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       },
     });
     if (routed.route === 'plan-mode-deferred') {
+      pendingPastes = [];
       return;
     }
     const result = routed.result;
+    
+    pendingPastes = [];
 
     // Print result summary
     console.log('');

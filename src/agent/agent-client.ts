@@ -28,7 +28,7 @@ import { extractTextFromContent } from '../shared/content.js';
 
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 1500;
-const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503]);
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 function getValidatedApiUrl(urlStr: string | undefined): string | undefined {
   if (!urlStr) return undefined;

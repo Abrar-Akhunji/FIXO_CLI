@@ -9,7 +9,7 @@
  *   5. Prunes old tool outputs to free space before full compaction
  */
 
-import type { ChatMessage } from '../shared/types.js';
+import type { ChatMessage, ChatContentBlock } from '../shared/types.js';
 import type { AgentClient } from './agent-client.js';
 import { countMessagesTokens, countTokens } from './tokenizer.js';
 import { ContextBudgetEnforcer } from './context-budget.js';
@@ -334,9 +334,23 @@ export class ConversationManager {
    * non-standard messages), then prune if the budget is exceeded.
    */
   addMessage(message: ChatMessage): void {
+    let sanitizedContent: string | ChatContentBlock[] | null = null;
+    if (typeof message.content === 'string') {
+      sanitizedContent = sanitizeUserContent(message.content);
+    } else if (Array.isArray(message.content)) {
+      sanitizedContent = message.content.map(block => {
+        if (block.type === 'text') {
+          return { ...block, text: sanitizeUserContent(block.text) };
+        }
+        return block;
+      });
+    } else {
+      sanitizedContent = message.content;
+    }
+
     const sanitized = {
       ...message,
-      content: sanitizeUserContent(message.content),
+      content: sanitizedContent,
     };
     this.history.push(sanitized);
     this.pruneToFitBudget();

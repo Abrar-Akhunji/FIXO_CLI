@@ -29,6 +29,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { loadConfig, getConfigDir } from '../config.js';
 import { formatDuration } from './duration.js';
 
@@ -175,14 +176,9 @@ export const telemetry = {
 let _sessionId: string | null = null;
 function getSessionId(): string {
   if (_sessionId) return _sessionId;
-  // 12 chars of randomness, base36. Stable for the lifetime of
-  // the process but not personally identifying. The two calls to
-  // Math.random are concatenated so the string is always 24 chars
-  // from which we take the first 12, even if a single random()
-  // happens to return a tiny fraction.
-  const a = Math.random().toString(36).slice(2);
-  const b = Math.random().toString(36).slice(2);
-  _sessionId = (a + b).slice(0, 12);
+  // 12 chars of randomness, hex-encoded bytes. Stable for the lifetime of
+  // the process but not personally identifying.
+  _sessionId = randomBytes(6).toString('hex').slice(0, 12);
   return _sessionId;
 }
 

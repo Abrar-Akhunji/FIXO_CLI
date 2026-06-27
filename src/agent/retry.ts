@@ -78,7 +78,7 @@ export const DEFAULT_RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([
 export function defaultIsRetryable(err: unknown): boolean {
   if (err instanceof Error) {
     const name = err.name;
-    if (name === 'AbortError' || name === 'AbortError' || /abort/i.test(err.message)) {
+    if (name === 'AbortError' || /abort/i.test(err.message)) {
       return false;
     }
     if (name === 'HttpError' && 'status' in err) {
@@ -340,7 +340,6 @@ function emitRetryEvent(
   } catch (hookErr: unknown) {
     // Telemetry must never break the retry chain.
     const msg = hookErr instanceof Error ? hookErr.message : String(hookErr);
-     
     console.warn(`[retry] onRetry hook threw: ${msg}`);
   }
 }

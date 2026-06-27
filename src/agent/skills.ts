@@ -134,9 +134,10 @@ export class SkillsManager {
           if (extensions.includes(ext)) return true;
         }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-        console.warn(`[Debug Warning] Failed to read directory ${dir} during skill detection: ${error.message || error}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Debug Warning] Failed to read directory ${dir} during skill detection: ${msg}`);
       }
     }
     return false;

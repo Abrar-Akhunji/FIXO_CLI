@@ -7,6 +7,7 @@ export { TOOL_DEFINITIONS };
 import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
+import { randomBytes } from 'node:crypto';
 import type { ChatToolDefinition } from '../shared/types.js';
 import { colors } from '../ui/colors.js';
 import {
@@ -249,7 +250,6 @@ export function classifyExecutionRole(task: string): 'BUILD' | 'READ_ONLY' {
 }
 
 
-
 /* ──────────────────────── Tool Executor ──────────────────────── */
 
 export interface ToolCallEvent {
@@ -308,8 +308,10 @@ let cachedRunId: string | null = null;
  */
 export function getOrCreateRunId(): string {
   if (cachedRunId) return cachedRunId;
-  cachedRunId = Math.random().toString(36).slice(2, 8) +
-    Date.now().toString(36).slice(-6);
+  // Use crypto.randomBytes for collision-free staging namespace IDs.
+  // Math.random() has a 1-in-2^30 collision chance; crypto.randomBytes
+  // is cryptographically secure and eliminates any collision risk.
+  cachedRunId = randomBytes(6).toString('hex') + Date.now().toString(36).slice(-6);
   return cachedRunId;
 }
 
@@ -540,8 +542,7 @@ export async function executeTool(
     const policy = options.policy ?? options.session?.policy ?? 'shell-confirm';
 
     // Auto-init git repo on first mutating tool call (Finding C)
-    const isMutatingAction = !(name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') || name === 'web_fetch' || name === 'web_search' || name === 'search_code');
-    if (isMutatingAction) {
+    if (MUTATION_TOOL_NAMES.has(name)) {
       const git = new GitManager(cwd);
       if (!git.isGitRepo()) {
         try {
@@ -1055,7 +1056,7 @@ function executeReadFile(
  */
 function countLines(filePath: string): number {
   let count = 0;
-  let sawNewline = true;
+  let lastCharWasNewline = true;
   const stream = fs.openSync(filePath, 'r');
   try {
     const buf = Buffer.allocUnsafe(64 * 1024);
@@ -1064,13 +1065,13 @@ function countLines(filePath: string): number {
       for (let i = 0; i < bytesRead; i++) {
         if (buf[i] === 0x0a) {
           count++;
-          sawNewline = true;
+          lastCharWasNewline = true;
         } else {
-          sawNewline = false;
+          lastCharWasNewline = false;
         }
       }
     }
-    if (!sawNewline) count++;
+    if (!lastCharWasNewline) count++;
   } finally {
     fs.closeSync(stream);
   }
@@ -1272,10 +1273,11 @@ function executeRunCommand(
     const status = result.status ?? 0;
     session?.record('command_finished', { command, cwd: guard.relative(commandCwd), status, output: truncate(output, 4000) });
     return output || `(command completed with code ${status})`;
-  } catch (error: any) {
-    const stdout = error.stdout ?? '';
-    const stderr = error.stderr ?? '';
-    const code = error.status ?? 'unknown';
+  } catch (error: unknown) {
+    const err = error as { stdout?: string; stderr?: string; status?: number | string };
+    const stdout = err.stdout ?? '';
+    const stderr = err.stderr ?? '';
+    const code = err.status ?? 'unknown';
     return redactSecrets(`Command exited with code ${code}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`.trim());
   }
 }
@@ -1296,9 +1298,10 @@ function executeSearchCode(
     if (which.status === 0 && which.stdout.trim()) {
       hasRg = true;
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      console.warn(`[Debug Warning] Failed to determine if ripgrep (rg) is installed: ${error.message || error}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[Debug Warning] Failed to determine if ripgrep (rg) is installed: ${msg}`);
     }
   }
 

@@ -27,9 +27,10 @@ function pruneOutcomes(file: string): void {
     const lines = content.split('\n').filter(Boolean);
     if (lines.length <= MAX_OUTCOMES) return;
     fs.writeFileSync(file, lines.slice(lines.length - MAX_OUTCOMES).join('\n') + '\n', 'utf-8');
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      console.warn(`[Debug Warning] Failed to prune model outcomes from ${file}: ${error.message || error}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[Debug Warning] Failed to prune model outcomes from ${file}: ${msg}`);
     }
   }
 }

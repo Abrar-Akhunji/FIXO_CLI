@@ -524,6 +524,7 @@ export const COMMANDS_WITH_DESC = [
   // Files & Context
   { cmd: '/select', desc: 'Pin a file for agent context' },
   { cmd: '/unselect', desc: 'Clear all pinned files' },
+  { cmd: '/pastes', desc: 'List active paste attachments' },
   { cmd: '/index', desc: 'Build the local repo index' },
   { cmd: '/find', desc: 'Search the repo index' },
   { cmd: '/explain', desc: 'Explain a file or symbol from index' },
@@ -584,6 +585,7 @@ export function printHelp(): void {
   console.log(`\n${c.snow}${c.bold}📂 Files & Context${c.reset}`);
   line('/select',    '[file]',        'Pin a file for focused agent context');
   line('/unselect',  '',              'Clear all pinned files');
+  line('/pastes',    '',              'List active paste attachments');
   line('/index',     '',              'Build / refresh the local repo index');
   line('/find',      '<query>',       'Search the repo index for symbols or files');
   line('/explain',   '<target>',      'Explain a file, symbol, or function from the index');

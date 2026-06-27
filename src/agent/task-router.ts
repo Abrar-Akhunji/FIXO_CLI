@@ -54,7 +54,9 @@ function snapshotWorkspace(dir: string): Set<string> {
           results = results.concat(walk(full));
         }
       }
-    } catch {}
+    } catch (e) {
+      if (process.env.DEBUG) console.warn(`[task-router] snapshotWorkspace error reading ${currentDir}:`, e);
+    }
     return results;
   };
   return new Set(walk(dir));
@@ -321,7 +323,9 @@ async function runComplexPath(
           for (const p of topLevelNew) {
             try {
               fs.rmSync(p, { recursive: true, force: true });
-            } catch {}
+            } catch (e) {
+              if (process.env.DEBUG) console.warn(`[task-router] Error removing orphaned path ${p}:`, e);
+            }
           }
           console.log(`${c.green}✓ Orphaned paths deleted.${c.reset}`);
         }
@@ -403,7 +407,9 @@ async function runComplexPath(
         for (const p of topLevelNew) {
           try {
             fs.rmSync(p, { recursive: true, force: true });
-          } catch {}
+          } catch (e) {
+            if (process.env.DEBUG) console.warn(`[task-router] Error removing orphaned path ${p}:`, e);
+          }
         }
         console.log(`${c.green}✓ Orphaned paths deleted.${c.reset}`);
       }

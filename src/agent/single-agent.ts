@@ -37,7 +37,7 @@ import {
   buildLoopBlockedReadResult,
 } from '../runtime/loop-mitigation.js';
 import { dashboard } from '../ui/render.js';
-import { TaskStatusIndicator } from '../ui/render-primitives.js';
+import { LoadingAnimation } from '../ui/loading-animation.js';
 import * as p from '@clack/prompts';
 export const promptsWrapper = {
   select: p.select,
@@ -526,7 +526,7 @@ export class SingleAgent {
     // Instructions] directive on the next chat().
     const fixoMdWatcher = new FixoMdWatcher(context.cwd);
 
-    const indicator = new TaskStatusIndicator();
+    const indicator = new LoadingAnimation();
     indicator.start();
 
     let lastUsage: any = null;
@@ -590,8 +590,8 @@ export class SingleAgent {
           }
         }
 
-        const spinner = promptsWrapper.spinner();
-        spinner.start(`⚡ Agent is analyzing context paths… (turn ${toolCallCount + 1})`);
+        indicator.setPhase({ id: 'reasoning', label: 'Reasoning…', detail: 'Analyzing context paths', icon: '⚡' });
+        indicator.setTurn(toolCallCount + 1);
         dashboard.emit({
           type: 'turn-start',
           turnIndex: toolCallCount + 1,
@@ -613,7 +613,7 @@ export class SingleAgent {
         } catch (err: any) {
           // Handle context overflow — auto-compact and retry once
           if (ConversationManager.isContextOverflowError(err)) {
-            spinner.stop('🔄 Context overflow detected');
+            indicator.setPhase({ id: 'reasoning', label: 'Context full…', detail: 'Auto-compacting history', icon: '🔄' });
             console.log(`${colors.yellow}🔄 Context window full — auto-compacting...${colors.reset}`);
             const compacted = await conversation.compact(this.client, context.model);
             if (compacted) {
@@ -631,7 +631,6 @@ export class SingleAgent {
           }
           throw err;
         } finally {
-          spinner.stop('🤖 Thought completed');
           dashboard.emit({
             type: 'status',
             message: `Turn ${toolCallCount + 1} complete`,
@@ -836,6 +835,18 @@ export class SingleAgent {
             };
           } else {
             const toolStart = Date.now();
+            
+            // Set dynamic phase based on tool kind
+            if (isReadTool(toolCall.function.name)) {
+              indicator.setPhase({ id: 'reading', label: 'Reading codebase…', detail: parsedArgs.path || parsedArgs.from || '', icon: '✦' });
+            } else if (toolCall.function.name === 'run_command' || toolCall.function.name === 'run_command_async') {
+              indicator.setPhase({ id: 'executing', label: 'Running command…', detail: parsedArgs.command || '', icon: '$' });
+            } else if (toolCall.function.name === 'search_code' || toolCall.function.name === 'search_symbols') {
+              indicator.setPhase({ id: 'searching', label: 'Searching…', detail: parsedArgs.query || '', icon: '⌕' });
+            } else {
+              indicator.setPhase({ id: 'writing', label: 'Writing code…', detail: parsedArgs.path || parsedArgs.file || '', icon: '✎' });
+            }
+
             dashboard.emit({
               type: 'tool-start',
               tool: toolCall.function.name,
@@ -926,7 +937,7 @@ export class SingleAgent {
         durationMs: Date.now() - startTime,
         model: resolvedModel,
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       indicator.stop();
       const errorMsg = error instanceof Error ? error.message : String(error);
       taskSession.finish('error', errorMsg);

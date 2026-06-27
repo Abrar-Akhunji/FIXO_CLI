@@ -98,9 +98,10 @@ export function getBranchPoint(cwd: string): string {
   try {
     const mergeBase = execSync('git merge-base HEAD main', { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (mergeBase) return mergeBase;
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      console.warn(`[Debug Warning] Failed to get branch point: ${error.message || error}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[Debug Warning] Failed to get branch point: ${msg}`);
     }
   }
   return 'HEAD';
@@ -117,9 +118,10 @@ export function getModifiedFiles(cwd: string, branchPoint: string): string[] {
       .map(f => f.trim())
       .filter(Boolean);
     return files;
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      console.warn(`[Debug Warning] Failed to get modified files: ${error.message || error}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[Debug Warning] Failed to get modified files: ${msg}`);
     }
     return [];
   }
@@ -186,9 +188,10 @@ ${FILE_WRITING_RULES_BLOCK}`;
               docFiles.add(f.path);
             }
           }
-        } catch (error: any) {
+        } catch (error: unknown) {
           if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-            console.warn(`[Debug Warning] Failed to read file ${f.path} during doc partitioning: ${error.message || error}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            console.warn(`[Debug Warning] Failed to read file ${f.path} during doc partitioning: ${msg}`);
           }
         }
       }
@@ -204,9 +207,10 @@ ${FILE_WRITING_RULES_BLOCK}`;
         diffCmd = ['diff', 'HEAD'];
       }
       diffContent = execSync(`git ${diffCmd.join(' ')}`, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-        console.warn(`[Debug Warning] Failed to run git diff in reviewer partition: ${error.message || error}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Debug Warning] Failed to run git diff in reviewer partition: ${msg}`);
       }
     }
     systemPrompt = `You are the FixO Reviewer Agent. Your job is to audit code modifications.
@@ -290,9 +294,10 @@ export class WorkerAgent {
           relevantFacts.map(f => `- ${f}`).join('\n')
         );
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-        console.warn(`[Debug Warning] Failed to retrieve relevant memory facts: ${error.message || error}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Debug Warning] Failed to retrieve relevant memory facts: ${msg}`);
       }
     }
 
@@ -341,9 +346,10 @@ export class WorkerAgent {
             ``
           );
           pinnedBytes += contentBytes;
-        } catch (error: any) {
+        } catch (error: unknown) {
           if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-            console.warn(`[Debug Warning] Failed to load context file ${filePath}: ${error.message || error}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            console.warn(`[Debug Warning] Failed to load context file ${filePath}: ${msg}`);
           }
         }
       }

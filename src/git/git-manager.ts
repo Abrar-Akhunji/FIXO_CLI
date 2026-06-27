@@ -336,8 +336,9 @@ export class GitManager {
       } else {
         console.log(`${colors.dim}  ⏪ Rollback: agent-touched files were already clean.${colors.reset}`);
       }
-    } catch (error: any) {
-      console.log(`${colors.yellow}  ⚠ Failed to discard targeted changes: ${error.message || error}${colors.reset}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`${colors.yellow}  ⚠ Failed to discard targeted changes: ${msg}${colors.reset}`);
     }
   }
 
@@ -355,8 +356,9 @@ export class GitManager {
       execFileSync('git', ['checkout', '--', '.'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
       execFileSync('git', ['clean', '-fd'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
       console.log(`${colors.green}  ⏪ Discarded ALL uncommitted workspace changes (explicit user request).${colors.reset}`);
-    } catch (error: any) {
-      console.log(`${colors.yellow}  ⚠ Failed to discard uncommitted changes: ${error.message || error}${colors.reset}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`${colors.yellow}  ⚠ Failed to discard uncommitted changes: ${msg}${colors.reset}`);
     }
   }
 
@@ -392,8 +394,9 @@ export class GitManager {
 
       console.log(`${colors.green}  📸 Snapshot committed ${colors.bold}${hash}${colors.reset}${colors.green}: fixo-snapshot: ${safeLabel}${colors.reset}`);
       return hash;
-    } catch (error: any) {
-      console.log(`${colors.yellow}  ⚠ Snapshot failed: ${(error.message || String(error)).slice(0, 80)}${colors.reset}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`${colors.yellow}  ⚠ Snapshot failed: ${msg.slice(0, 80)}${colors.reset}`);
       return null;
     }
   }

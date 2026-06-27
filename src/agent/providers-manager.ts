@@ -224,7 +224,10 @@ function encryptKey(key: string): string {
 function decryptKey(val: string): string {
   if (!val.startsWith('ENC:')) return val;
   const parts = val.split(':');
-  if (parts.length !== 4) return val;
+  if (parts.length !== 4) {
+    console.warn('[FixO] providers.json: malformed ENC entry — removing this key. Run /providers remove and re-add it.');
+    throw new Error('Malformed encrypted key entry in providers.json');
+  }
   const iv = Buffer.from(parts[1], 'hex');
   const authTag = Buffer.from(parts[2], 'hex');
   const encrypted = parts[3];
@@ -234,8 +237,12 @@ function decryptKey(val: string): string {
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
     return decrypted;
-  } catch (err) {
-    return val;
+  } catch {
+    console.warn(
+      '[FixO] Failed to decrypt a stored API key. Your ~/.fixocli/providers.json may be corrupted\n' +
+      '       or the machine key has changed. Run: /providers remove <name>, then re-add the key.',
+    );
+    throw new Error('AES-256-GCM decryption failed — corrupted providers.json or rotated machine key');
   }
 }
 

@@ -20,9 +20,10 @@ export function detectProjectFacts(cwd: string): ProjectFacts {
   if (fs.existsSync(packageJson)) {
     try {
       scripts = JSON.parse(fs.readFileSync(packageJson, 'utf-8')).scripts ?? {};
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-        console.warn(`[Debug Warning] Failed to parse package.json scripts: ${error.message || error}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Debug Warning] Failed to parse package.json scripts: ${msg}`);
       }
       scripts = {};
     }
@@ -48,22 +49,27 @@ export function detectProjectFacts(cwd: string): ProjectFacts {
 
 import { colors } from './ui/colors.js';
 
-// Lazy-loaded SQLite to suppress Node.js experimental warning at module scope.
-// The module is loaded on first call to getDb() rather than at import time.
-let dbInstance: any = null;
+/** Minimal interface for the subset of Node.js built-in SQLite API we use. */
+interface DatabaseSync {
+  exec(sql: string): void;
+  prepare(sql: string): { all(...args: unknown[]): unknown[]; run(...args: unknown[]): void; get(...args: unknown[]): unknown };
+  close?(): void;
+}
+
+let dbInstance: DatabaseSync | null = null;
 let lastCwd = '';
 
-let _DatabaseSyncCtor: any = null;
-function getDatabaseSync(): any {
+let _DatabaseSyncCtor: (new (path: string) => DatabaseSync) | null = null;
+function getDatabaseSync(): new (path: string) => DatabaseSync {
   if (!_DatabaseSyncCtor) {
     const _require = createRequire(import.meta.url);
     const sqlite = _require('node:sqlite');
     _DatabaseSyncCtor = sqlite.DatabaseSync;
   }
-  return _DatabaseSyncCtor;
+  return _DatabaseSyncCtor!;
 }
 
-export function getDb(cwd: string): any {
+export function getDb(cwd: string): DatabaseSync {
   const dir = memoryDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   const dbPath = path.join(dir, 'memory.db');
@@ -74,10 +80,11 @@ export function getDb(cwd: string): any {
 
   if (dbInstance) {
     try {
-      (dbInstance as any).close?.();
-    } catch (error: any) {
+      dbInstance.close?.();
+    } catch (error: unknown) {
       if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-        console.warn(`[Debug Warning] Failed to close database instance: ${error.message || error}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Debug Warning] Failed to close database instance: ${msg}`);
       }
     }
   }
@@ -245,9 +252,10 @@ export async function retrieveRelevantFacts(
           if (row.embedding) {
             try {
               factEmbedding = JSON.parse(row.embedding);
-            } catch (error: any) {
+            } catch (error: unknown) {
               if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-                console.warn(`[Debug Warning] Failed to parse fact embedding JSON for ID ${row.id}: ${error.message || error}`);
+                const msg = error instanceof Error ? error.message : String(error);
+                console.warn(`[Debug Warning] Failed to parse fact embedding JSON for ID ${row.id}: ${msg}`);
               }
             }
           }
@@ -347,9 +355,10 @@ export function readAllowRules(cwd: string): { commands: string[] } {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as { commands?: string[] };
     return { commands: Array.isArray(parsed.commands) ? parsed.commands.filter(Boolean) : [] };
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      console.warn(`[Debug Warning] Failed to read or parse allow-rules.json from ${file}: ${error.message || error}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`[Debug Warning] Failed to read or parse allow-rules.json from ${file}: ${msg}`);
     }
     return { commands: [] };
   }

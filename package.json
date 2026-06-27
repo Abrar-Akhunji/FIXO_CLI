@@ -12,14 +12,20 @@
     "dist/",
     "vendor/",
     "scripts/check-vendor-wasm.js",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
+  "exports": {
+    ".": "./dist/index.js"
+  },
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test src/__tests__/*.test.ts",
     "lint": "eslint src --max-warnings=0",
     "check:vendor": "node scripts/check-vendor-wasm.js",
+    "graphify:update": "graphify update . 2>/dev/null || echo 'Graphify not installed — run: pipx install graphifyy'",
+    "postinstall": "node -e \"var v=process.version.match(/^v(\\d+)/);if(!v||+v[1]<20){console.error('\\n\u274c FixO CLI requires Node.js >= 20.0.0 (current: '+process.version+')');process.exit(1)}\" && npm run graphify:update",
     "prepack": "npm run check:vendor",
     "prepublishOnly": "npm run build && npm run check:vendor"
   },

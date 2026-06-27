@@ -64,7 +64,7 @@ function cols(): number {
   return process.stdout.columns ?? 100;
 }
 
-function safeWrite(s: string): void {
+export function safeWrite(s: string): void {
   try {
     process.stdout.write(s);
   } catch {
@@ -72,7 +72,7 @@ function safeWrite(s: string): void {
   }
 }
 
-function safeWriteLine(s: string): void {
+export function safeWriteLine(s: string): void {
   safeWrite(s + '\n');
 }
 
@@ -266,11 +266,27 @@ export function renderRoutingBanner(routingType: string, reason: string): void {
 
 /* ──────────────────────── Thinking indicator ──────────────────────── */
 
-const SPINNER_FRAMES: ReadonlyArray<string> = ['●', '◉', '○', '◉'];
+const LAVA_GLOW = '\x1b[38;2;255;160;60m';
+
+const FIXO_PULSE_FRAMES: ReadonlyArray<string> = [
+  `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${LAVA_GLOW}◉${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${C.LAVA}●${C.RESET} ${LAVA_GLOW}◉${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${C.LAVA}●${C.RESET} ${LAVA_GLOW}◉${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.LAVA}●${C.RESET} ${LAVA_GLOW}◉${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.LAVA}●${C.RESET} ${LAVA_GLOW}◉${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.LAVA}●${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${LAVA_GLOW}◉${C.RESET} ${C.LAVA}●${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${LAVA_GLOW}◉${C.RESET} ${C.LAVA}●${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${C.SNOW4}•${C.RESET} ${LAVA_GLOW}◉${C.RESET} ${C.LAVA}●${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
+  `${LAVA_GLOW}◉${C.RESET} ${C.LAVA}●${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
+];
 let spinnerTimer: NodeJS.Timeout | null = null;
 let spinnerFrame = 0;
 
 /**
+ * @deprecated Use the new LoadingAnimation class from `loading-animation.ts` instead.
+ * 
  * Start (or stop) a pulsing lava dot that signals the agent
  * is thinking. Uses a 400ms tick. Safe to call repeatedly —
  * the timer is a module-scoped singleton, so the indicator
@@ -280,13 +296,13 @@ let spinnerFrame = 0;
 export function renderThinkingIndicator(active: boolean): void {
   if (active) {
     if (spinnerTimer) return; // already running
-    safeWriteLine(`  ${C.LAVA}${SPINNER_FRAMES[0]!}${C.RESET} ${C.SNOW3}agent working…${C.RESET}`);
+    safeWriteLine(`  ${FIXO_PULSE_FRAMES[0]!}  ${C.SNOW3}agent working…${C.RESET}`);
     spinnerFrame = 0;
     spinnerTimer = setInterval(() => {
-      spinnerFrame = (spinnerFrame + 1) % SPINNER_FRAMES.length;
-      const ch = SPINNER_FRAMES[spinnerFrame]!;
-      safeWrite(`\r  ${C.LAVA}${ch}${C.RESET} ${C.SNOW3}agent working…${C.RESET}`);
-    }, 400);
+      spinnerFrame = (spinnerFrame + 1) % FIXO_PULSE_FRAMES.length;
+      const frame = FIXO_PULSE_FRAMES[spinnerFrame]!;
+      safeWrite(`\r  ${frame}  ${C.SNOW3}agent working…${C.RESET}`);
+    }, 80);
   } else {
     if (spinnerTimer) {
       clearInterval(spinnerTimer);
@@ -297,6 +313,8 @@ export function renderThinkingIndicator(active: boolean): void {
 }
 
 /**
+ * @deprecated Use the new LoadingAnimation class from `loading-animation.ts` instead.
+ * 
  * A three-frame ASCII spinner for in-band task progress.
  *
  * Used by SingleAgent to show the user that the agent is working
@@ -307,18 +325,18 @@ export function renderThinkingIndicator(active: boolean): void {
 export class TaskStatusIndicator {
   private timer: NodeJS.Timeout | null = null;
   private frameIndex = 0;
-  private readonly frames = ['⠋', '⠙', '⠹'];
-  private readonly intervalMs = 300;
+  private readonly frames = FIXO_PULSE_FRAMES;
+  private readonly intervalMs = 80;
   private static readonly HINT = `${C.SNOW3}Press Escape to cancel${C.RESET}`;
 
   start(): void {
     if (this.timer) return;
-    safeWrite(`${C.LAVA}${this.frames[0]!}${C.RESET} agent working…  ${TaskStatusIndicator.HINT}`);
+    safeWrite(`${this.frames[0]!}  agent working…  ${TaskStatusIndicator.HINT}`);
     this.frameIndex = 0;
     this.timer = setInterval(() => {
       this.frameIndex = (this.frameIndex + 1) % this.frames.length;
-      const ch = this.frames[this.frameIndex]!;
-      safeWrite(`\r${C.LAVA}${ch}${C.RESET} agent working…  ${TaskStatusIndicator.HINT}`);
+      const frame = this.frames[this.frameIndex]!;
+      safeWrite(`\r${frame}  agent working…  ${TaskStatusIndicator.HINT}`);
     }, this.intervalMs);
   }
 
