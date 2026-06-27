@@ -21,10 +21,12 @@ const srcRoot = path.resolve(here, '..');
 const LEGACY_HOSTS = [
   'api.freellmapi.com',
   'https://api.freellmapi.com',
+  'freellm-liart.vercel.app',
+  'https://freellm-liart.vercel.app',
 ];
 
 test('DEFAULT_API_URL points at the production Vercel deployment over HTTPS', () => {
-  assert.equal(DEFAULT_API_URL, 'https://freellm-liart.vercel.app/v1');
+  assert.equal(DEFAULT_API_URL, 'https://freellm-for-fixo.vercel.app/v1');
   assert.ok(DEFAULT_API_URL.startsWith('https://'), 'must use HTTPS');
   assert.ok(DEFAULT_API_URL.endsWith('/v1'), 'must end with /v1');
 });
@@ -69,7 +71,7 @@ test('no source file (other than config.ts) embeds the canonical SaaS URL litera
   walk(srcRoot, (rel, contents) => {
     if (!rel.endsWith('.ts')) return;
     if (exemptions.has(rel)) return;
-    if (contents.includes('freellm-liart.vercel.app')) {
+    if (contents.includes('freellm-for-fixo.vercel.app')) {
       offenders.push(rel);
     }
   });

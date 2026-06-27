@@ -72,7 +72,7 @@ test('direct mode — chat() routes to OpenAI base URL, never to FreeLLMAPI prox
     );
     for (const url of seenUrls) {
       assert.equal(
-        url.includes('freellm-liart.vercel.app'),
+        url.includes('freellm-for-fixo.vercel.app'),
         false,
         `direct mode must never hit FreeLLMAPI proxy, saw: ${url}`,
       );

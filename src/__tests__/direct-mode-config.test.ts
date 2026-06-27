@@ -53,7 +53,7 @@ test('loadConfig — back-compat: pre-v1.1 config with FreeLLMAPI key is inferre
       path.join(cfgDir, 'config.json'),
       JSON.stringify({
         freellmapi_api_key: 'freellmapi-user-sk-legacy',
-        apiUrl: 'https://freellm-liart.vercel.app/v1',
+        apiUrl: 'https://freellm-for-fixo.vercel.app/v1',
         defaultModel: 'auto',
         _firstRunComplete: true,
       }, null, 2),

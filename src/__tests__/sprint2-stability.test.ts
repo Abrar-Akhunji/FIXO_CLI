@@ -24,7 +24,7 @@ test('Sprint 2 Heuristics and Intent Classification', async (t) => {
 
 test('Sprint 2 Conversation Pruning and Centralized Defaults', async (t) => {
   await t.test('DEFAULT_API_URL is configured', () => {
-    assert.equal(DEFAULT_API_URL, 'https://freellm-liart.vercel.app/v1');
+    assert.equal(DEFAULT_API_URL, 'https://freellm-for-fixo.vercel.app/v1');
   });
 
   await t.test('ConversationManager turn-aware pruning retains complete turns', () => {

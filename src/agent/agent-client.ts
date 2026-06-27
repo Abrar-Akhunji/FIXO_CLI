@@ -19,7 +19,7 @@ import {
   isMidStreamResumable,
   StreamResumeExhaustedError,
 } from './stream-glue.js';
-import { DEFAULT_API_URL, type ModelRoutingConfig } from '../config.js';
+import { DEFAULT_API_URL, loadConfig, type ModelRoutingConfig } from '../config.js';
 import { recordTelemetry, telemetry } from './telemetry.js';
 import { getProviderKeyVault } from '../runtime/credential-vault.js';
 import { extractTextFromContent } from '../shared/content.js';
@@ -291,10 +291,16 @@ export class AgentClient {
     modelRouting?: ModelRoutingConfig,
   ) {
     this.baseUrl = getValidatedApiUrl(process.env.FIXO_API_URL) || getValidatedApiUrl(apiUrl) || BASE_URL;
-    this.apiKey = apiKey;
     this.verbose = verbose;
     this.providerMode = providerMode;
     this.modelRouting = modelRouting ?? {};
+
+    if (this.providerMode === 'proxy') {
+      const config = loadConfig();
+      this.apiKey = apiKey || config.freellmapi_api_key || (config as any).freellmapi || '';
+    } else {
+      this.apiKey = apiKey;
+    }
   }
 
   /**

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { PolicyProfile } from './runtime/policy.js';
 
-export const DEFAULT_API_URL = 'https://freellm-liart.vercel.app/v1';
+export const DEFAULT_API_URL = 'https://freellm-for-fixo.vercel.app/v1';
 
 /**
  * How the CLI authenticates against an LLM backend.

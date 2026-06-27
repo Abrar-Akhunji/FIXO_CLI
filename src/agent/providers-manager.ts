@@ -733,46 +733,6 @@ export const ProvidersManager = {
       throw new Error('No models returned from API or failed to parse response');
     }
 
-    // Verify compute access (billing) for OpenAI-compatible providers
-    if (def.openAICompat) {
-      try {
-        const testModel = ids.find(id => def.models.includes(id)) || ids[0];
-        const chatResp = await fetch(`${def.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            ...headers,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: testModel,
-            messages: [{ role: 'user', content: 'hello' }],
-            max_tokens: 1
-          }),
-          signal: AbortSignal.timeout(8000),
-        });
-        
-        if (!chatResp.ok) {
-          let chatDetail = '';
-          try {
-            const body = await chatResp.json();
-            if (body && typeof body === 'object') {
-              const errObj = (body as any).error;
-              chatDetail = errObj?.message || (body as any).message || JSON.stringify(body);
-            }
-          } catch {
-            try { chatDetail = await chatResp.text(); } catch {}
-          }
-          const chatErrMsg = chatDetail ? `: ${chatDetail.slice(0, 150)}` : '';
-          throw new Error(`Billing/Compute verification failed (${chatResp.status})${chatErrMsg}`);
-        }
-      } catch (err: any) {
-        if (err.message.includes('Billing/Compute verification failed')) {
-          throw err;
-        }
-        throw new Error(`Failed to verify compute access: ${err?.message ?? err}`);
-      }
-    }
-
     // Cache the successfully retrieved models
     const now = new Date().toISOString();
     const store = loadModelsCache();
