@@ -22,14 +22,17 @@
  * share the same in-flight `init()` promise.
  */
 
-import * as ParserModule from 'web-tree-sitter';
-import { existsSync, statSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { extractShellTokens, isCommandSafeShellFallback } from './parsers/shell.js';
-import { extractSymbols as regexExtractSymbols } from './parsers/symbols.js';
-import { extractImports as regexExtractImports } from './parsers/imports.js';
+import * as ParserModule from "web-tree-sitter";
+import { existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  extractShellTokens,
+  isCommandSafeShellFallback,
+} from "./parsers/shell.js";
+import { extractSymbols as regexExtractSymbols } from "./parsers/symbols.js";
+import { extractImports as regexExtractImports } from "./parsers/imports.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const requireFromHere = createRequire(import.meta.url);
@@ -53,14 +56,14 @@ const requireFromHere = createRequire(import.meta.url);
  */
 function resolveVendorWasm(fileName: string): string | null {
   const candidates = [
-    path.resolve(__dirname, '../../vendor', fileName),
-    path.resolve(__dirname, '../vendor', fileName),
+    path.resolve(__dirname, "../../vendor", fileName),
+    path.resolve(__dirname, "../vendor", fileName),
   ];
 
-  if (fileName === 'tree-sitter.wasm') {
+  if (fileName === "tree-sitter.wasm") {
     try {
-      const pkg = requireFromHere.resolve('web-tree-sitter/package.json');
-      candidates.push(path.resolve(path.dirname(pkg), 'tree-sitter.wasm'));
+      const pkg = requireFromHere.resolve("web-tree-sitter/package.json");
+      candidates.push(path.resolve(path.dirname(pkg), "tree-sitter.wasm"));
     } catch {
       // web-tree-sitter not resolvable from this module — ignore.
     }
@@ -107,38 +110,41 @@ interface TreeSitterNode {
   childForFieldName(name: string): TreeSitterNode | null;
 }
 
-const ParserCtor = (ParserModule as unknown as { Parser: TreeSitterParserAPI }).Parser;
-const LanguageCtor = (ParserModule as unknown as { Language: TreeSitterLanguageAPI }).Language;
+const ParserCtor = (ParserModule as unknown as { Parser: TreeSitterParserAPI })
+  .Parser;
+const LanguageCtor = (
+  ParserModule as unknown as { Language: TreeSitterLanguageAPI }
+).Language;
 
 // ──── Public types ────────────────────────────────────────────────
 
 export type LanguageId =
-  | 'typescript'
-  | 'javascript'
-  | 'python'
-  | 'go'
-  | 'rust'
-  | 'bash'
-  | 'json'
-  | 'markdown'
-  | 'generic';
+  | "typescript"
+  | "javascript"
+  | "python"
+  | "go"
+  | "rust"
+  | "bash"
+  | "json"
+  | "markdown"
+  | "generic";
 
 export interface SymbolInfo {
   name: string;
   kind:
-    | 'class'
-    | 'function'
-    | 'interface'
-    | 'type'
-    | 'const'
-    | 'let'
-    | 'var'
-    | 'enum'
-    | 'method'
-    | 'variable'
-    | 'field'
-    | 'module'
-    | 'unknown';
+    | "class"
+    | "function"
+    | "interface"
+    | "type"
+    | "const"
+    | "let"
+    | "var"
+    | "enum"
+    | "method"
+    | "variable"
+    | "field"
+    | "module"
+    | "unknown";
   line: number;
   endLine: number;
   exported: boolean;
@@ -163,7 +169,7 @@ export interface ParserInitResult {
 }
 
 export interface ParserAdapter {
-  readonly name: 'tree-sitter' | 'regex';
+  readonly name: "tree-sitter" | "regex";
   readonly supported: boolean;
 
   /** Performs any one-time async work (e.g. loading WASM grammars). */
@@ -196,25 +202,35 @@ export interface ParserAdapter {
 /** Maps a file extension (including the leading dot) to a `LanguageId`. */
 export function languageIdFromExtension(ext: string): LanguageId {
   const lower = ext.toLowerCase();
-  if (lower === '.ts' || lower === '.tsx' || lower === '.mts' || lower === '.cts') {
-    return 'typescript';
+  if (
+    lower === ".ts" ||
+    lower === ".tsx" ||
+    lower === ".mts" ||
+    lower === ".cts"
+  ) {
+    return "typescript";
   }
-  if (lower === '.js' || lower === '.jsx' || lower === '.mjs' || lower === '.cjs') {
-    return 'javascript';
+  if (
+    lower === ".js" ||
+    lower === ".jsx" ||
+    lower === ".mjs" ||
+    lower === ".cjs"
+  ) {
+    return "javascript";
   }
-  if (lower === '.py' || lower === '.pyi') return 'python';
-  if (lower === '.go') return 'go';
-  if (lower === '.rs') return 'rust';
-  if (lower === '.sh' || lower === '.bash') return 'bash';
-  if (lower === '.json') return 'json';
-  if (lower === '.md' || lower === '.markdown') return 'markdown';
-  return 'generic';
+  if (lower === ".py" || lower === ".pyi") return "python";
+  if (lower === ".go") return "go";
+  if (lower === ".rs") return "rust";
+  if (lower === ".sh" || lower === ".bash") return "bash";
+  if (lower === ".json") return "json";
+  if (lower === ".md" || lower === ".markdown") return "markdown";
+  return "generic";
 }
 
 // ──── TreeSitterAdapter ──────────────────────────────────────────
 
 export class TreeSitterAdapter implements ParserAdapter {
-  public readonly name = 'tree-sitter' as const;
+  public readonly name = "tree-sitter" as const;
   public supported = true;
   private parser: TreeSitterParser | null = null;
   private initialised = false;
@@ -231,27 +247,29 @@ export class TreeSitterAdapter implements ParserAdapter {
     this.initialised = true;
 
     try {
-      const coreWasm = resolveVendorWasm('tree-sitter.wasm');
+      const coreWasm = resolveVendorWasm("tree-sitter.wasm");
       if (!coreWasm) {
         throw new Error(
-          'tree-sitter.wasm not found in vendor/ or web-tree-sitter package',
+          "tree-sitter.wasm not found in vendor/ or web-tree-sitter package",
         );
       }
-      const bashWasm = resolveVendorWasm('tree-sitter-bash.wasm');
+      const bashWasm = resolveVendorWasm("tree-sitter-bash.wasm");
       if (!bashWasm) {
-        throw new Error('tree-sitter-bash.wasm not found in vendor/');
+        throw new Error("tree-sitter-bash.wasm not found in vendor/");
       }
 
       await ParserCtor.init({
         locateFile: (scriptName: string): string => {
-          if (scriptName === 'tree-sitter.wasm') return coreWasm;
+          if (scriptName === "tree-sitter.wasm") return coreWasm;
           return resolveVendorWasm(scriptName) ?? scriptName;
         },
       });
       const Bash = await LanguageCtor.load(bashWasm);
-      this.parser = new (ParserCtor as unknown as { new (): TreeSitterParser })();
+      this.parser = new (
+        ParserCtor as unknown as { new (): TreeSitterParser }
+      )();
       this.parser.setLanguage(Bash);
-      this.languages.set('bash', Bash);
+      this.languages.set("bash", Bash);
       this.supported = true;
       return { ok: true };
     } catch (err: unknown) {
@@ -307,7 +325,7 @@ export class TreeSitterAdapter implements ParserAdapter {
       const out = extractSymbolsFromTree(tree.rootNode, language);
       // Restore the parser to its eagerly-loaded bash grammar so the
       // command-parser path stays correct after a symbol extraction.
-      const bash = this.languages.get('bash');
+      const bash = this.languages.get("bash");
       if (bash) this.parser.setLanguage(bash);
       // Empty result on a successful parse usually means the source
       // had no top-level declarations \u2014 but it's also the failure
@@ -345,14 +363,14 @@ export class TreeSitterAdapter implements ParserAdapter {
     const commandNodes = findCommandNodes(tree.rootNode);
     const out: ParsedCommand[] = [];
     for (const node of commandNodes) {
-      let binary = '';
+      let binary = "";
       const args: string[] = [];
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i);
         const t = child.type;
-        if (t === 'command_name') {
+        if (t === "command_name") {
           binary = child.text.trim();
-        } else if (t === 'word' || t === 'string' || t === 'concatenation') {
+        } else if (t === "word" || t === "string" || t === "concatenation") {
           if (!binary) binary = child.text.trim();
           else args.push(child.text.trim());
         }
@@ -373,7 +391,7 @@ export class TreeSitterAdapter implements ParserAdapter {
 
 function findCommandNodes(node: TreeSitterNode): TreeSitterNode[] {
   const list: TreeSitterNode[] = [];
-  if (node.type === 'command') list.push(node);
+  if (node.type === "command") list.push(node);
   for (let i = 0; i < node.childCount; i++) {
     list.push(...findCommandNodes(node.child(i)));
   }
@@ -389,13 +407,20 @@ function findCommandNodes(node: TreeSitterNode): TreeSitterNode[] {
  */
 function wasmFileForLanguage(lang: LanguageId): string | null {
   switch (lang) {
-    case 'typescript': return 'tree-sitter-typescript.wasm';
-    case 'javascript': return 'tree-sitter-javascript.wasm';
-    case 'python':     return 'tree-sitter-python.wasm';
-    case 'go':         return 'tree-sitter-go.wasm';
-    case 'rust':       return 'tree-sitter-rust.wasm';
-    case 'bash':       return 'tree-sitter-bash.wasm';
-    default:           return null;
+    case "typescript":
+      return "tree-sitter-typescript.wasm";
+    case "javascript":
+      return "tree-sitter-javascript.wasm";
+    case "python":
+      return "tree-sitter-python.wasm";
+    case "go":
+      return "tree-sitter-go.wasm";
+    case "rust":
+      return "tree-sitter-rust.wasm";
+    case "bash":
+      return "tree-sitter-bash.wasm";
+    default:
+      return null;
   }
 }
 
@@ -413,14 +438,17 @@ function wasmFileForLanguage(lang: LanguageId): string | null {
  * The function caps at 100 symbols per file to mirror the regex
  * extractor and protect downstream context budgets.
  */
-function extractSymbolsFromTree(root: TreeSitterNode, language: LanguageId): SymbolInfo[] {
+function extractSymbolsFromTree(
+  root: TreeSitterNode,
+  language: LanguageId,
+): SymbolInfo[] {
   const out: SymbolInfo[] = [];
   const seen = new Set<string>();
   const MAX = 100;
 
   const push = (
     name: string | undefined,
-    kind: SymbolInfo['kind'],
+    kind: SymbolInfo["kind"],
     node: TreeSitterNode,
     exported: boolean,
   ): void => {
@@ -439,11 +467,15 @@ function extractSymbolsFromTree(root: TreeSitterNode, language: LanguageId): Sym
    *  grammar exposes the name via a positional child instead of a
    *  named field. */
   const firstIdentText = (node: TreeSitterNode): string | undefined => {
-    const named = node.childForFieldName('name');
+    const named = node.childForFieldName("name");
     if (named) return named.text;
     for (let i = 0; i < node.namedChildCount; i++) {
       const c = node.namedChild(i);
-      if (c.type === 'identifier' || c.type === 'type_identifier' || c.type === 'property_identifier') {
+      if (
+        c.type === "identifier" ||
+        c.type === "type_identifier" ||
+        c.type === "property_identifier"
+      ) {
         return c.text;
       }
     }
@@ -453,78 +485,122 @@ function extractSymbolsFromTree(root: TreeSitterNode, language: LanguageId): Sym
   const hasPub = (node: TreeSitterNode): boolean => {
     for (let i = 0; i < node.namedChildCount; i++) {
       const c = node.namedChild(i);
-      if (c.type === 'visibility_modifier' && c.text.startsWith('pub')) return true;
+      if (c.type === "visibility_modifier" && c.text.startsWith("pub"))
+        return true;
     }
     return false;
   };
 
-  const visitTopLevel = (node: TreeSitterNode, exportedFromWrapper: boolean): void => {
+  const visitTopLevel = (
+    node: TreeSitterNode,
+    exportedFromWrapper: boolean,
+  ): void => {
     const t = node.type;
-    if (language === 'typescript' || language === 'javascript') {
+    if (language === "typescript" || language === "javascript") {
       // Unwrap `export_statement` → emit the inner declaration as exported.
-      if (t === 'export_statement') {
+      if (t === "export_statement") {
         for (let i = 0; i < node.namedChildCount; i++) {
           visitTopLevel(node.namedChild(i), true);
         }
         return;
       }
-      if (t === 'class_declaration')    return push(firstIdentText(node), 'class', node, exportedFromWrapper);
-      if (t === 'interface_declaration') return push(firstIdentText(node), 'interface', node, exportedFromWrapper);
-      if (t === 'function_declaration') return push(firstIdentText(node), 'function', node, exportedFromWrapper);
-      if (t === 'function_signature')   return push(firstIdentText(node), 'function', node, exportedFromWrapper);
-      if (t === 'enum_declaration')     return push(firstIdentText(node), 'enum', node, exportedFromWrapper);
-      if (t === 'type_alias_declaration') return push(firstIdentText(node), 'type', node, exportedFromWrapper);
-      if (t === 'lexical_declaration' || t === 'variable_declaration') {
+      if (t === "class_declaration")
+        return push(firstIdentText(node), "class", node, exportedFromWrapper);
+      if (t === "interface_declaration")
+        return push(
+          firstIdentText(node),
+          "interface",
+          node,
+          exportedFromWrapper,
+        );
+      if (t === "function_declaration")
+        return push(
+          firstIdentText(node),
+          "function",
+          node,
+          exportedFromWrapper,
+        );
+      if (t === "function_signature")
+        return push(
+          firstIdentText(node),
+          "function",
+          node,
+          exportedFromWrapper,
+        );
+      if (t === "enum_declaration")
+        return push(firstIdentText(node), "enum", node, exportedFromWrapper);
+      if (t === "type_alias_declaration")
+        return push(firstIdentText(node), "type", node, exportedFromWrapper);
+      if (t === "lexical_declaration" || t === "variable_declaration") {
         // `const a = 1, b = 2;` → walk declarators.
         for (let i = 0; i < node.namedChildCount; i++) {
           const decl = node.namedChild(i);
-          if (decl.type === 'variable_declarator') {
-            push(firstIdentText(decl), 'const', decl, exportedFromWrapper);
+          if (decl.type === "variable_declarator") {
+            push(firstIdentText(decl), "const", decl, exportedFromWrapper);
           }
         }
         return;
       }
       return;
     }
-    if (language === 'python') {
-      if (t === 'class_definition' || t === 'function_definition' || t === 'decorated_definition') {
+    if (language === "python") {
+      if (
+        t === "class_definition" ||
+        t === "function_definition" ||
+        t === "decorated_definition"
+      ) {
         // Decorated wraps the real definition as a named child.
         let target = node;
-        if (t === 'decorated_definition') {
+        if (t === "decorated_definition") {
           for (let i = 0; i < node.namedChildCount; i++) {
             const c = node.namedChild(i);
-            if (c.type === 'class_definition' || c.type === 'function_definition') {
+            if (
+              c.type === "class_definition" ||
+              c.type === "function_definition"
+            ) {
               target = c;
               break;
             }
           }
         }
         const name = firstIdentText(target);
-        const kind: SymbolInfo['kind'] = target.type === 'class_definition' ? 'class' : 'function';
-        push(name, kind, target, name !== undefined && !name.startsWith('_'));
+        const kind: SymbolInfo["kind"] =
+          target.type === "class_definition" ? "class" : "function";
+        push(name, kind, target, name !== undefined && !name.startsWith("_"));
       }
       return;
     }
-    if (language === 'go') {
-      const isUpper = (s: string | undefined): boolean => !!s && s[0] >= 'A' && s[0] <= 'Z';
-      if (t === 'function_declaration' || t === 'method_declaration') {
+    if (language === "go") {
+      const isUpper = (s: string | undefined): boolean =>
+        !!s && s[0] >= "A" && s[0] <= "Z";
+      if (t === "function_declaration" || t === "method_declaration") {
         const name = firstIdentText(node);
-        push(name, 'function', node, isUpper(name));
+        push(name, "function", node, isUpper(name));
         return;
       }
-      if (t === 'type_declaration' || t === 'var_declaration' || t === 'const_declaration') {
+      if (
+        t === "type_declaration" ||
+        t === "var_declaration" ||
+        t === "const_declaration"
+      ) {
         for (let i = 0; i < node.namedChildCount; i++) {
           const spec = node.namedChild(i);
           const name = firstIdentText(spec);
-          let kind: SymbolInfo['kind'] = 'type';
-          if (t === 'var_declaration') kind = 'var';
-          else if (t === 'const_declaration') kind = 'const';
-          else if (spec.type === 'type_spec') {
+          let kind: SymbolInfo["kind"] = "type";
+          if (t === "var_declaration") kind = "var";
+          else if (t === "const_declaration") kind = "const";
+          else if (spec.type === "type_spec") {
             // Look at the type definition body to refine the kind.
             for (let j = 0; j < spec.namedChildCount; j++) {
               const def = spec.namedChild(j);
-              if (def.type === 'struct_type') { kind = 'type'; break; }
-              if (def.type === 'interface_type') { kind = 'interface'; break; }
+              if (def.type === "struct_type") {
+                kind = "type";
+                break;
+              }
+              if (def.type === "interface_type") {
+                kind = "interface";
+                break;
+              }
             }
           }
           push(name, kind, spec, isUpper(name));
@@ -533,17 +609,25 @@ function extractSymbolsFromTree(root: TreeSitterNode, language: LanguageId): Sym
       }
       return;
     }
-    if (language === 'rust') {
+    if (language === "rust") {
       const exported = hasPub(node);
-      if (t === 'function_item')   return push(firstIdentText(node), 'function', node, exported);
-      if (t === 'struct_item')     return push(firstIdentText(node), 'type', node, exported);
-      if (t === 'enum_item')       return push(firstIdentText(node), 'enum', node, exported);
-      if (t === 'trait_item')      return push(firstIdentText(node), 'interface', node, exported);
-      if (t === 'mod_item')        return push(firstIdentText(node), 'module', node, exported);
-      if (t === 'const_item')      return push(firstIdentText(node), 'const', node, exported);
-      if (t === 'static_item')     return push(firstIdentText(node), 'const', node, exported);
+      if (t === "function_item")
+        return push(firstIdentText(node), "function", node, exported);
+      if (t === "struct_item")
+        return push(firstIdentText(node), "type", node, exported);
+      if (t === "enum_item")
+        return push(firstIdentText(node), "enum", node, exported);
+      if (t === "trait_item")
+        return push(firstIdentText(node), "interface", node, exported);
+      if (t === "mod_item")
+        return push(firstIdentText(node), "module", node, exported);
+      if (t === "const_item")
+        return push(firstIdentText(node), "const", node, exported);
+      if (t === "static_item")
+        return push(firstIdentText(node), "const", node, exported);
       // type_item → `type Alias = …;`
-      if (t === 'type_item')       return push(firstIdentText(node), 'type', node, exported);
+      if (t === "type_item")
+        return push(firstIdentText(node), "type", node, exported);
       return;
     }
   };
@@ -558,7 +642,7 @@ function extractSymbolsFromTree(root: TreeSitterNode, language: LanguageId): Sym
 // ──── RegexParserAdapter ─────────────────────────────────────────
 
 export class RegexParserAdapter implements ParserAdapter {
-  public readonly name = 'regex' as const;
+  public readonly name = "regex" as const;
   public supported = true;
 
   async init(): Promise<ParserInitResult> {
@@ -592,13 +676,13 @@ export class RegexParserAdapter implements ParserAdapter {
 interface FactoryState {
   parser: ParserAdapter | null;
   initPromise: Promise<ParserAdapter> | null;
-  force: 'tree-sitter' | 'regex' | 'auto';
+  force: "tree-sitter" | "regex" | "auto";
 }
 
 const STATE: FactoryState = {
   parser: null,
   initPromise: null,
-  force: 'auto',
+  force: "auto",
 };
 
 export class ParserFactory {
@@ -612,7 +696,7 @@ export class ParserFactory {
    * caller). `force = 'regex'` skips tree-sitter entirely.
    */
   static async getParser(
-    force: 'tree-sitter' | 'regex' | 'auto' = STATE.force,
+    force: "tree-sitter" | "regex" | "auto" = STATE.force,
   ): Promise<ParserAdapter> {
     if (STATE.parser && force === STATE.force) {
       return STATE.parser;
@@ -624,15 +708,17 @@ export class ParserFactory {
     // First-time (or force-change) initialisation.
     const promise = (async (): Promise<ParserAdapter> => {
       let adapter: ParserAdapter;
-      if (force === 'regex') {
+      if (force === "regex") {
         adapter = new RegexParserAdapter();
       } else {
         const ts = new TreeSitterAdapter();
         const result = await ts.init();
         if (result.ok) {
           adapter = ts;
-        } else if (force === 'tree-sitter') {
-          throw new Error(`Tree-Sitter initialisation failed: ${result.reason ?? 'unknown'}`);
+        } else if (force === "tree-sitter") {
+          throw new Error(
+            `Tree-Sitter initialisation failed: ${result.reason ?? "unknown"}`,
+          );
         } else {
           adapter = new RegexParserAdapter();
           await adapter.init();
@@ -672,14 +758,14 @@ export class ParserFactory {
     }
     STATE.parser = null;
     STATE.initPromise = null;
-    STATE.force = 'auto';
+    STATE.force = "auto";
   }
 
   /**
    * Configures the factory's force policy. The next `getParser()` call
    * after this method will re-initialise with the new policy.
    */
-  static setForce(force: 'tree-sitter' | 'regex' | 'auto'): void {
+  static setForce(force: "tree-sitter" | "regex" | "auto"): void {
     if (STATE.force !== force) {
       STATE.force = force;
       STATE.parser = null;

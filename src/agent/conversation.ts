@@ -9,10 +9,10 @@
  *   5. Prunes old tool outputs to free space before full compaction
  */
 
-import type { ChatMessage, ChatContentBlock } from '../shared/types.js';
-import type { AgentClient } from './agent-client.js';
-import { countMessagesTokens, countTokens } from './tokenizer.js';
-import { ContextBudgetEnforcer } from './context-budget.js';
+import type { ChatMessage, ChatContentBlock } from "../shared/types.js";
+import type { AgentClient } from "./agent-client.js";
+import { countMessagesTokens, countTokens } from "./tokenizer.js";
+import { ContextBudgetEnforcer } from "./context-budget.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -68,7 +68,9 @@ const OUTPUT_TOKEN_RESERVATION = 8_000;
  * so callers that only care about how much room they have left for input
  * tokens (predictive gate, budget planner) can use the answer directly.
  */
-export function resolveModelContextLimit(model: string | undefined | null): number {
+export function resolveModelContextLimit(
+  model: string | undefined | null,
+): number {
   if (!model) return DEFAULT_CONTEXT_LIMIT - OUTPUT_TOKEN_RESERVATION;
   for (const [pattern, limit] of MODEL_CONTEXT_LIMITS) {
     if (pattern.test(model)) return limit - OUTPUT_TOKEN_RESERVATION;
@@ -133,7 +135,7 @@ export function sanitizeUserContent(text: string): string {
   if (!text) return text;
   return text.replace(
     /<\|(?:endoftext|im_start|im_end|fim_[a-zA-Z0-9_]+|user|assistant|system)\|>/gi,
-    '[SPECIAL_TOKEN_REMOVED]'
+    "[SPECIAL_TOKEN_REMOVED]",
   );
 }
 
@@ -144,16 +146,18 @@ export function sanitizeUserContent(text: string): string {
 export class ConversationManager {
   private history: ChatMessage[] = [];
   private maxTokenBudget: number;
-  private summary: string = '';
+  private summary: string = "";
   private contextLimit: number = DEFAULT_CONTEXT_LIMIT;
-  private _lastCompactionInfo: { messagesBefore: number; tokensFreed: number } | null = null;
+  private _lastCompactionInfo: {
+    messagesBefore: number;
+    tokensFreed: number;
+  } | null = null;
   /**
-   * When set (>0), `getTotalTokens()` returns this value instead of
-   * summing the history. Used by `--resume` so the restored session
-   * shows the same token count the user saw at save time. It is also
-   * used to cache the provider-reported total tokens for accurate UI.
+   * Represents exact tokens reported by the API that exceed our local
+   * heuristic estimation, or tokens consumed by parallel DAG sub-agents
+   * that aren't natively in this conversation's history.
    */
-  private tokenOverride: number = 0;
+  private additiveTokenSurcharge: number = 0;
   private lastSystemTokens: number = 0;
 
   constructor(maxTokenBudget: number = DEFAULT_MAX_TOKEN_BUDGET) {
@@ -184,7 +188,10 @@ export class ConversationManager {
   }
 
   /** Returns info about the last compaction (for UX display). */
-  getLastCompactionInfo(): { messagesBefore: number; tokensFreed: number } | null {
+  getLastCompactionInfo(): {
+    messagesBefore: number;
+    tokensFreed: number;
+  } | null {
     const info = this._lastCompactionInfo;
     this._lastCompactionInfo = null;
     return info;
@@ -217,21 +224,35 @@ export class ConversationManager {
    * Includes system prompt and summary tokens if known.
    */
   getTotalTokens(): number {
-    if (this.tokenOverride > 0) return this.tokenOverride;
     const historyTokens = this.history.reduce(
       (sum, msg) => sum + this.estimateMessageTokens(msg),
       0,
     );
     const summaryTokens = this.summary ? this.estimateTokens(this.summary) : 0;
-    return historyTokens + this.lastSystemTokens + summaryTokens;
+    return (
+      historyTokens +
+      this.lastSystemTokens +
+      summaryTokens +
+      this.additiveTokenSurcharge
+    );
   }
 
   /**
-   * Update the UI's understanding of our token usage by feeding back
-   * the exact count reported by the LLM provider.
+   * Synchronize the conversation's internal meter with the exact token
+   * total reported by the LLM API. Instead of a static override, it
+   * computes a surcharge so future turns organically add to this base.
    */
-  setProviderReportedTokens(tokens: number): void {
-    this.tokenOverride = Math.max(0, tokens);
+  syncProviderTokens(reportedTotal: number): void {
+    const base = this.getTotalTokens() - this.additiveTokenSurcharge;
+    this.additiveTokenSurcharge = Math.max(0, reportedTotal - base);
+  }
+
+  /**
+   * Directly append tokens to the surcharge (useful for parallel DAG
+   * executions whose tokens aren't represented in this history object).
+   */
+  addTokenSurcharge(tokens: number): void {
+    this.additiveTokenSurcharge += Math.max(0, tokens);
   }
 
   /**
@@ -249,7 +270,9 @@ export class ConversationManager {
   ): void {
     this.history = [...messages];
     this.summary = summary;
-    this.tokenOverride = Math.max(0, tokens);
+
+    const baseTokens = this.getTotalTokens() - this.additiveTokenSurcharge;
+    this.additiveTokenSurcharge = Math.max(0, tokens - baseTokens);
   }
 
   /**
@@ -260,7 +283,10 @@ export class ConversationManager {
     this.lastSystemTokens = this.estimateTokens(systemPrompt);
     // Explicitly recalculate from history rather than calling getTotalTokens()
     // to bypass tokenOverride, which may represent a stale provider report.
-    const historyTokens = this.history.reduce((sum, msg) => sum + this.estimateMessageTokens(msg), 0);
+    const historyTokens = this.history.reduce(
+      (sum, msg) => sum + this.estimateMessageTokens(msg),
+      0,
+    );
     const userTokens = this.estimateTokens(userMessage);
     const summaryTokens = this.summary ? this.estimateTokens(this.summary) : 0;
     return this.lastSystemTokens + summaryTokens + historyTokens + userTokens;
@@ -285,7 +311,10 @@ export class ConversationManager {
    * Returns a report describing the actions taken and the new total
    * token count.
    */
-  enforceBudget(maxTokens: number, model?: string | null): {
+  enforceBudget(
+    maxTokens: number,
+    model?: string | null,
+  ): {
     trimmed: boolean;
     report: {
       tokensBefore: number;
@@ -296,13 +325,16 @@ export class ConversationManager {
     };
   } {
     const enforcer = new ContextBudgetEnforcer(model);
-    const { messages, report } = enforcer.enforce(this.history, { maxTokens, model });
-    if (report.actions[0] !== 'none') {
+    const { messages, report } = enforcer.enforce(this.history, {
+      maxTokens,
+      model,
+    });
+    if (report.actions[0] !== "none") {
       this.history = messages;
-      this.tokenOverride = 0;
+      this.additiveTokenSurcharge = 0;
     }
     return {
-      trimmed: report.actions[0] !== 'none',
+      trimmed: report.actions[0] !== "none",
       report: {
         tokensBefore: report.tokensBefore,
         tokensAfter: report.tokensAfter,
@@ -323,8 +355,8 @@ export class ConversationManager {
    */
   addTurn(userMessage: string, assistantResponse: string): void {
     this.history.push(
-      { role: 'user', content: sanitizeUserContent(userMessage) },
-      { role: 'assistant', content: sanitizeUserContent(assistantResponse) },
+      { role: "user", content: sanitizeUserContent(userMessage) },
+      { role: "assistant", content: sanitizeUserContent(assistantResponse) },
     );
     this.pruneToFitBudget();
   }
@@ -335,11 +367,11 @@ export class ConversationManager {
    */
   addMessage(message: ChatMessage): void {
     let sanitizedContent: string | ChatContentBlock[] | null = null;
-    if (typeof message.content === 'string') {
+    if (typeof message.content === "string") {
       sanitizedContent = sanitizeUserContent(message.content);
     } else if (Array.isArray(message.content)) {
-      sanitizedContent = message.content.map(block => {
-        if (block.type === 'text') {
+      sanitizedContent = message.content.map((block) => {
+        if (block.type === "text") {
           return { ...block, text: sanitizeUserContent(block.text) };
         }
         return block;
@@ -368,7 +400,7 @@ export class ConversationManager {
     const msgs: ChatMessage[] = [];
     if (this.summary) {
       msgs.push({
-        role: 'assistant',
+        role: "assistant",
         content: `[Previous conversation context]\n\n${this.summary}`,
       });
     }
@@ -401,12 +433,15 @@ export class ConversationManager {
     ) {
       let nextUserIndex = -1;
       for (let i = 1; i < this.history.length; i++) {
-        if (this.history[i].role === 'user') {
+        if (this.history[i].role === "user") {
           nextUserIndex = i;
           break;
         }
       }
-      if (nextUserIndex !== -1 && (this.history.length - nextUserIndex) >= MIN_MESSAGES_TO_KEEP) {
+      if (
+        nextUserIndex !== -1 &&
+        this.history.length - nextUserIndex >= MIN_MESSAGES_TO_KEEP
+      ) {
         this.history.splice(0, nextUserIndex);
       } else {
         break;
@@ -424,18 +459,27 @@ export class ConversationManager {
 
     for (let i = 0; i < keepFrom; i++) {
       const msg = this.history[i];
-      if (msg.role === 'tool' && msg.content && msg.content.length > TOOL_OUTPUT_MAX_CHARS) {
+      if (
+        msg.role === "tool" &&
+        msg.content &&
+        msg.content.length > TOOL_OUTPUT_MAX_CHARS
+      ) {
         const original = msg.content.length;
-        msg.content = msg.content.slice(0, TOOL_OUTPUT_MAX_CHARS) +
+        msg.content =
+          msg.content.slice(0, TOOL_OUTPUT_MAX_CHARS) +
           `\n\n... [truncated: ${original} → ${TOOL_OUTPUT_MAX_CHARS} chars to save context]`;
         freedChars += original - TOOL_OUTPUT_MAX_CHARS;
       }
       // Also truncate large assistant tool_calls arguments
-      if (msg.role === 'assistant' && msg.tool_calls) {
+      if (msg.role === "assistant" && msg.tool_calls) {
         for (const tc of msg.tool_calls) {
-          if (tc.function?.arguments && tc.function.arguments.length > TOOL_OUTPUT_MAX_CHARS * 2) {
+          if (
+            tc.function?.arguments &&
+            tc.function.arguments.length > TOOL_OUTPUT_MAX_CHARS * 2
+          ) {
             const original = tc.function.arguments.length;
-            tc.function.arguments = tc.function.arguments.slice(0, TOOL_OUTPUT_MAX_CHARS) + '...}';
+            tc.function.arguments =
+              tc.function.arguments.slice(0, TOOL_OUTPUT_MAX_CHARS) + "...}";
             freedChars += original - TOOL_OUTPUT_MAX_CHARS;
           }
         }
@@ -452,7 +496,7 @@ export class ConversationManager {
   /** Clear all conversation history and summary. */
   clear(): void {
     this.history = [];
-    this.summary = '';
+    this.summary = "";
   }
 
   // ---------------------------------------------------------------------------
@@ -495,7 +539,10 @@ export class ConversationManager {
 
     if (systemPrompt && userMessage) {
       // Predictive check: will the next request overflow the context window?
-      const estimated = this.estimateNextRequestTokens(systemPrompt, userMessage);
+      const estimated = this.estimateNextRequestTokens(
+        systemPrompt,
+        userMessage,
+      );
       // Trigger compaction at 75% of context limit to leave headroom
       return estimated > this.contextLimit * 0.75;
     }
@@ -538,24 +585,27 @@ export class ConversationManager {
     const formattedHistory = toCompact
       .map((msg) => {
         const role = msg.role.toUpperCase();
-        if (msg.role === 'tool') {
-          const content = (msg.content ?? '').slice(0, 500);
-          return `TOOL_RESULT (${msg.tool_call_id ?? 'unknown'}): ${content}`;
+        if (msg.role === "tool") {
+          const content = (msg.content ?? "").slice(0, 500);
+          return `TOOL_RESULT (${msg.tool_call_id ?? "unknown"}): ${content}`;
         }
         if (msg.tool_calls && msg.tool_calls.length > 0) {
-          const tools = msg.tool_calls.map(tc =>
-            `  → ${tc.function?.name}(${(tc.function?.arguments ?? '').slice(0, 100)}...)`
-          ).join('\n');
-          return `${role}: ${msg.content || '(tool calls)'}\n${tools}`;
+          const tools = msg.tool_calls
+            .map(
+              (tc) =>
+                `  → ${tc.function?.name}(${(tc.function?.arguments ?? "").slice(0, 100)}...)`,
+            )
+            .join("\n");
+          return `${role}: ${msg.content || "(tool calls)"}\n${tools}`;
         }
-        return `${role}: ${msg.content || '(empty)'}`;
+        return `${role}: ${msg.content || "(empty)"}`;
       })
-      .join('\n\n');
+      .join("\n\n");
 
     // Step 4: Build compaction prompt
     const previousSummarySection = this.summary
       ? `Here is the previous summary to UPDATE (preserve still-true details, remove stale details, merge new facts):\n<previous-summary>\n${this.summary}\n</previous-summary>\n\n`
-      : '';
+      : "";
 
     const compactionPrompt = `${previousSummarySection}Create a comprehensive summary from the conversation history above.\n\n${SUMMARY_TEMPLATE}`;
 
@@ -563,24 +613,30 @@ export class ConversationManager {
       const response = await client.chat(
         [
           {
-            role: 'system',
-            content: 'You are a technical context summarization engine. You produce structured summaries that preserve every critical fact needed to continue a coding conversation.',
+            role: "system",
+            content:
+              "You are a technical context summarization engine. You produce structured summaries that preserve every critical fact needed to continue a coding conversation.",
           },
           {
-            role: 'user',
+            role: "user",
             content: `Here is the conversation history to summarize:\n\n${formattedHistory}\n\n${compactionPrompt}`,
           },
         ],
         model,
-        { max_tokens: 4000, agent_task_type: 'investigation', required_capabilities: ['fast'] }
+        {
+          max_tokens: 4000,
+          agent_task_type: "investigation",
+          required_capabilities: ["fast"],
+        },
       );
 
-      this.summary = response.content?.trim() || '';
+      this.summary = response.content?.trim() || "";
 
       // Replace history with only the preserved tail messages
       this.history = [...preserved];
 
-      const tokensAfter = this.getTotalTokens() + this.estimateTokens(this.summary);
+      const tokensAfter =
+        this.getTotalTokens() + this.estimateTokens(this.summary);
       this._lastCompactionInfo = {
         messagesBefore,
         tokensFreed: Math.max(0, tokensBefore - tokensAfter),
@@ -588,7 +644,9 @@ export class ConversationManager {
 
       return true;
     } catch (error) {
-      console.warn(`[Context Compaction] Failed to compact: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(
+        `[Context Compaction] Failed to compact: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return false;
     }
   }
@@ -598,19 +656,21 @@ export class ConversationManager {
    * If true, the caller should auto-compact and retry.
    */
   static isContextOverflowError(error: any): boolean {
-    const msg = (error?.message ?? '').toLowerCase();
-    return msg.includes('too many tokens')
-      || msg.includes('context length')
-      || msg.includes('context_length_exceeded')
-      || msg.includes('maximum context')
-      || msg.includes('token limit')
-      || msg.includes('input too long')
-      || msg.includes('request too large')
-      || (msg.includes('413') && (msg.includes('token') || msg.includes('too large')))
-      || (msg.includes('400') && msg.includes('token'));
+    const msg = (error?.message ?? "").toLowerCase();
+    return (
+      msg.includes("too many tokens") ||
+      msg.includes("context length") ||
+      msg.includes("context_length_exceeded") ||
+      msg.includes("maximum context") ||
+      msg.includes("token limit") ||
+      msg.includes("input too long") ||
+      msg.includes("request too large") ||
+      (msg.includes("413") &&
+        (msg.includes("token") || msg.includes("too large"))) ||
+      (msg.includes("400") && msg.includes("token"))
+    );
   }
 }
-
 
 export interface SessionData {
   sessionId: string;
@@ -632,14 +692,14 @@ export interface SessionData {
   label?: string;
 }
 
-import fs from 'node:fs';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { getConfigDir } from '../config.js';
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { getConfigDir } from "../config.js";
 
 export class SessionManager {
   static getSessionsDir(): string {
-    const dir = path.join(getConfigDir(), 'sessions');
+    const dir = path.join(getConfigDir(), "sessions");
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
@@ -650,7 +710,11 @@ export class SessionManager {
     conversation: ConversationManager,
     model: string,
     modifiedFiles: string[],
-    tokenUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+    tokenUsage: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+    },
     sessionId?: string,
     label?: string,
   ): string {
@@ -670,20 +734,39 @@ export class SessionManager {
     // Atomic write: tmp + rename, matching the snapshot writer so a
     // mid-write Ctrl+C never leaves a half-written session file behind.
     const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     fs.renameSync(tmp, filePath);
     return id;
   }
 
-  static listSessions(): Array<{ sessionId: string; timestamp: string; model: string; messageCount: number; summary: string; totalTokens: number; label?: string }> {
+  static listSessions(): Array<{
+    sessionId: string;
+    timestamp: string;
+    model: string;
+    messageCount: number;
+    summary: string;
+    totalTokens: number;
+    label?: string;
+  }> {
     const dir = this.getSessionsDir();
-    const results: Array<{ sessionId: string; timestamp: string; model: string; messageCount: number; summary: string; totalTokens: number; label?: string }> = [];
+    const results: Array<{
+      sessionId: string;
+      timestamp: string;
+      model: string;
+      messageCount: number;
+      summary: string;
+      totalTokens: number;
+      label?: string;
+    }> = [];
     try {
       const files = fs.readdirSync(dir);
       for (const file of files) {
-        if (file.startsWith('session_') && file.endsWith('.json')) {
+        if (file.startsWith("session_") && file.endsWith(".json")) {
           try {
-            const raw = fs.readFileSync(path.join(dir, file), 'utf-8');
+            const raw = fs.readFileSync(path.join(dir, file), "utf-8");
             const data = JSON.parse(raw) as SessionData;
             results.push({
               sessionId: data.sessionId,
@@ -695,16 +778,25 @@ export class SessionManager {
               label: data.label,
             });
           } catch (err: any) {
-            console.warn(`[Debug Warning] Failed to parse session file ${file}:`, err.message || err);
+            console.warn(
+              `[Debug Warning] Failed to parse session file ${file}:`,
+              err.message || err,
+            );
           }
         }
       }
     } catch (err: any) {
-      if (err.code !== 'ENOENT') {
-        console.warn(`[Debug Warning] Failed to list sessions in ${dir}:`, err.message || err);
+      if (err.code !== "ENOENT") {
+        console.warn(
+          `[Debug Warning] Failed to list sessions in ${dir}:`,
+          err.message || err,
+        );
       }
     }
-    return results.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return results.sort(
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
   }
 
   static loadSession(id: string): SessionData {
@@ -713,7 +805,7 @@ export class SessionManager {
     if (!fs.existsSync(filePath)) {
       throw new Error(`Session file not found for ID: ${id}`);
     }
-    const raw = fs.readFileSync(filePath, 'utf-8');
+    const raw = fs.readFileSync(filePath, "utf-8");
     return JSON.parse(raw) as SessionData;
   }
 
@@ -730,14 +822,16 @@ export class SessionManager {
     const dir = this.getSessionsDir();
     const filePath = path.join(dir, `session_${id}.json`);
     if (!fs.existsSync(filePath)) return false;
-    const raw = fs.readFileSync(filePath, 'utf-8');
+    const raw = fs.readFileSync(filePath, "utf-8");
     const data = JSON.parse(raw) as SessionData;
     const cleaned = label?.trim();
     data.label = cleaned && cleaned.length > 0 ? cleaned : undefined;
     const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     fs.renameSync(tmp, filePath);
     return true;
   }
 }
-

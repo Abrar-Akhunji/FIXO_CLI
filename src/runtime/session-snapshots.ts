@@ -22,28 +22,21 @@
  * so a future change to the on-disk format can be migrated
  * rather than orphaned.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import crypto from 'node:crypto';
-import type { ChatContentBlock } from '../shared/types.js';
-import {
-  loadTodoList,
-  saveTodoList,
-  type TodoList,
-} from '../context/todo.js';
-import {
-  recordTelemetry,
-  telemetry,
-} from '../agent/telemetry.js';
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import type { ChatContentBlock } from "../shared/types.js";
+import { loadTodoList, saveTodoList, type TodoList } from "../context/todo.js";
+import { recordTelemetry, telemetry } from "../agent/telemetry.js";
 
 export const SNAPSHOT_VERSION = 1 as const;
-export const SNAPSHOT_KIND = 'fixo-cli-session' as const;
+export const SNAPSHOT_KIND = "fixo-cli-session" as const;
 
-export type AgentMode = 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT';
+export type AgentMode = "PLAN" | "BUILD" | "EXPLORE" | "SCOUT";
 
 export interface SessionMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
+  role: "system" | "user" | "assistant" | "tool";
   content: string | ChatContentBlock[];
   /** Tool name for `role === 'tool'` messages. */
   name?: string;
@@ -91,11 +84,11 @@ export interface SessionSnapshot {
 /* ──────────────────────── path helpers ──────────────────────── */
 
 function sessionsRoot(): string {
-  return path.join(os.homedir(), '.fixocli', 'sessions');
+  return path.join(os.homedir(), ".fixocli", "sessions");
 }
 
 function hashCwd(cwd: string): string {
-  return crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 32);
+  return crypto.createHash("sha256").update(cwd).digest("hex").slice(0, 32);
 }
 
 function dirForCwd(cwd: string): string {
@@ -103,11 +96,11 @@ function dirForCwd(cwd: string): string {
 }
 
 function shortUuid(): string {
-  return crypto.randomBytes(6).toString('base64url');
+  return crypto.randomBytes(6).toString("base64url");
 }
 
 export function makeSnapshotId(now: Date = new Date()): string {
-  const iso = now.toISOString().replace(/[:.]/g, '-');
+  const iso = now.toISOString().replace(/[:.]/g, "-");
   return `${iso}_${shortUuid()}`;
 }
 
@@ -141,7 +134,10 @@ export interface SaveResult {
   error?: string;
 }
 
-export function saveSnapshot(input: SaveInput, now: Date = new Date()): SaveResult {
+export function saveSnapshot(
+  input: SaveInput,
+  now: Date = new Date(),
+): SaveResult {
   const id = input.id ?? makeSnapshotId(now);
   const file = snapshotPath(input.cwd, id);
   const dir = path.dirname(file);
@@ -169,10 +165,18 @@ export function saveSnapshot(input: SaveInput, now: Date = new Date()): SaveResu
   };
   const tmp = `${file}.tmp`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     fs.renameSync(tmp, file);
     recordTelemetry(
-      telemetry.sessionSnapshot({ id, op: 'save', tokens: input.tokens, items: todo.items.length }),
+      telemetry.sessionSnapshot({
+        id,
+        op: "save",
+        tokens: input.tokens,
+        items: todo.items.length,
+      }),
     );
     // Best-effort: mirror the todo list to its on-disk location so
     // a stale-snapshot resume still gets a sensible todo list
@@ -197,25 +201,38 @@ export function loadSnapshot(cwd: string, id: string): LoadResult {
   const file = snapshotPath(cwd, id);
   let raw: string;
   try {
-    raw = fs.readFileSync(file, 'utf-8');
+    raw = fs.readFileSync(file, "utf-8");
   } catch (err) {
     return { ok: false, snapshot: null, error: (err as Error).message };
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object') {
-      return { ok: false, snapshot: null, error: 'snapshot is not an object' };
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: false, snapshot: null, error: "snapshot is not an object" };
     }
     const obj = parsed as Record<string, unknown>;
     if (obj.kind !== SNAPSHOT_KIND) {
-      return { ok: false, snapshot: null, error: `unexpected snapshot kind: ${String(obj.kind)}` };
+      return {
+        ok: false,
+        snapshot: null,
+        error: `unexpected snapshot kind: ${String(obj.kind)}`,
+      };
     }
     if (obj.version !== SNAPSHOT_VERSION) {
-      return { ok: false, snapshot: null, error: `unsupported snapshot version: ${String(obj.version)}` };
+      return {
+        ok: false,
+        snapshot: null,
+        error: `unsupported snapshot version: ${String(obj.version)}`,
+      };
     }
     const snap = obj as unknown as SessionSnapshot;
     recordTelemetry(
-      telemetry.sessionSnapshot({ id, op: 'load', tokens: snap.tokens, items: snap.todo.items.length }),
+      telemetry.sessionSnapshot({
+        id,
+        op: "load",
+        tokens: snap.tokens,
+        items: snap.todo.items.length,
+      }),
     );
     return { ok: true, snapshot: snap };
   } catch (err) {
@@ -240,7 +257,7 @@ export function listSnapshots(cwd: string): SnapshotListEntry[] {
   if (!fs.existsSync(dir)) return [];
   let entries: string[];
   try {
-    entries = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+    entries = fs.readdirSync(dir).filter((n) => n.endsWith(".json"));
   } catch {
     return [];
   }
@@ -248,22 +265,24 @@ export function listSnapshots(cwd: string): SnapshotListEntry[] {
   for (const name of entries) {
     const file = path.join(dir, name);
     try {
-      const raw = fs.readFileSync(file, 'utf-8');
+      const raw = fs.readFileSync(file, "utf-8");
       const parsed = JSON.parse(raw) as unknown;
-      if (!parsed || typeof parsed !== 'object') continue;
+      if (!parsed || typeof parsed !== "object") continue;
       const obj = parsed as Record<string, unknown>;
       if (obj.kind !== SNAPSHOT_KIND) continue;
-      const conv = Array.isArray(obj.conversation) ? obj.conversation : [];
-      const todo = (obj.todo && typeof obj.todo === 'object') ? obj.todo as { items?: unknown[] } : {};
+      const todo =
+        obj.todo && typeof obj.todo === "object"
+          ? (obj.todo as { items?: unknown[] })
+          : {};
       const items = Array.isArray(todo.items) ? todo.items.length : 0;
       out.push({
-        id: name.slice(0, -'.json'.length),
+        id: name.slice(0, -".json".length),
         path: file,
-        createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : '',
-        tokens: typeof obj.tokens === 'number' ? obj.tokens : 0,
+        createdAt: typeof obj.createdAt === "string" ? obj.createdAt : "",
+        tokens: typeof obj.tokens === "number" ? obj.tokens : 0,
         items,
-        summary: typeof obj.summary === 'string' ? obj.summary : undefined,
-        label: typeof obj.label === 'string' ? obj.label : undefined,
+        summary: typeof obj.summary === "string" ? obj.summary : undefined,
+        label: typeof obj.label === "string" ? obj.label : undefined,
       });
     } catch {
       // skip unreadable
@@ -297,7 +316,7 @@ export const MAX_LABEL_LENGTH = 64;
  * not creative writing. The file id stays as the durable identifier.
  */
 export function isValidSessionLabel(label: string): boolean {
-  if (typeof label !== 'string') return false;
+  if (typeof label !== "string") return false;
   const trimmed = label.trim();
   if (trimmed.length === 0 || trimmed.length > MAX_LABEL_LENGTH) return false;
   // Allow Unicode letters/digits + space + dash + underscore + dot.
@@ -327,13 +346,12 @@ export function renameSnapshot(
     return {
       ok: false,
       id,
-      error:
-        `invalid label: must be 1..${MAX_LABEL_LENGTH} chars, letters/digits/space/dash/underscore/dot only`,
+      error: `invalid label: must be 1..${MAX_LABEL_LENGTH} chars, letters/digits/space/dash/underscore/dot only`,
     };
   }
   const loaded = loadSnapshot(cwd, id);
   if (!loaded.ok || !loaded.snapshot) {
-    return { ok: false, id, error: loaded.error ?? 'snapshot not found' };
+    return { ok: false, id, error: loaded.error ?? "snapshot not found" };
   }
   const updated: SessionSnapshot = {
     ...loaded.snapshot,
@@ -343,7 +361,7 @@ export function renameSnapshot(
   const tmp = `${file}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify(updated, null, 2), {
-      encoding: 'utf-8',
+      encoding: "utf-8",
       mode: 0o600,
     });
     fs.renameSync(tmp, file);

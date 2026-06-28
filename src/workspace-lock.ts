@@ -1,8 +1,8 @@
-import path from 'path';
+import path from "path";
 
 export interface LockState {
   agentId: string;
-  type: 'read' | 'write';
+  type: "read" | "write";
 }
 
 export class WorkspaceLockManager {
@@ -12,7 +12,11 @@ export class WorkspaceLockManager {
    * Tries to acquire a lock on a file.
    * Returns true if successful, false if the lock is held by another agent.
    */
-  acquireLock(filePath: string, agentId: string, lockType: 'read' | 'write'): boolean {
+  acquireLock(
+    filePath: string,
+    agentId: string,
+    lockType: "read" | "write",
+  ): boolean {
     const normalizedPath = path.resolve(filePath);
     const activeLocks = this.locks.get(normalizedPath) || [];
 
@@ -22,16 +26,16 @@ export class WorkspaceLockManager {
     }
 
     // Check if the current agent already holds a lock of the same or higher type
-    const agentLock = activeLocks.find(l => l.agentId === agentId);
+    const agentLock = activeLocks.find((l) => l.agentId === agentId);
     if (agentLock) {
-      if (agentLock.type === lockType || agentLock.type === 'write') {
+      if (agentLock.type === lockType || agentLock.type === "write") {
         return true;
       }
       // Upgrade from read to write
-      if (lockType === 'write') {
+      if (lockType === "write") {
         // Can only upgrade if this agent is the ONLY reader
         if (activeLocks.length === 1) {
-          agentLock.type = 'write';
+          agentLock.type = "write";
           return true;
         }
         return false; // Other agents hold read locks, cannot upgrade
@@ -39,12 +43,12 @@ export class WorkspaceLockManager {
     }
 
     // If any write lock is active, block all new locks
-    if (activeLocks.some(l => l.type === 'write')) {
+    if (activeLocks.some((l) => l.type === "write")) {
       return false;
     }
 
     // If new lock is write and there are existing read locks, block it
-    if (lockType === 'write') {
+    if (lockType === "write") {
       return false;
     }
 
@@ -61,7 +65,7 @@ export class WorkspaceLockManager {
   releaseLock(filePath: string, agentId: string): boolean {
     const normalizedPath = path.resolve(filePath);
     const activeLocks = this.locks.get(normalizedPath) || [];
-    const index = activeLocks.findIndex(l => l.agentId === agentId);
+    const index = activeLocks.findIndex((l) => l.agentId === agentId);
 
     if (index === -1) {
       return false;
@@ -81,7 +85,7 @@ export class WorkspaceLockManager {
    */
   releaseAllLocks(agentId: string): void {
     for (const [filePath, activeLocks] of this.locks.entries()) {
-      const filtered = activeLocks.filter(l => l.agentId !== agentId);
+      const filtered = activeLocks.filter((l) => l.agentId !== agentId);
       if (filtered.length === 0) {
         this.locks.delete(filePath);
       } else {
@@ -93,7 +97,7 @@ export class WorkspaceLockManager {
   /**
    * Checks if a file is currently locked in a way that conflicts with the requested lockType.
    */
-  isLocked(filePath: string, lockType: 'read' | 'write'): boolean {
+  isLocked(filePath: string, lockType: "read" | "write"): boolean {
     const normalizedPath = path.resolve(filePath);
     const activeLocks = this.locks.get(normalizedPath) || [];
 
@@ -101,12 +105,12 @@ export class WorkspaceLockManager {
       return false;
     }
 
-    if (lockType === 'write') {
+    if (lockType === "write") {
       return true; // Any lock (read or write) blocks a new write lock
     }
 
     // For read locks, only an active write lock blocks it
-    return activeLocks.some(l => l.type === 'write');
+    return activeLocks.some((l) => l.type === "write");
   }
 }
 

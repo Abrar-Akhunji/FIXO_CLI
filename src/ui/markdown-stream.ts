@@ -22,7 +22,7 @@
  * Tables are buffered until a blank line / non-table line arrives,
  * then rendered with Unicode box drawing.
  */
-import { C, visLen, padToVisual } from './colors.js';
+import { C, visLen, padToVisual } from "./colors.js";
 
 /* ──────────────────────── width helpers ──────────────────────── */
 
@@ -38,16 +38,20 @@ function isTTY(): boolean {
 }
 
 function safeWrite(s: string): void {
-  try { process.stdout.write(s); } catch { /* stdout may be closed */ }
+  try {
+    process.stdout.write(s);
+  } catch {
+    /* stdout may be closed */
+  }
 }
 
 function safeWriteLine(s: string): void {
-  safeWrite(s + '\n');
+  safeWrite(s + "\n");
 }
 
 /* ──────────────────────── inline formatting ──────────────────────── */
 
-const ITALIC_ON = '\x1b[3m';
+const ITALIC_ON = "\x1b[3m";
 
 /**
  * Apply inline markdown formatting to a single line: bold, italic,
@@ -61,40 +65,231 @@ const ITALIC_ON = '\x1b[3m';
 function inlineFormat(text: string): string {
   let out = text;
   // Links: [text](url) → just the text in blue + underline.
-  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, txt: string) => `${C.BLUE}\x1b[4m${txt}${C.RESET}`);
+  out = out.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    (_m, txt: string) => `${C.BLUE}\x1b[4m${txt}${C.RESET}`,
+  );
   // Inline code first so its body is not re-formatted by the
   // emphasis pass below.
-  out = out.replace(/`([^`]+)`/g, (_m, code: string) => `${C.PURPLE}${code}${C.RESET}`);
+  out = out.replace(
+    /`([^`]+)`/g,
+    (_m, code: string) => `${C.PURPLE}${code}${C.RESET}`,
+  );
   // Bold (**...**).
-  out = out.replace(/\*\*([^*]+)\*\*/g, (_m, c: string) => `${C.BOLD}${C.SNOW}${c}${C.RESET}`);
+  out = out.replace(
+    /\*\*([^*]+)\*\*/g,
+    (_m, c: string) => `${C.BOLD}${C.SNOW}${c}${C.RESET}`,
+  );
   // Italic (*...* or _..._), skipping the bold escape we just emitted.
-  out = out.replace(/(?<![*\\])\*([^*\n]{1,2000}?)\*(?!\*)/g, (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`);
-  out = out.replace(/(?<![_\\])_([^_\n]{1,2000}?)_(?!_)/g, (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`);
+  out = out.replace(
+    /(?<![*\\])\*([^*\n]{1,2000}?)\*(?!\*)/g,
+    (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`,
+  );
+  out = out.replace(
+    /(?<![_\\])_([^_\n]{1,2000}?)_(?!_)/g,
+    (_m, c: string) => `${ITALIC_ON}${C.SNOW3}${c}${C.RESET}`,
+  );
   // Warning keywords.
-  out = out.replace(/\b(error|errors|failed|warning|warn)\b/gi, (m) => `${C.LAVA}${m}${C.RESET}`);
+  out = out.replace(
+    /\b(error|errors|failed|warning|warn)\b/gi,
+    (m) => `${C.LAVA}${m}${C.RESET}`,
+  );
   return out;
 }
 
 /* ──────────────────────── code highlight ──────────────────────── */
 
 const LANG_KEYWORDS: Record<string, ReadonlySet<string>> = {
-  typescript: new Set(['const', 'let', 'var', 'function', 'class', 'import', 'export', 'from', 'return', 'if', 'else', 'for', 'while', 'async', 'await', 'interface', 'type', 'enum', 'extends', 'implements', 'new', 'throw', 'try', 'catch', 'finally', 'public', 'private', 'protected', 'readonly', 'static', 'this', 'super', 'void', 'true', 'false', 'null', 'undefined']),
-  javascript: new Set(['const', 'let', 'var', 'function', 'class', 'import', 'export', 'from', 'return', 'if', 'else', 'for', 'while', 'async', 'await', 'new', 'throw', 'try', 'catch', 'finally', 'this', 'super', 'true', 'false', 'null', 'undefined']),
-  python: new Set(['def', 'class', 'import', 'from', 'return', 'if', 'elif', 'else', 'for', 'while', 'async', 'await', 'try', 'except', 'finally', 'with', 'as', 'in', 'is', 'not', 'and', 'or', 'pass', 'raise', 'lambda', 'yield', 'True', 'False', 'None', 'self']),
-  rust: new Set(['fn', 'let', 'mut', 'const', 'struct', 'enum', 'impl', 'trait', 'use', 'pub', 'mod', 'return', 'if', 'else', 'for', 'while', 'loop', 'match', 'self', 'Self', 'true', 'false']),
-  go: new Set(['func', 'var', 'const', 'package', 'import', 'return', 'if', 'else', 'for', 'range', 'switch', 'case', 'defer', 'go', 'chan', 'struct', 'interface', 'type', 'true', 'false', 'nil']),
-  bash: new Set(['if', 'then', 'else', 'elif', 'fi', 'for', 'in', 'do', 'done', 'while', 'function', 'return', 'export', 'local', 'echo']),
-  sh: new Set(['if', 'then', 'else', 'elif', 'fi', 'for', 'in', 'do', 'done', 'while', 'function', 'return', 'export', 'local', 'echo']),
-  json: new Set(['true', 'false', 'null']),
+  typescript: new Set([
+    "const",
+    "let",
+    "var",
+    "function",
+    "class",
+    "import",
+    "export",
+    "from",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "async",
+    "await",
+    "interface",
+    "type",
+    "enum",
+    "extends",
+    "implements",
+    "new",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "public",
+    "private",
+    "protected",
+    "readonly",
+    "static",
+    "this",
+    "super",
+    "void",
+    "true",
+    "false",
+    "null",
+    "undefined",
+  ]),
+  javascript: new Set([
+    "const",
+    "let",
+    "var",
+    "function",
+    "class",
+    "import",
+    "export",
+    "from",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "async",
+    "await",
+    "new",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "this",
+    "super",
+    "true",
+    "false",
+    "null",
+    "undefined",
+  ]),
+  python: new Set([
+    "def",
+    "class",
+    "import",
+    "from",
+    "return",
+    "if",
+    "elif",
+    "else",
+    "for",
+    "while",
+    "async",
+    "await",
+    "try",
+    "except",
+    "finally",
+    "with",
+    "as",
+    "in",
+    "is",
+    "not",
+    "and",
+    "or",
+    "pass",
+    "raise",
+    "lambda",
+    "yield",
+    "True",
+    "False",
+    "None",
+    "self",
+  ]),
+  rust: new Set([
+    "fn",
+    "let",
+    "mut",
+    "const",
+    "struct",
+    "enum",
+    "impl",
+    "trait",
+    "use",
+    "pub",
+    "mod",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "loop",
+    "match",
+    "self",
+    "Self",
+    "true",
+    "false",
+  ]),
+  go: new Set([
+    "func",
+    "var",
+    "const",
+    "package",
+    "import",
+    "return",
+    "if",
+    "else",
+    "for",
+    "range",
+    "switch",
+    "case",
+    "defer",
+    "go",
+    "chan",
+    "struct",
+    "interface",
+    "type",
+    "true",
+    "false",
+    "nil",
+  ]),
+  bash: new Set([
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "for",
+    "in",
+    "do",
+    "done",
+    "while",
+    "function",
+    "return",
+    "export",
+    "local",
+    "echo",
+  ]),
+  sh: new Set([
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "for",
+    "in",
+    "do",
+    "done",
+    "while",
+    "function",
+    "return",
+    "export",
+    "local",
+    "echo",
+  ]),
+  json: new Set(["true", "false", "null"]),
 };
 
 function langKey(raw: string): string {
   const k = raw.toLowerCase().trim();
-  if (k === 'ts' || k === 'tsx') return 'typescript';
-  if (k === 'js' || k === 'jsx' || k === 'mjs') return 'javascript';
-  if (k === 'py') return 'python';
-  if (k === 'rs') return 'rust';
-  if (k === 'shell' || k === 'zsh') return 'bash';
+  if (k === "ts" || k === "tsx") return "typescript";
+  if (k === "js" || k === "jsx" || k === "mjs") return "javascript";
+  if (k === "py") return "python";
+  if (k === "rs") return "rust";
+  if (k === "shell" || k === "zsh") return "bash";
   return k;
 }
 
@@ -114,25 +309,25 @@ function highlightCodeLine(line: string, lang: string): string {
   const key = langKey(lang);
   const keywords = LANG_KEYWORDS[key];
   if (!keywords) return `${C.SNOW2}${line}${C.RESET}`;
-  const usesHashComment = key === 'python' || key === 'bash' || key === 'sh';
+  const usesHashComment = key === "python" || key === "bash" || key === "sh";
   const out: string[] = [];
   let i = 0;
   while (i < line.length) {
     const c = line[i]!;
     // Comment-to-end-of-line.
-    if (c === '/' && line[i + 1] === '/') {
+    if (c === "/" && line[i + 1] === "/") {
       out.push(`${C.SNOW4}${line.slice(i)}${C.RESET}`);
       break;
     }
-    if (c === '#' && usesHashComment) {
+    if (c === "#" && usesHashComment) {
       out.push(`${C.SNOW4}${line.slice(i)}${C.RESET}`);
       break;
     }
     // String literal.
-    if (c === '"' || c === "'" || c === '`') {
+    if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
       while (j < line.length && line[j] !== c) {
-        if (line[j] === '\\' && j + 1 < line.length) j++;
+        if (line[j] === "\\" && j + 1 < line.length) j++;
         j++;
       }
       j = Math.min(j + 1, line.length);
@@ -162,29 +357,32 @@ function highlightCodeLine(line: string, lang: string): string {
     out.push(`${C.SNOW3}${c}${C.RESET}`);
     i++;
   }
-  return out.join('');
+  return out.join("");
 }
 
 /* ──────────────────────── word wrap ──────────────────────── */
 
 function wrapToWidth(text: string, width: number): string[] {
   if (width <= 0) return [text];
-  if (text.length === 0) return [''];
+  if (text.length === 0) return [""];
   const words = text.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [''];
+  if (words.length === 0) return [""];
   const out: string[] = [];
-  let line = '';
+  let line = "";
   const pushWord = (w: string): void => {
     // Hard-break words that don't fit on a line by themselves.
     while (w.length > width) {
-      if (line.length > 0) { out.push(line); line = ''; }
+      if (line.length > 0) {
+        out.push(line);
+        line = "";
+      }
       out.push(w.slice(0, width));
       w = w.slice(width);
     }
     if (line.length === 0) {
       line = w;
     } else if (line.length + 1 + w.length <= width) {
-      line += ' ' + w;
+      line += " " + w;
     } else {
       out.push(line);
       line = w;
@@ -197,12 +395,12 @@ function wrapToWidth(text: string, width: number): string[] {
 
 /* ──────────────────────── renderer ──────────────────────── */
 
-type State = 'text' | 'code-fence' | 'table';
+type State = "text" | "code-fence" | "table";
 
 export class MarkdownStreamRenderer {
-  private buf = '';
-  private state: State = 'text';
-  private codeLang = '';
+  private buf = "";
+  private state: State = "text";
+  private codeLang = "";
   private codeLines: string[] = [];
   private previewLineCount = 0;
   private tableRows: string[] = [];
@@ -217,12 +415,12 @@ export class MarkdownStreamRenderer {
     if (this.firstWrite) {
       // Match the leading newline the legacy console.log path used,
       // so the rendered block lifts off the prompt cleanly.
-      safeWrite('\n');
+      safeWrite("\n");
       this.firstWrite = false;
     }
     this.buf += chunk;
     let nl: number;
-    while ((nl = this.buf.indexOf('\n')) !== -1) {
+    while ((nl = this.buf.indexOf("\n")) !== -1) {
       const line = this.buf.slice(0, nl);
       this.buf = this.buf.slice(nl + 1);
       this.handleLine(line);
@@ -237,31 +435,40 @@ export class MarkdownStreamRenderer {
   flush(): void {
     if (this.buf.length > 0) {
       const tail = this.buf;
-      this.buf = '';
+      this.buf = "";
       this.handleLine(tail);
     }
-    if (this.state === 'code-fence') this.closeCodeFence();
-    if (this.state === 'table') this.flushTable();
+    if (this.state === "code-fence") this.closeCodeFence();
+    if (this.state === "table") this.flushTable();
   }
 
   /* ────────── line dispatch ────────── */
 
   private handleLine(line: string): void {
-    if (this.state === 'code-fence') {
-      if (/^\s*```\s*$/.test(line)) { this.closeCodeFence(); return; }
+    if (this.state === "code-fence") {
+      if (/^\s*```\s*$/.test(line)) {
+        this.closeCodeFence();
+        return;
+      }
       this.codeLines.push(line);
       this.streamCodePreviewLine(line);
       return;
     }
-    if (this.state === 'table') {
-      if (this.looksLikeTableRow(line)) { this.tableRows.push(line); return; }
+    if (this.state === "table") {
+      if (this.looksLikeTableRow(line)) {
+        this.tableRows.push(line);
+        return;
+      }
       this.flushTable();
       // Fall through to text handling for this line.
     }
     const fence = line.match(/^\s*```\s*(\S+)?\s*$/);
-    if (fence) { this.openCodeFence(fence[1] ?? ''); return; }
+    if (fence) {
+      this.openCodeFence(fence[1] ?? "");
+      return;
+    }
     if (this.looksLikeTableRow(line)) {
-      this.state = 'table';
+      this.state = "table";
       this.tableRows.push(line);
       return;
     }
@@ -271,29 +478,34 @@ export class MarkdownStreamRenderer {
   /* ────────── text-mode renderers ────────── */
 
   private renderTextLine(line: string): void {
-    if (line.trim() === '') { safeWriteLine(''); return; }
+    if (line.trim() === "") {
+      safeWriteLine("");
+      return;
+    }
     // Heading.
     const h = line.match(/^(#{1,6})\s+(.+)$/);
     if (h) {
       const level = h[1]!.length;
       const text = h[2]!;
       const color = level === 1 ? C.LAVA : level === 2 ? C.LAVA : C.SNOW;
-      const underline = level <= 2 ? '\x1b[4m' : '';
+      const underline = level <= 2 ? "\x1b[4m" : "";
       safeWriteLine(`  ${C.BOLD}${color}${underline}${text}${C.RESET}`);
       // h1/h2 get a blank line for breathing room.
-      if (level <= 2) safeWriteLine('');
+      if (level <= 2) safeWriteLine("");
       return;
     }
     // Horizontal rule.
     if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
       const w = frameWidth();
-      safeWriteLine(`  ${C.SNOW4}${'─'.repeat(w)}${C.RESET}`);
+      safeWriteLine(`  ${C.SNOW4}${"─".repeat(w)}${C.RESET}`);
       return;
     }
     // Blockquote.
     if (/^\s*>\s?/.test(line)) {
-      const rest = line.replace(/^\s*>\s?/, '');
-      safeWriteLine(`  ${C.LAVA}│${C.RESET} ${C.SNOW3}${inlineFormat(rest)}${C.RESET}`);
+      const rest = line.replace(/^\s*>\s?/, "");
+      safeWriteLine(
+        `  ${C.LAVA}│${C.RESET} ${C.SNOW3}${inlineFormat(rest)}${C.RESET}`,
+      );
       return;
     }
     // Bulleted list.
@@ -323,14 +535,14 @@ export class MarkdownStreamRenderer {
   /* ────────── code fence ────────── */
 
   private openCodeFence(lang: string): void {
-    this.state = 'code-fence';
+    this.state = "code-fence";
     this.codeLang = lang;
     this.codeLines = [];
     this.previewLineCount = 0;
     if (!isTTY()) return;
     // Stream a top border immediately so the user sees the box
     // appearing. The lang tag (or "stream") sits in the top edge.
-    safeWriteLine(this.codeTopBorder(lang || 'stream'));
+    safeWriteLine(this.codeTopBorder(lang || "stream"));
     this.previewLineCount++;
   }
 
@@ -340,7 +552,9 @@ export class MarkdownStreamRenderer {
     const inner = w - 2;
     const truncated = line.length > inner ? line.slice(0, inner) : line;
     const pad = Math.max(0, inner - truncated.length);
-    safeWriteLine(`  ${C.LAVA}│${C.RESET} ${C.SNOW4}${truncated}${C.RESET}${' '.repeat(pad)} ${C.LAVA}│${C.RESET}`);
+    safeWriteLine(
+      `  ${C.LAVA}│${C.RESET} ${C.SNOW4}${truncated}${C.RESET}${" ".repeat(pad)} ${C.LAVA}│${C.RESET}`,
+    );
     this.previewLineCount++;
   }
 
@@ -350,18 +564,20 @@ export class MarkdownStreamRenderer {
       // with syntax highlighting.
       safeWrite(`\x1b[${this.previewLineCount}A\r\x1b[J`);
     }
-    safeWriteLine(this.codeTopBorder(this.codeLang || 'code'));
+    safeWriteLine(this.codeTopBorder(this.codeLang || "code"));
     const w = frameWidth();
     const inner = w - 2;
     for (const raw of this.codeLines) {
       const truncated = raw.length > inner ? raw.slice(0, inner) : raw;
       const highlighted = highlightCodeLine(truncated, this.codeLang);
       const pad = Math.max(0, inner - visLen(highlighted));
-      safeWriteLine(`  ${C.LAVA}│${C.RESET} ${highlighted}${' '.repeat(pad)} ${C.LAVA}│${C.RESET}`);
+      safeWriteLine(
+        `  ${C.LAVA}│${C.RESET} ${highlighted}${" ".repeat(pad)} ${C.LAVA}│${C.RESET}`,
+      );
     }
-    safeWriteLine(`  ${C.LAVA}└${'─'.repeat(frameWidth())}┘${C.RESET}`);
-    this.state = 'text';
-    this.codeLang = '';
+    safeWriteLine(`  ${C.LAVA}└${"─".repeat(frameWidth())}┘${C.RESET}`);
+    this.state = "text";
+    this.codeLang = "";
     this.codeLines = [];
     this.previewLineCount = 0;
   }
@@ -370,23 +586,23 @@ export class MarkdownStreamRenderer {
     const w = frameWidth();
     const tag = ` ${label} `;
     const fillLen = Math.max(0, w - tag.length - 1);
-    return `  ${C.LAVA}┌${C.RESET}${C.LAVA}${tag}${C.RESET}${C.LAVA}${'─'.repeat(fillLen)}┐${C.RESET}`;
+    return `  ${C.LAVA}┌${C.RESET}${C.LAVA}${tag}${C.RESET}${C.LAVA}${"─".repeat(fillLen)}┐${C.RESET}`;
   }
 
   /* ────────── tables ────────── */
 
   private looksLikeTableRow(line: string): boolean {
     const t = line.trim();
-    return t.startsWith('|') && t.endsWith('|') && t.length >= 3;
+    return t.startsWith("|") && t.endsWith("|") && t.length >= 3;
   }
 
   private flushTable(): void {
     const rawRows = this.tableRows.map((row) => {
       const t = row.trim().slice(1, -1);
-      return t.split('|').map((cell) => cell.trim());
+      return t.split("|").map((cell) => cell.trim());
     });
     this.tableRows = [];
-    this.state = 'text';
+    this.state = "text";
     if (rawRows.length === 0) return;
     const isDivider = (cells: string[]): boolean =>
       cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c.trim()));
@@ -404,7 +620,10 @@ export class MarkdownStreamRenderer {
       raw
         .split(/<br\s*\/?>|\\n|\n/i)
         .map((s) => s.trim())
-        .filter((_s, i, arr) => arr.length === 1 || _s.length > 0 || i < arr.length - 1);
+        .filter(
+          (_s, i, arr) =>
+            arr.length === 1 || _s.length > 0 || i < arr.length - 1,
+        );
 
     const segHeader = header.map(segmentCell);
     const segBody = body.map((row) => row.map(segmentCell));
@@ -427,7 +646,10 @@ export class MarkdownStreamRenderer {
     const margin = 2;
     const cellPad = 2; // ' x ' adds 2
     const sepCount = cols + 1;
-    const available = Math.max(cols * 3, frameWidth() - sepCount - cols * cellPad);
+    const available = Math.max(
+      cols * 3,
+      frameWidth() - sepCount - cols * cellPad,
+    );
 
     // Shrink the widest columns iteratively until the sum fits.
     const widths = natural.slice();
@@ -435,7 +657,8 @@ export class MarkdownStreamRenderer {
     const MIN = 4;
     while (widths.reduce((a, b) => a + b, 0) > available) {
       let maxIdx = 0;
-      for (let i = 1; i < cols; i++) if (widths[i]! > widths[maxIdx]!) maxIdx = i;
+      for (let i = 1; i < cols; i++)
+        if (widths[i]! > widths[maxIdx]!) maxIdx = i;
       if (widths[maxIdx]! <= MIN) break;
       widths[maxIdx] = widths[maxIdx]! - 1;
     }
@@ -444,7 +667,7 @@ export class MarkdownStreamRenderer {
     void margin;
 
     const border = (l: string, m: string, r: string): string => {
-      const segs = widths.map((wd) => '─'.repeat(wd + 2));
+      const segs = widths.map((wd) => "─".repeat(wd + 2));
       return `  ${C.SNOW4}${l}${segs.join(m)}${r}${C.RESET}`;
     };
 
@@ -457,14 +680,14 @@ export class MarkdownStreamRenderer {
       const wrappedCells: string[][] = [];
       let height = 1;
       for (let i = 0; i < cols; i++) {
-        const segments = segCells[i] ?? [''];
+        const segments = segCells[i] ?? [""];
         const lines: string[] = [];
         for (const seg of segments) {
           for (const wrapped of wrapToWidth(seg, widths[i]!)) {
             lines.push(wrapped);
           }
         }
-        if (lines.length === 0) lines.push('');
+        if (lines.length === 0) lines.push("");
         wrappedCells.push(lines);
         if (lines.length > height) height = lines.length;
       }
@@ -472,12 +695,12 @@ export class MarkdownStreamRenderer {
       for (let row = 0; row < height; row++) {
         const parts: string[] = [];
         for (let i = 0; i < cols; i++) {
-          const raw = wrappedCells[i]![row] ?? '';
+          const raw = wrappedCells[i]![row] ?? "";
           const formatted = bold
             ? `${C.BOLD}${C.SNOW}${raw}${C.RESET}`
             : inlineFormat(raw);
           const pad = Math.max(0, widths[i]! - visLen(formatted));
-          parts.push(` ${formatted}${' '.repeat(pad)} `);
+          parts.push(` ${formatted}${" ".repeat(pad)} `);
         }
         visualLines.push(
           `  ${C.SNOW4}│${C.RESET}${parts.join(`${C.SNOW4}│${C.RESET}`)}${C.SNOW4}│${C.RESET}`,
@@ -486,19 +709,19 @@ export class MarkdownStreamRenderer {
       return visualLines;
     };
 
-    safeWriteLine(border('┌', '┬', '┐'));
+    safeWriteLine(border("┌", "┬", "┐"));
     for (const line of renderLogicalRow(segHeader, true)) safeWriteLine(line);
-    safeWriteLine(border('├', '┼', '┤'));
+    safeWriteLine(border("├", "┼", "┤"));
     for (let r = 0; r < segBody.length; r++) {
       for (const line of renderLogicalRow(segBody[r]!)) safeWriteLine(line);
       // Light row separator for multi-line bodies so rows stay
       // visually distinct. Skip after the last body row — the
       // closing border handles that.
       if (segBody.length > 1 && r < segBody.length - 1) {
-        safeWriteLine(border('├', '┼', '┤'));
+        safeWriteLine(border("├", "┼", "┤"));
       }
     }
-    safeWriteLine(border('└', '┴', '┘'));
+    safeWriteLine(border("└", "┴", "┘"));
   }
 }
 
@@ -511,10 +734,15 @@ export class MarkdownStreamRenderer {
 export function renderMarkdown(text: string): void {
   const r = new MarkdownStreamRenderer();
   r.write(text);
-  if (!text.endsWith('\n')) r.write('\n');
+  if (!text.endsWith("\n")) r.write("\n");
   r.flush();
 }
 
 /* ──────────────────────── exports for tests ──────────────────────── */
 
-export const __internal = { inlineFormat, highlightCodeLine, langKey, padToVisual };
+export const __internal = {
+  inlineFormat,
+  highlightCodeLine,
+  langKey,
+  padToVisual,
+};

@@ -17,23 +17,21 @@
  * We seed the registry via `setBackgroundJobRegistry` so the tests
  * don't have to spawn real processes.
  */
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   BackgroundJobRegistry,
   type BackgroundJob,
-} from '../runtime/background-jobs.js';
-import {
-  setBackgroundJobRegistry,
-} from '../agent/tool-executor.js';
-import { BackgroundAwareness } from '../agent/background-awareness.js';
+} from "../runtime/background-jobs.js";
+import { setBackgroundJobRegistry } from "../agent/tool-executor.js";
+import { BackgroundAwareness } from "../agent/background-awareness.js";
 
 function mkTmp(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-awareness-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "fixo-awareness-"));
 }
 
 /** Mint a fake job and insert it into the registry's internal map. */
@@ -48,17 +46,18 @@ function injectJob(reg: BackgroundJobRegistry, job: BackgroundJob): void {
 
 function fakeJob(overrides: Partial<BackgroundJob>): BackgroundJob {
   return {
-    id: overrides.id ?? 'job_aaaa1111',
-    cmd: overrides.cmd ?? 'sleep',
-    args: overrides.args ?? ['1'],
-    cwd: overrides.cwd ?? '/tmp',
+    id: overrides.id ?? "job_aaaa1111",
+    cmd: overrides.cmd ?? "sleep",
+    args: overrides.args ?? ["1"],
+    cwd: overrides.cwd ?? "/tmp",
     pid: overrides.pid,
-    status: overrides.status ?? 'running',
-    startedAt: overrides.startedAt ?? new Date(Date.now() - 5_000).toISOString(),
+    status: overrides.status ?? "running",
+    startedAt:
+      overrides.startedAt ?? new Date(Date.now() - 5_000).toISOString(),
     exitedAt: overrides.exitedAt,
     exitCode: overrides.exitCode,
-    stdout: overrides.stdout ?? '',
-    stderr: overrides.stderr ?? '',
+    stdout: overrides.stdout ?? "",
+    stderr: overrides.stderr ?? "",
     totalStdoutBytes: overrides.totalStdoutBytes ?? 0,
     totalStderrBytes: overrides.totalStderrBytes ?? 0,
     stdoutTruncated: overrides.stdoutTruncated ?? false,
@@ -70,7 +69,7 @@ function fakeJob(overrides: Partial<BackgroundJob>): BackgroundJob {
 
 /* ──────────────────── (a) empty ──────────────────── */
 
-test('snapshot is empty + directive is null when no registry exists', () => {
+test("snapshot is empty + directive is null when no registry exists", () => {
   const cwd = mkTmp();
   try {
     const awareness = new BackgroundAwareness(cwd);
@@ -94,10 +93,10 @@ test('a single running job appears under "Still running"', () => {
     injectJob(
       reg,
       fakeJob({
-        id: 'job_run01',
-        cmd: 'npm',
-        args: ['run', 'build'],
-        status: 'running',
+        id: "job_run01",
+        cmd: "npm",
+        args: ["run", "build"],
+        status: "running",
         totalStdoutBytes: 2048,
       }),
     );
@@ -122,7 +121,7 @@ test('a single running job appears under "Still running"', () => {
 
 /* ──────────────────── (c) announce once ──────────────────── */
 
-test('a newly-finished job is announced exactly once', () => {
+test("a newly-finished job is announced exactly once", () => {
   const cwd = mkTmp();
   const reg = new BackgroundJobRegistry(cwd, { disableReaper: true });
   try {
@@ -130,10 +129,10 @@ test('a newly-finished job is announced exactly once', () => {
     injectJob(
       reg,
       fakeJob({
-        id: 'job_exit01',
-        cmd: 'echo',
-        args: ['ok'],
-        status: 'exited',
+        id: "job_exit01",
+        cmd: "echo",
+        args: ["ok"],
+        status: "exited",
         exitCode: 0,
         exitedAt: new Date().toISOString(),
       }),
@@ -165,19 +164,19 @@ test('a newly-finished job is announced exactly once', () => {
 
 /* ──────────────────── (d) stderr tail ──────────────────── */
 
-test('failed jobs include a truncated stderr tail (≤200 chars)', () => {
+test("failed jobs include a truncated stderr tail (≤200 chars)", () => {
   const cwd = mkTmp();
   const reg = new BackgroundJobRegistry(cwd, { disableReaper: true });
   try {
     setBackgroundJobRegistry(cwd, reg);
     const longStderr =
-      'preamble that should be sliced away ' + 'X'.repeat(400) + ' END_MARKER';
+      "preamble that should be sliced away " + "X".repeat(400) + " END_MARKER";
     injectJob(
       reg,
       fakeJob({
-        id: 'job_fail01',
-        cmd: 'fail-cmd',
-        status: 'failed',
+        id: "job_fail01",
+        cmd: "fail-cmd",
+        status: "failed",
         exitCode: 1,
         exitedAt: new Date().toISOString(),
         stderr: longStderr,
@@ -197,10 +196,13 @@ test('failed jobs include a truncated stderr tail (≤200 chars)', () => {
     // the documented tail size by more than the "    stderr: " prefix
     // + the leading "…" marker.
     const stderrLine = directive!
-      .split('\n')
-      .find((l) => l.trim().startsWith('stderr:'));
+      .split("\n")
+      .find((l) => l.trim().startsWith("stderr:"));
     assert.ok(stderrLine);
-    assert.ok(stderrLine!.length < 260, `stderr line was ${stderrLine!.length} chars`);
+    assert.ok(
+      stderrLine!.length < 260,
+      `stderr line was ${stderrLine!.length} chars`,
+    );
   } finally {
     setBackgroundJobRegistry(cwd, null);
     reg.shutdown();
@@ -210,7 +212,7 @@ test('failed jobs include a truncated stderr tail (≤200 chars)', () => {
 
 /* ──────────────────── (e) hard cap ──────────────────── */
 
-test('the directive is hard-capped at the documented size', () => {
+test("the directive is hard-capped at the documented size", () => {
   const cwd = mkTmp();
   const reg = new BackgroundJobRegistry(cwd, { disableReaper: true });
   try {
@@ -221,10 +223,10 @@ test('the directive is hard-capped at the documented size', () => {
       injectJob(
         reg,
         fakeJob({
-          id: `job_bulk${i.toString().padStart(2, '0')}`,
+          id: `job_bulk${i.toString().padStart(2, "0")}`,
           cmd: `command-with-a-fairly-long-name-${i}`,
-          args: ['--flag', '--another-flag', 'value'],
-          status: 'running',
+          args: ["--flag", "--another-flag", "value"],
+          status: "running",
           totalStdoutBytes: 1024 * (i + 1),
           startedAt: new Date(Date.now() - 10_000 * (i + 1)).toISOString(),
         }),
@@ -248,7 +250,7 @@ test('the directive is hard-capped at the documented size', () => {
 
 /* ──────────────────── (f) no registry ──────────────────── */
 
-test('snapshot returns empty for a cwd with no registry (no crash)', () => {
+test("snapshot returns empty for a cwd with no registry (no crash)", () => {
   const isolatedCwd = mkTmp();
   try {
     // Deliberately do NOT register a BackgroundJobRegistry for this cwd.

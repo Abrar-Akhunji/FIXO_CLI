@@ -20,13 +20,13 @@
  *     job whose `pid` is no longer alive, even if the executor
  *     never received an `exit` event.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { isCommandSafe } from '../agent/command-parser.js';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import { recordTelemetry, telemetry } from '../agent/telemetry.js';
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { isCommandSafe } from "../agent/command-parser.js";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import { recordTelemetry, telemetry } from "../agent/telemetry.js";
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -37,7 +37,7 @@ const REAPER_MAX_AGE_MS = 60 * 60 * 1_000; // 1 hour
 
 /* ──────────────────────── Types ──────────────────────── */
 
-export type JobStatus = 'running' | 'exited' | 'killed' | 'failed';
+export type JobStatus = "running" | "exited" | "killed" | "failed";
 
 export interface BackgroundJob {
   id: string;
@@ -115,9 +115,12 @@ export interface BackgroundJobRegistryOptions {
 
 /* ──────────────────────── Helpers ──────────────────────── */
 
-function appendCapped(buffer: { text: string; truncated: boolean; bytes: number }, chunk: string): void {
+function appendCapped(
+  buffer: { text: string; truncated: boolean; bytes: number },
+  chunk: string,
+): void {
   const next = buffer.text + chunk;
-  const bytes = Buffer.byteLength(next, 'utf-8');
+  const bytes = Buffer.byteLength(next, "utf-8");
   if (bytes > STREAM_CAP_BYTES) {
     // Slice from the END so the user always sees the most recent
     // output, not the oldest. The `totalStdoutBytes` counter
@@ -130,7 +133,7 @@ function appendCapped(buffer: { text: string; truncated: boolean; bytes: number 
     // overflow, then slice from there. This is a character-safe
     // approach that avoids splitting a multi-byte UTF-8 char.
     for (let i = 0; i < next.length; i++) {
-      acc += Buffer.byteLength(next[i]!, 'utf-8');
+      acc += Buffer.byteLength(next[i]!, "utf-8");
       if (acc > overflow) {
         startIdx = i;
         break;
@@ -141,7 +144,7 @@ function appendCapped(buffer: { text: string; truncated: boolean; bytes: number 
   } else {
     buffer.text = next;
   }
-  buffer.bytes += Buffer.byteLength(chunk, 'utf-8');
+  buffer.bytes += Buffer.byteLength(chunk, "utf-8");
 }
 
 function isPidAlive(pid: number): boolean {
@@ -165,7 +168,7 @@ export class BackgroundJobRegistry {
 
   constructor(cwd: string, opts: BackgroundJobRegistryOptions = {}) {
     this.cwd = cwd;
-    this.snapshotDir = opts.snapshotDir ?? path.join(cwd, '.fixo', 'jobs');
+    this.snapshotDir = opts.snapshotDir ?? path.join(cwd, ".fixo", "jobs");
     fs.mkdirSync(this.snapshotDir, { recursive: true });
     this.startSnapshotFlusher();
     if (!opts.disableReaper) this.startReaper();
@@ -174,20 +177,26 @@ export class BackgroundJobRegistry {
   /** Spawn a new background command. Reuses `isCommandSafe` for AST validation. */
   async register(input: RegisterInput): Promise<RegisterResult> {
     if (input.cmd.trim().length === 0) {
-      return { ok: false, error: 'cmd is empty' };
+      return { ok: false, error: "cmd is empty" };
     }
     // Resolve the requested cwd through the workspace guard so the
     // child process cannot chdir outside the workspace root.
     const guard = new WorkspaceGuard(this.cwd);
     let resolvedCwd: string;
     try {
-      resolvedCwd = guard.resolve(input.cwd, 'background-job cwd', true);
+      resolvedCwd = guard.resolve(input.cwd, "background-job cwd", true);
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
-    const safety = await isCommandSafe(`${input.cmd} ${input.args.join(' ')}`.trim(), this.cwd);
+    const safety = await isCommandSafe(
+      `${input.cmd} ${input.args.join(" ")}`.trim(),
+      this.cwd,
+    );
     if (!safety.safe) {
-      return { ok: false, error: `command rejected by command-parser: ${safety.reason ?? 'unsafe'}` };
+      return {
+        ok: false,
+        error: `command rejected by command-parser: ${safety.reason ?? "unsafe"}`,
+      };
     }
     const id = `job_${randomUUID().slice(0, 8)}`;
     const job: BackgroundJob = {
@@ -195,10 +204,10 @@ export class BackgroundJobRegistry {
       cmd: input.cmd,
       args: [...input.args],
       cwd: resolvedCwd,
-      status: 'running',
+      status: "running",
       startedAt: new Date().toISOString(),
-      stdout: '',
-      stderr: '',
+      stdout: "",
+      stderr: "",
       totalStdoutBytes: 0,
       totalStderrBytes: 0,
       stdoutTruncated: false,
@@ -209,11 +218,11 @@ export class BackgroundJobRegistry {
       child = spawn(input.cmd, input.args, {
         cwd: resolvedCwd,
         env: { ...process.env, FIXO_BACKGROUND_JOB: id },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {
-      job.status = 'failed';
-      job.failureReason = 'spawn threw';
+      job.status = "failed";
+      job.failureReason = "spawn threw";
       job.lastError = (err as Error).message;
       job.exitedAt = new Date().toISOString();
       this.jobs.set(id, job);
@@ -224,40 +233,40 @@ export class BackgroundJobRegistry {
     this.processes.set(id, child);
     const stdoutBuf = { text: job.stdout, truncated: false, bytes: 0 };
     const stderrBuf = { text: job.stderr, truncated: false, bytes: 0 };
-    child.stdout?.setEncoding('utf-8');
-    child.stderr?.setEncoding('utf-8');
-    child.stdout?.on('data', (chunk: string) => {
+    child.stdout?.setEncoding("utf-8");
+    child.stderr?.setEncoding("utf-8");
+    child.stdout?.on("data", (chunk: string) => {
       appendCapped(stdoutBuf, chunk);
       job.stdout = stdoutBuf.text;
       job.stdoutTruncated = stdoutBuf.truncated;
       job.totalStdoutBytes = stdoutBuf.bytes;
     });
-    child.stderr?.on('data', (chunk: string) => {
+    child.stderr?.on("data", (chunk: string) => {
       appendCapped(stderrBuf, chunk);
       job.stderr = stderrBuf.text;
       job.stderrTruncated = stderrBuf.truncated;
       job.totalStderrBytes = stderrBuf.bytes;
     });
-    child.on('error', (err) => {
+    child.on("error", (err) => {
       job.lastError = err.message;
       // Spawn failures do not emit an `exit` event — flip the
       // status to `failed` here so pollers can detect the
       // terminal state without waiting forever.
-      if (job.status === 'running') {
-        job.status = 'failed';
+      if (job.status === "running") {
+        job.status = "failed";
         job.failureReason = err.message;
         job.exitedAt = new Date().toISOString();
         this.processes.delete(id);
       }
     });
-    child.on('exit', (code, signal) => {
+    child.on("exit", (code, signal) => {
       job.exitedAt = new Date().toISOString();
-      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
-        job.status = 'killed';
+      if (signal === "SIGTERM" || signal === "SIGKILL") {
+        job.status = "killed";
       } else if (code === 0) {
-        job.status = 'exited';
+        job.status = "exited";
       } else {
-        job.status = 'failed';
+        job.status = "failed";
         job.failureReason = job.lastError ?? `exit code ${String(code)}`;
       }
       job.exitCode = code ?? undefined;
@@ -284,15 +293,15 @@ export class BackgroundJobRegistry {
     const sinceBytes = input.sinceBytes ?? 0;
     const sliceTail = (text: string): string => {
       if (tailLines === undefined) return text;
-      if (tailLines <= 0) return '';
+      if (tailLines <= 0) return "";
       // Trim the trailing empty that comes from a terminal newline
       // so "tail 2" returns the last 2 *content* lines, not
       // "<last content>\n".
-      const lines = text.split('\n');
-      if (lines.length > 0 && lines[lines.length - 1] === '') {
+      const lines = text.split("\n");
+      if (lines.length > 0 && lines[lines.length - 1] === "") {
         lines.pop();
       }
-      return lines.slice(Math.max(0, lines.length - tailLines)).join('\n');
+      return lines.slice(Math.max(0, lines.length - tailLines)).join("\n");
     };
     return {
       id: job.id,
@@ -309,8 +318,10 @@ export class BackgroundJobRegistry {
       totalStderrBytes: job.totalStderrBytes,
       stdoutTruncated: job.stdoutTruncated,
       stderrTruncated: job.stderrTruncated,
-      stdoutDelta: sinceBytes > 0 ? sliceTail(job.stdout.slice(sinceBytes)) : undefined,
-      stderrDelta: sinceBytes > 0 ? sliceTail(job.stderr.slice(sinceBytes)) : undefined,
+      stdoutDelta:
+        sinceBytes > 0 ? sliceTail(job.stdout.slice(sinceBytes)) : undefined,
+      stderrDelta:
+        sinceBytes > 0 ? sliceTail(job.stderr.slice(sinceBytes)) : undefined,
     };
   }
 
@@ -318,10 +329,11 @@ export class BackgroundJobRegistry {
   kill(jobId: string): { ok: boolean; error?: string } {
     const child = this.processes.get(jobId);
     const job = this.jobs.get(jobId);
-    if (!job) return { ok: false, error: 'no such job' };
-    if (!child) return { ok: false, error: `job is ${job.status}; nothing to kill` };
+    if (!job) return { ok: false, error: "no such job" };
+    if (!child)
+      return { ok: false, error: `job is ${job.status}; nothing to kill` };
     try {
-      child.kill('SIGTERM');
+      child.kill("SIGTERM");
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -352,7 +364,7 @@ export class BackgroundJobRegistry {
     }
     for (const child of this.processes.values()) {
       try {
-        child.kill('SIGTERM');
+        child.kill("SIGTERM");
       } catch {
         // best-effort
       }
@@ -378,7 +390,10 @@ export class BackgroundJobRegistry {
       const file = path.join(this.snapshotDir, `${job.id}.json`);
       try {
         const tmp = `${file}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(job, null, 2), { encoding: 'utf-8', mode: 0o600 });
+        fs.writeFileSync(tmp, JSON.stringify(job, null, 2), {
+          encoding: "utf-8",
+          mode: 0o600,
+        });
         fs.renameSync(tmp, file);
       } catch {
         // best-effort
@@ -397,12 +412,14 @@ export class BackgroundJobRegistry {
         const pidDead = job.pid !== undefined && !isPidAlive(job.pid);
         if (ageMs > REAPER_MAX_AGE_MS || pidDead) {
           try {
-            child.kill('SIGKILL');
+            child.kill("SIGKILL");
           } catch {
             // best-effort
           }
-          job.status = pidDead ? 'failed' : 'killed';
-          job.failureReason = pidDead ? 'pid no longer alive' : 'exceeded 1-hour reaper window';
+          job.status = pidDead ? "failed" : "killed";
+          job.failureReason = pidDead
+            ? "pid no longer alive"
+            : "exceeded 1-hour reaper window";
           job.exitedAt = new Date().toISOString();
           this.processes.delete(id);
         }

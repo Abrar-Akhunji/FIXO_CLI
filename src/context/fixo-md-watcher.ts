@@ -17,14 +17,14 @@
  * Pure read: stats, optional read, and an in-memory cursor. No
  * `fs.watch`, no subprocesses, no globals.
  */
-import fs from 'node:fs';
+import fs from "node:fs";
 import {
   buildProjectInstructionsBlock,
   findFixoMdPath,
   loadProjectInstructions,
   type FixoMdLoadResult,
   type FixoMdSource,
-} from './fixo-md.js';
+} from "./fixo-md.js";
 
 /** A point-in-time fingerprint of the active FIXO.md file. */
 interface FileFingerprint {
@@ -39,10 +39,10 @@ interface FileFingerprint {
 }
 
 export type FixoMdWatchResult =
-  | { kind: 'unchanged' }
-  | { kind: 'created'; block: string; result: FixoMdLoadResult }
-  | { kind: 'updated'; block: string; result: FixoMdLoadResult }
-  | { kind: 'deleted'; previousPath: string };
+  | { kind: "unchanged" }
+  | { kind: "created"; block: string; result: FixoMdLoadResult }
+  | { kind: "updated"; block: string; result: FixoMdLoadResult }
+  | { kind: "deleted"; previousPath: string };
 
 /* ──────────────────────── helpers ──────────────────────── */
 
@@ -99,32 +99,36 @@ export class FixoMdWatcher {
 
     // Both null → nothing on disk now or before. Quiet path.
     if (current === null && previous === null) {
-      return { kind: 'unchanged' };
+      return { kind: "unchanged" };
     }
 
     // File appeared (or moved into the chain) mid-run.
     if (current !== null && previous === null) {
       const { block, result } = buildProjectInstructionsBlock(this.cwd);
       this.lastSeen = current;
-      return { kind: 'created', block, result };
+      return { kind: "created", block, result };
     }
 
     // File disappeared mid-run.
     if (current === null && previous !== null) {
       const previousPath = previous.path;
       this.lastSeen = null;
-      return { kind: 'deleted', previousPath };
+      return { kind: "deleted", previousPath };
     }
 
     // Both non-null. If fingerprint matches we're done.
-    if (current !== null && previous !== null && fingerprintsEqual(current, previous)) {
-      return { kind: 'unchanged' };
+    if (
+      current !== null &&
+      previous !== null &&
+      fingerprintsEqual(current, previous)
+    ) {
+      return { kind: "unchanged" };
     }
 
     // Otherwise: content (or path / source) changed.
     const { block, result } = buildProjectInstructionsBlock(this.cwd);
     this.lastSeen = current;
-    return { kind: 'updated', block, result };
+    return { kind: "updated", block, result };
   }
 
   /**
@@ -134,8 +138,8 @@ export class FixoMdWatcher {
    * agent model already knows how to parse it.
    */
   formatDirective(watch: FixoMdWatchResult): string | null {
-    if (watch.kind === 'unchanged') return null;
-    if (watch.kind === 'deleted') {
+    if (watch.kind === "unchanged") return null;
+    if (watch.kind === "deleted") {
       return (
         `[Project Instructions]\n` +
         `The FIXO.md previously loaded from \`${watch.previousPath}\` was ` +
@@ -145,9 +149,8 @@ export class FixoMdWatcher {
     // Created or updated — surface the block verbatim under a
     // labelled header so the LLM sees this is a refresh, not a
     // duplicate of what's in the system prompt.
-    const verb = watch.kind === 'created' ? 'now available' : 'updated mid-run';
-    const sourceLine =
-      watch.result.path ?? '(unknown path)';
+    const verb = watch.kind === "created" ? "now available" : "updated mid-run";
+    const sourceLine = watch.result.path ?? "(unknown path)";
     return (
       `[Project Instructions]\n` +
       `FIXO.md is ${verb}. Source: ${sourceLine}.\n` +

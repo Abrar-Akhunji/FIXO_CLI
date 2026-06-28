@@ -21,35 +21,43 @@
  *   - Non-retryable (4xx other)            → no cooldown, just record
  */
 
-import { formatDuration } from './duration.js';
+import { formatDuration } from "./duration.js";
 
 const ONE_SECOND_MS = 1_000;
 const ONE_MINUTE_MS = 60 * ONE_SECOND_MS;
 
 /** Buckets that share a backoff schedule. */
-type BackoffFamily = 'rate_limit' | 'server_error' | 'other_retryable' | 'none';
+type BackoffFamily = "rate_limit" | "server_error" | "other_retryable" | "none";
 
 /** Status code → backoff family. Exported for testability. */
 export function classifyStatus(status: number): BackoffFamily {
-  if (status === 429) return 'rate_limit';
-  if (status >= 500 && status < 600) return 'server_error';
-  if (status === 408 || status === 425 || status === 502 || status === 503 || status === 504) {
-    return 'server_error';
+  if (status === 429) return "rate_limit";
+  if (status >= 500 && status < 600) return "server_error";
+  if (
+    status === 408 ||
+    status === 425 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return "server_error";
   }
   if (status >= 400 && status < 500) {
     // Other 4xx — treated as a hard failure, no cooldown.
-    return 'none';
+    return "none";
   }
   // Network-layer errors surface with status=0; treat as retryable-but-mild.
-  if (status === 0) return 'other_retryable';
-  return 'none';
+  if (status === 0) return "other_retryable";
+  return "none";
 }
 
 /** Per-family backoff schedule, in milliseconds. Index = consecutive failure count. */
-const BACKOFF_SCHEDULES: Readonly<Record<Exclude<BackoffFamily, 'none'>, number[]>> = {
-  rate_limit:       [30_000, 60_000, 120_000, 240_000, 300_000],
-  server_error:     [10_000,  20_000,  40_000,  80_000, 120_000],
-  other_retryable:  [15_000,  30_000,  60_000, 120_000, 180_000],
+const BACKOFF_SCHEDULES: Readonly<
+  Record<Exclude<BackoffFamily, "none">, number[]>
+> = {
+  rate_limit: [30_000, 60_000, 120_000, 240_000, 300_000],
+  server_error: [10_000, 20_000, 40_000, 80_000, 120_000],
+  other_retryable: [15_000, 30_000, 60_000, 120_000, 180_000],
 };
 
 const MAX_COOLDOWN_MS = 5 * ONE_MINUTE_MS;
@@ -59,7 +67,7 @@ export interface ProviderCooldownEntry {
   providerId: string;
   consecutiveFailures: number;
   lastFailureAt: number;
-  cooldownUntil: number;       // epoch ms; 0 = not in cooldown
+  cooldownUntil: number; // epoch ms; 0 = not in cooldown
   lastErrorStatus: number | null;
   lastErrorMessage?: string;
   totalRequests: number;
@@ -86,7 +94,7 @@ export class ProviderInCooldownError extends Error {
       `Provider '${providerId}' is in cooldown for ${formatDuration(cooldownMs)} ` +
         `(until ${new Date(until).toLocaleTimeString()})`,
     );
-    this.name = 'ProviderInCooldownError';
+    this.name = "ProviderInCooldownError";
     this.providerId = providerId;
     this.cooldownMs = cooldownMs;
     this.until = until;
@@ -156,7 +164,7 @@ export class ProviderCooldownManager {
     this.pushRecent(entry, 0);
 
     const family = classifyStatus(status);
-    if (family === 'none') {
+    if (family === "none") {
       // Hard failure: reset the consecutive counter so a future
       // retryable error starts from zero.
       entry.consecutiveFailures = 0;
@@ -166,7 +174,10 @@ export class ProviderCooldownManager {
 
     entry.consecutiveFailures += 1;
     if (status === 429) entry.totalRateLimited += 1;
-    const cooldownMs = this.computeCooldownMs(family, entry.consecutiveFailures);
+    const cooldownMs = this.computeCooldownMs(
+      family,
+      entry.consecutiveFailures,
+    );
     entry.cooldownUntil = now + cooldownMs;
     return cooldownMs;
   }
@@ -277,12 +288,14 @@ export class ProviderCooldownManager {
     const count = Math.max(0, resultCount);
     entry.quality = {
       samples: prev.samples + 1,
-      avgDurationMs: prev.samples === 0
-        ? dur
-        : prev.avgDurationMs * (1 - alpha) + dur * alpha,
-      avgResultCount: prev.samples === 0
-        ? count
-        : prev.avgResultCount * (1 - alpha) + count * alpha,
+      avgDurationMs:
+        prev.samples === 0
+          ? dur
+          : prev.avgDurationMs * (1 - alpha) + dur * alpha,
+      avgResultCount:
+        prev.samples === 0
+          ? count
+          : prev.avgResultCount * (1 - alpha) + count * alpha,
       lastUpdatedAt: now,
     };
   }
@@ -315,15 +328,23 @@ export class ProviderCooldownManager {
         totalFailures: 0,
         totalRateLimited: 0,
         recent: [],
-        quality: { samples: 0, avgDurationMs: 0, avgResultCount: 0, lastUpdatedAt: 0 },
+        quality: {
+          samples: 0,
+          avgDurationMs: 0,
+          avgResultCount: 0,
+          lastUpdatedAt: 0,
+        },
       };
       this.entries.set(providerId, entry);
     }
     return entry;
   }
 
-  private computeCooldownMs(family: BackoffFamily, consecutive: number): number {
-    if (family === 'none') return 0;
+  private computeCooldownMs(
+    family: BackoffFamily,
+    consecutive: number,
+  ): number {
+    if (family === "none") return 0;
     const schedule = BACKOFF_SCHEDULES[family];
     const idx = Math.min(consecutive - 1, schedule.length - 1);
     if (idx < 0) return 0;
@@ -337,9 +358,13 @@ export class ProviderCooldownManager {
     }
   }
 
-  private toPublic(providerId: string, entry: InternalEntry): ProviderCooldownEntry {
+  private toPublic(
+    providerId: string,
+    entry: InternalEntry,
+  ): ProviderCooldownEntry {
     const successes = entry.recent.reduce((acc, v) => acc + v, 0);
-    const successRate = entry.recent.length === 0 ? 1 : successes / entry.recent.length;
+    const successRate =
+      entry.recent.length === 0 ? 1 : successes / entry.recent.length;
     return {
       providerId,
       consecutiveFailures: entry.consecutiveFailures,

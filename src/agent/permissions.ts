@@ -19,15 +19,15 @@
  *   - Default rules: every tool introduced in Phases 1–3
  *     defaults to ask if no rule is configured.
  */
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 import {
   type PolicyDecision,
   type PolicyProfile,
   decidePolicy,
-} from '../runtime/policy.js';
+} from "../runtime/policy.js";
 
-export type PermissionDecision = 'allow' | 'ask' | 'deny';
+export type PermissionDecision = "allow" | "ask" | "deny";
 
 export interface PermissionRule {
   /** Glob pattern in the form `Tool(pattern)`. */
@@ -46,10 +46,11 @@ export interface PermissionCheckResult {
   decision: PermissionDecision;
   reason: string;
   matchedRule: string | null;
-  source: 'rule' | 'default-ask' | 'fallback-policy';
+  source: "rule" | "default-ask" | "fallback-policy";
 }
 
-const PERMISSIONS_PATH_FOR = (cwd: string) => path.join(cwd, '.fixo', 'permissions.json');
+const PERMISSIONS_PATH_FOR = (cwd: string) =>
+  path.join(cwd, ".fixo", "permissions.json");
 
 /**
  * Tools introduced in Phases 1–3. When the user runs one of
@@ -57,12 +58,12 @@ const PERMISSIONS_PATH_FOR = (cwd: string) => path.join(cwd, '.fixo', 'permissio
  * letting `decidePolicy` quietly return `allow`).
  */
 export const NEW_TOOL_DEFAULT_ASK: ReadonlySet<string> = new Set([
-  'str_replace',
-  'glob_files',
-  'todo_write',
-  'run_command_async',
-  'poll_command_status',
-  'kill_command',
+  "str_replace",
+  "glob_files",
+  "todo_write",
+  "run_command_async",
+  "poll_command_status",
+  "kill_command",
 ]);
 
 /** Read `.fixo/permissions.json` from cwd. */
@@ -70,7 +71,7 @@ export function loadPermissionsFile(cwd: string): PermissionsFile | null {
   const p = PERMISSIONS_PATH_FOR(cwd);
   if (!fs.existsSync(p)) return null;
   try {
-    const raw = JSON.parse(fs.readFileSync(p, 'utf-8')) as PermissionsFile;
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8")) as PermissionsFile;
     if (raw.version !== 1 || !Array.isArray(raw.rules)) return null;
     return raw;
   } catch {
@@ -105,38 +106,41 @@ export function getPermissionsPath(cwd: string): string {
  * - `?` matches any single char except `/`
  */
 export function globToRegExp(glob: string): RegExp {
-  let out = '^';
+  let out = "^";
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
         // dstar: matches zero or more path segments. If a
         // slash follows, the slash is optional (so the
         // pattern matches a/b/c as well as a).
-        if (glob[i + 2] === '/') {
-          out += '(?:.*/)?';
+        if (glob[i + 2] === "/") {
+          out += "(?:.*/)?";
           i += 2;
         } else {
-          out += '.*';
+          out += ".*";
           i += 1;
         }
       } else {
-        out += '[^/]*';
+        out += "[^/]*";
       }
-    } else if (c === '?') {
-      out += '[^/]';
-    } else if ('.+()[]{}|^$\\'.includes(c)) {
-      out += '\\' + c;
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (".+()[]{}|^$\\".includes(c)) {
+      out += "\\" + c;
     } else {
       out += c;
     }
   }
-  out += '$';
+  out += "$";
   return new RegExp(out);
 }
 
 /** Parse `Tool(pattern)` into `{tool, argPattern}`. */
-export function parseRulePattern(pattern: string): { tool: string; argPattern: string | null } {
+export function parseRulePattern(pattern: string): {
+  tool: string;
+  argPattern: string | null;
+} {
   const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:\((.+)\))?$/.exec(pattern);
   if (!m) return { tool: pattern, argPattern: null };
   return { tool: m[1], argPattern: m[2] ?? null };
@@ -150,20 +154,32 @@ export function parseRulePattern(pattern: string): { tool: string; argPattern: s
  * it lets users write rules like Edit(src/dstar/star.ts)
  * and have them work.
  */
-export function buildArgString(tool: string, args: Record<string, unknown>): string {
+export function buildArgString(
+  _tool: string,
+  args: Record<string, unknown>,
+): string {
   // For path-shaped tools, prefer the `path` / `filePath` /
   // `cmd` field so globs land where users expect.
   const pathField =
-    typeof args.path === 'string' ? args.path :
-    typeof args.filePath === 'string' ? args.filePath :
-    typeof args.cmd === 'string' ? args.cmd :
-    typeof args.command === 'string' ? args.command :
-    null;
+    typeof args.path === "string"
+      ? args.path
+      : typeof args.filePath === "string"
+        ? args.filePath
+        : typeof args.cmd === "string"
+          ? args.cmd
+          : typeof args.command === "string"
+            ? args.command
+            : null;
   if (pathField !== null) return pathField;
   return Object.values(args)
-    .filter(v => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
-    .map(v => String(v))
-    .join(' ');
+    .filter(
+      (v) =>
+        typeof v === "string" ||
+        typeof v === "number" ||
+        typeof v === "boolean",
+    )
+    .map((v) => String(v))
+    .join(" ");
 }
 
 /** Match a tool call against the rule list (first match wins). */
@@ -209,46 +225,50 @@ export function checkPermission(
       decision: match.decision,
       reason: match.reason ?? `${tool} matched rule ${match.pattern}`,
       matchedRule: match.pattern,
-      source: 'rule',
+      source: "rule",
     };
   }
   // 2. Default-ask for tools introduced in Phases 1–3.
   if (NEW_TOOL_DEFAULT_ASK.has(tool)) {
     return {
-      decision: 'ask',
+      decision: "ask",
       reason: `${tool} is a new tool with no rule — default-ask applies`,
       matchedRule: null,
-      source: 'default-ask',
+      source: "default-ask",
     };
   }
   // 3. Fallback to legacy decidePolicy.
-  const action: 'read' | 'write' | 'delete' | 'command' =
-    tool === 'run_command' || tool === 'run_command_async' ? 'command' :
-    MUTATION_TOOLS.has(tool) ? 'write' :
-    'read';
+  const action: "read" | "write" | "delete" | "command" =
+    tool === "run_command" || tool === "run_command_async"
+      ? "command"
+      : MUTATION_TOOLS.has(tool)
+        ? "write"
+        : "read";
   const detail = buildArgString(tool, args);
   const policyDecision: PolicyDecision = decidePolicy(profile, action, detail);
   return {
     decision: policyDecision.allowed
-      ? (policyDecision.needsConfirmation ? 'ask' : 'allow')
-      : 'deny',
+      ? policyDecision.needsConfirmation
+        ? "ask"
+        : "allow"
+      : "deny",
     reason: policyDecision.reason,
     matchedRule: null,
-    source: 'fallback-policy',
+    source: "fallback-policy",
   };
 }
 
 const MUTATION_TOOLS: ReadonlySet<string> = new Set([
-  'write_file',
-  'apply_patch',
-  'replace_range',
-  'insert_after',
-  'rename_file',
-  'delete_file',
-  'create_branch',
-  'commit_changes',
-  'push_branch',
-  'create_pull_request',
-  'str_replace',
-  'todo_write',
+  "write_file",
+  "apply_patch",
+  "replace_range",
+  "insert_after",
+  "rename_file",
+  "delete_file",
+  "create_branch",
+  "commit_changes",
+  "push_branch",
+  "create_pull_request",
+  "str_replace",
+  "todo_write",
 ]);

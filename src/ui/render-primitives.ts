@@ -14,13 +14,13 @@
  * code here keeps the diff small and the import graph flat.
  */
 
-import { C, lava, snow, dim, green, blue, yellow, purple, red, bold, visLen, padToVisual, providerColor, pill } from './colors.js';
+import { C, bold, visLen, padToVisual, providerColor, pill } from "./colors.js";
 
 /* ──────────────────────── Public types ──────────────────────── */
 
 export interface CLIState {
-  mode: 'PLAN' | 'BUILD' | 'REVIEW';
-  routing: 'auto' | 'single' | 'multi';
+  mode: "PLAN" | "BUILD" | "REVIEW";
+  routing: "auto" | "single" | "multi";
   model: string;
   branch: string;
   contextPercent: number;
@@ -30,7 +30,7 @@ export interface CLIState {
 
 export interface ProviderModel {
   id: string;
-  tags?: ReadonlyArray<'fast' | 'smart' | 'free' | 'large' | 'paid' | '128k'>;
+  tags?: ReadonlyArray<"fast" | "smart" | "free" | "large" | "paid" | "128k">;
   selected?: boolean;
 }
 
@@ -43,15 +43,15 @@ export interface Provider {
 export interface ToolCallRender {
   /** The kind of tool. Maps to the icon + colour in the spec. */
   kind:
-    | 'read'
-    | 'list'
-    | 'write'
-    | 'create'
-    | 'bash'
-    | 'search'
-    | 'success'
-    | 'error'
-    | 'thinking';
+    | "read"
+    | "list"
+    | "write"
+    | "create"
+    | "bash"
+    | "search"
+    | "success"
+    | "error"
+    | "thinking";
   /** Display name, e.g. `ReadFile`, `Bash`. */
   name: string;
   /** Path / args / result summary. */
@@ -73,7 +73,7 @@ export function safeWrite(s: string): void {
 }
 
 export function safeWriteLine(s: string): void {
-  safeWrite(s + '\n');
+  safeWrite(s + "\n");
 }
 
 /* ──────────────────────── Status bar ──────────────────────── */
@@ -86,26 +86,10 @@ export function safeWriteLine(s: string): void {
  * ensure the cursor is on its own line first.
  */
 export function renderStatusBar(state: CLIState): void {
-  const modePill = pill(
-    state.mode,
-    C.LAVA,
-    C.LAVA_BG,
-  );
-  const routingPill = pill(
-    state.routing,
-    C.GREEN,
-    '\x1b[48;2;15;42;26m',
-  );
-  const modelPill = pill(
-    state.model,
-    C.BLUE,
-    '\x1b[48;2;10;31;58m',
-  );
-  const branchPill = pill(
-    state.branch,
-    C.SNOW3,
-    C.VOID3,
-  );
+  const modePill = pill(state.mode, C.LAVA, C.LAVA_BG);
+  const routingPill = pill(state.routing, C.GREEN, "\x1b[48;2;15;42;26m");
+  const modelPill = pill(state.model, C.BLUE, "\x1b[48;2;10;31;58m");
+  const branchPill = pill(state.branch, C.SNOW3, C.VOID3);
   const leftSide = ` ${modePill} ${routingPill} ${modelPill} ${branchPill}`;
   // Clamp defensively — callers in `prompt.ts` already clamp at the
   // source, but the renderer should not assume.
@@ -116,21 +100,27 @@ export function renderStatusBar(state: CLIState): void {
   const leftLen = visLen(leftSide);
   const rightLen = visLen(rightSide);
   const gap = Math.max(2, width - leftLen - rightLen);
-  const line = leftSide + ' '.repeat(gap) + rightSide;
-  safeWrite('\r' + line);
+  const line = leftSide + " ".repeat(gap) + rightSide;
+  safeWrite("\r" + line);
 }
 
 /* ──────────────────────── Provider list ──────────────────────── */
 
 function tagColor(tag: string): string {
   switch (tag) {
-    case 'fast':  return C.LAVA;
-    case 'smart': return C.PURPLE;
-    case 'free':  return C.GREEN;
-    case 'large':
-    case '128k':  return C.YELLOW;
-    case 'paid':  return C.RED;
-    default:      return C.SNOW3;
+    case "fast":
+      return C.LAVA;
+    case "smart":
+      return C.PURPLE;
+    case "free":
+      return C.GREEN;
+    case "large":
+    case "128k":
+      return C.YELLOW;
+    case "paid":
+      return C.RED;
+    default:
+      return C.SNOW3;
   }
 }
 
@@ -151,34 +141,39 @@ export function renderProviderList(providers: ReadonlyArray<Provider>): void {
     const keyBadge = p.hasKey
       ? `${C.GREEN}[key ✓]${C.RESET}`
       : `${C.SNOW4}[no key]${C.RESET}`;
-    safeWriteLine(`  ${bullet} ${C.BOLD}${color}${p.name}${C.RESET}  ${keyBadge}`);
+    safeWriteLine(
+      `  ${bullet} ${C.BOLD}${color}${p.name}${C.RESET}  ${keyBadge}`,
+    );
     for (const m of p.models) {
-      const dot = m.selected
-        ? `${C.LAVA}◉${C.RESET}`
-        : `${C.SNOW4}○${C.RESET}`;
+      const dot = m.selected ? `${C.LAVA}◉${C.RESET}` : `${C.SNOW4}○${C.RESET}`;
       const nameColor = m.selected ? C.SNOW : C.SNOW3;
-      const tags = (m.tags ?? []).map(renderTag).join(' ');
-      const line = `    ${dot} ${nameColor}${m.id}${C.RESET}${tags ? '  ' + tags : ''}`;
+      const tags = (m.tags ?? []).map(renderTag).join(" ");
+      const line = `    ${dot} ${nameColor}${m.id}${C.RESET}${tags ? "  " + tags : ""}`;
       safeWriteLine(line);
     }
-    if (i < providers.length - 1) safeWriteLine('');
+    if (i < providers.length - 1) safeWriteLine("");
   }
-  safeWriteLine('');
-  safeWriteLine(`  ${C.SNOW4}/providers add <name>  ·  /model <id> to switch${C.RESET}`);
+  safeWriteLine("");
+  safeWriteLine(
+    `  ${C.SNOW4}/providers add <name>  ·  /model <id> to switch${C.RESET}`,
+  );
 }
 
 /* ──────────────────────── Tool call ──────────────────────── */
 
-const TOOL_ICON: Record<ToolCallRender['kind'], { icon: string; color: string }> = {
-  read:     { icon: '✦', color: C.BLUE },
-  list:     { icon: '✦', color: C.BLUE },
-  write:    { icon: '✎', color: C.LAVA },
-  create:   { icon: '✎', color: C.LAVA },
-  bash:     { icon: '$', color: C.YELLOW },
-  search:   { icon: '⌕', color: C.PURPLE },
-  success:  { icon: '✓', color: C.GREEN },
-  error:    { icon: '✗', color: C.RED },
-  thinking: { icon: '◈', color: C.SNOW3 },
+const TOOL_ICON: Record<
+  ToolCallRender["kind"],
+  { icon: string; color: string }
+> = {
+  read: { icon: "✦", color: C.BLUE },
+  list: { icon: "✦", color: C.BLUE },
+  write: { icon: "✎", color: C.LAVA },
+  create: { icon: "✎", color: C.LAVA },
+  bash: { icon: "$", color: C.YELLOW },
+  search: { icon: "⌕", color: C.PURPLE },
+  success: { icon: "✓", color: C.GREEN },
+  error: { icon: "✗", color: C.RED },
+  thinking: { icon: "◈", color: C.SNOW3 },
 };
 
 /**
@@ -189,12 +184,25 @@ const TOOL_ICON: Record<ToolCallRender['kind'], { icon: string; color: string }>
 export function renderToolCall(tool: ToolCallRender): void {
   const meta = TOOL_ICON[tool.kind];
   const padded = padToVisual(tool.name, 12);
-  safeWriteLine(`  ${meta.color}${meta.icon}${C.RESET}  ${C.SNOW3}${padded}${C.RESET}  ${C.SNOW4}${tool.detail}${C.RESET}`);
+  safeWriteLine(
+    `  ${meta.color}${meta.icon}${C.RESET}  ${C.SNOW3}${padded}${C.RESET}  ${C.SNOW4}${tool.detail}${C.RESET}`,
+  );
 }
 
 /* ──────────────────────── Inline tool spinner ──────────────────────── */
 
-const SPINNER_DOTS: ReadonlyArray<string> = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_DOTS: ReadonlyArray<string> = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+];
 
 export interface InlineSpinnerHandle {
   /** Stop and replace the spinner with a ✔ success summary. */
@@ -215,7 +223,9 @@ export interface InlineSpinnerHandle {
  * with no ticking, and the summary replaces it via `\r\x1b[K` on the
  * same line. This keeps test snapshots deterministic.
  */
-export function startInlineToolSpinner(tool: ToolCallRender): InlineSpinnerHandle {
+export function startInlineToolSpinner(
+  tool: ToolCallRender,
+): InlineSpinnerHandle {
   const meta = TOOL_ICON[tool.kind];
   const isTTY = process.stdout.isTTY === true;
   let frame = 0;
@@ -236,19 +246,29 @@ export function startInlineToolSpinner(tool: ToolCallRender): InlineSpinnerHandl
   const finish = (icon: string, color: string, summary: string): void => {
     if (stopped) return;
     stopped = true;
-    if (timer) { clearInterval(timer); timer = null; }
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
     safeWrite(
       `\r\x1b[K  ${color}${icon}${C.RESET}  ${C.SNOW3}${tool.name}${C.RESET}  ${C.SNOW4}${summary}${C.RESET}\n`,
     );
   };
   return {
-    succeed(summary: string): void { finish('✔', C.GREEN, summary); },
-    fail(summary: string): void { finish('✗', C.RED, summary); },
+    succeed(summary: string): void {
+      finish("✔", C.GREEN, summary);
+    },
+    fail(summary: string): void {
+      finish("✗", C.RED, summary);
+    },
     clear(): void {
       if (stopped) return;
       stopped = true;
-      if (timer) { clearInterval(timer); timer = null; }
-      safeWrite('\r\x1b[K');
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      safeWrite("\r\x1b[K");
     },
   };
 }
@@ -261,12 +281,14 @@ export function startInlineToolSpinner(tool: ToolCallRender): InlineSpinnerHandl
  * "the routing engine has decided" mood.
  */
 export function renderRoutingBanner(routingType: string, reason: string): void {
-  safeWriteLine(`  ${C.LAVA_BG}${C.LAVA}  ⇢  Routing Engine: ${reason} → ${bold(routingType)}  ${C.RESET}`);
+  safeWriteLine(
+    `  ${C.LAVA_BG}${C.LAVA}  ⇢  Routing Engine: ${reason} → ${bold(routingType)}  ${C.RESET}`,
+  );
 }
 
 /* ──────────────────────── Thinking indicator ──────────────────────── */
 
-const LAVA_GLOW = '\x1b[38;2;255;160;60m';
+const LAVA_GLOW = "\x1b[38;2;255;160;60m";
 
 const FIXO_PULSE_FRAMES: ReadonlyArray<string> = [
   `${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET} ${C.SNOW4}•${C.RESET}`,
@@ -286,7 +308,7 @@ let spinnerFrame = 0;
 
 /**
  * @deprecated Use the new LoadingAnimation class from `loading-animation.ts` instead.
- * 
+ *
  * Start (or stop) a pulsing lava dot that signals the agent
  * is thinking. Uses a 400ms tick. Safe to call repeatedly —
  * the timer is a module-scoped singleton, so the indicator
@@ -296,7 +318,9 @@ let spinnerFrame = 0;
 export function renderThinkingIndicator(active: boolean): void {
   if (active) {
     if (spinnerTimer) return; // already running
-    safeWriteLine(`  ${FIXO_PULSE_FRAMES[0]!}  ${C.SNOW3}agent working…${C.RESET}`);
+    safeWriteLine(
+      `  ${FIXO_PULSE_FRAMES[0]!}  ${C.SNOW3}agent working…${C.RESET}`,
+    );
     spinnerFrame = 0;
     spinnerTimer = setInterval(() => {
       spinnerFrame = (spinnerFrame + 1) % FIXO_PULSE_FRAMES.length;
@@ -308,13 +332,13 @@ export function renderThinkingIndicator(active: boolean): void {
       clearInterval(spinnerTimer);
       spinnerTimer = null;
     }
-    safeWrite('\r' + ' '.repeat(40) + '\r');
+    safeWrite("\r" + " ".repeat(40) + "\r");
   }
 }
 
 /**
  * @deprecated Use the new LoadingAnimation class from `loading-animation.ts` instead.
- * 
+ *
  * A three-frame ASCII spinner for in-band task progress.
  *
  * Used by SingleAgent to show the user that the agent is working
@@ -331,7 +355,9 @@ export class TaskStatusIndicator {
 
   start(): void {
     if (this.timer) return;
-    safeWrite(`${this.frames[0]!}  agent working…  ${TaskStatusIndicator.HINT}`);
+    safeWrite(
+      `${this.frames[0]!}  agent working…  ${TaskStatusIndicator.HINT}`,
+    );
     this.frameIndex = 0;
     this.timer = setInterval(() => {
       this.frameIndex = (this.frameIndex + 1) % this.frames.length;
@@ -342,7 +368,7 @@ export class TaskStatusIndicator {
 
   stop(): void {
     this.clear();
-    safeWrite('\r' + ' '.repeat(60) + '\r');
+    safeWrite("\r" + " ".repeat(60) + "\r");
   }
 
   /** Print a clean "cancelled" message and stop the spinner. */
@@ -361,29 +387,27 @@ export class TaskStatusIndicator {
 
 /* ──────────────────────── AI response ──────────────────────── */
 
-const FRAME_WIDTH_FALLBACK = 76;
-
 function frameWidth(): number {
   return Math.max(20, Math.min(100, (process.stdout.columns ?? 100) - 4));
 }
 
 function wrapToWidth(text: string, width: number): string[] {
   const out: string[] = [];
-  for (const paragraph of text.split('\n')) {
+  for (const paragraph of text.split("\n")) {
     if (paragraph.length === 0) {
-      out.push('');
+      out.push("");
       continue;
     }
     // Simple greedy word-wrap. We don't try to honour
     // in-paragraph formatting — the line-level inline
     // colouring pass below re-runs on the wrapped output.
     const words = paragraph.split(/\s+/);
-    let line = '';
+    let line = "";
     for (const w of words) {
       if (line.length === 0) {
         line = w;
       } else if (line.length + 1 + w.length <= width) {
-        line += ' ' + w;
+        line += " " + w;
       } else {
         out.push(line);
         line = w;
@@ -405,7 +429,10 @@ function colouriseLine(line: string): string {
   let out = line;
 
   // Backtick-wrapped inline code → purple.
-  out = out.replace(/`([^`]+)`/g, (_m, code: string) => `${C.PURPLE}${code}${C.RESET}`);
+  out = out.replace(
+    /`([^`]+)`/g,
+    (_m, code: string) => `${C.PURPLE}${code}${C.RESET}`,
+  );
 
   // File paths → blue. Heuristic: any token containing a `/`
   // and a known extension, OR a bare filename with an extension.
@@ -417,19 +444,25 @@ function colouriseLine(line: string): string {
     /(^|\s)([A-Za-z0-9_./-]+\/[A-Za-z0-9_./-]+)/g,
     (m, pre: string, path: string) => {
       // Don't re-colour what we already coloured above.
-      if (path.includes('\x1b[')) return m;
+      if (path.includes("\x1b[")) return m;
       return `${pre}${C.BLUE}${path}${C.RESET}`;
     },
   );
 
   // Warning keywords → lava.
-  out = out.replace(/\b(error|errors|failed|race condition|warning|warn)\b/gi, (m) => `${C.LAVA}${m}${C.RESET}`);
+  out = out.replace(
+    /\b(error|errors|failed|race condition|warning|warn)\b/gi,
+    (m) => `${C.LAVA}${m}${C.RESET}`,
+  );
 
   // Arrow-prefix lines: render arrow in lava, the rest dim.
-  out = out.replace(/^(\s*)(→\s*)(.*)$/m, (_m, sp: string, arr: string, rest: string) => {
-    if (rest.length === 0) return `${sp}${C.LAVA}${arr}${C.RESET}`;
-    return `${sp}${C.LAVA}${arr}${C.RESET}${C.SNOW4}${rest}${C.RESET}`;
-  });
+  out = out.replace(
+    /^(\s*)(→\s*)(.*)$/m,
+    (_m, sp: string, arr: string, rest: string) => {
+      if (rest.length === 0) return `${sp}${C.LAVA}${arr}${C.RESET}`;
+      return `${sp}${C.LAVA}${arr}${C.RESET}${C.SNOW4}${rest}${C.RESET}`;
+    },
+  );
 
   return out;
 }
@@ -441,14 +474,16 @@ function colouriseLine(line: string): string {
  */
 export function renderAIResponse(text: string): void {
   const w = frameWidth();
-  const top = `  ${C.LAVA}┌${'─'.repeat(w)}┐${C.RESET}`;
-  const bottom = `  ${C.SNOW4}└${'─'.repeat(w)}┘${C.RESET}`;
+  const top = `  ${C.LAVA}┌${"─".repeat(w)}┐${C.RESET}`;
+  const bottom = `  ${C.SNOW4}└${"─".repeat(w)}┘${C.RESET}`;
   safeWriteLine(top);
   for (const line of wrapToWidth(text, w - 2)) {
     // Pad with spaces to keep the side border flush.
-    const coloured = colouriseLine(line) || ' ';
+    const coloured = colouriseLine(line) || " ";
     const pad = Math.max(0, w - 2 - visLen(line));
-    safeWriteLine(`  ${C.SNOW4}│${C.RESET}  ${coloured}${' '.repeat(pad)}${C.SNOW4}│${C.RESET}`);
+    safeWriteLine(
+      `  ${C.SNOW4}│${C.RESET}  ${coloured}${" ".repeat(pad)}${C.SNOW4}│${C.RESET}`,
+    );
   }
   safeWriteLine(bottom);
 }
@@ -459,10 +494,17 @@ export function renderAIResponse(text: string): void {
  * Render the dim cost/timing footer that appears after every
  * completed agent turn.
  */
-export function renderCostLine(model: string, tokens: number, toolCalls: number, durationMs: number): void {
-  const tokensStr = tokens.toLocaleString('en-US');
+export function renderCostLine(
+  model: string,
+  tokens: number,
+  toolCalls: number,
+  durationMs: number,
+): void {
+  const tokensStr = tokens.toLocaleString("en-US");
   const durStr = `${(durationMs / 1000).toFixed(1)}s`;
-  safeWriteLine(`  ${C.SNOW4}${model}  ·  ${tokensStr} tokens  ·  ${toolCalls} tool calls  ·  ${durStr}${C.RESET}`);
+  safeWriteLine(
+    `  ${C.SNOW4}${model}  ·  ${tokensStr} tokens  ·  ${toolCalls} tool calls  ·  ${durStr}${C.RESET}`,
+  );
 }
 
 /* ──────────────────────── Command grid ──────────────────────── */
@@ -473,18 +515,18 @@ interface CommandEntry {
 }
 
 const DEFAULT_COMMANDS: ReadonlyArray<CommandEntry> = [
-  { cmd: '/help',      desc: 'all commands' },
-  { cmd: '/model',     desc: 'pick model' },
-  { cmd: '/plan',      desc: 'create plan' },
-  { cmd: '/providers', desc: 'manage keys' },
-  { cmd: '/mode',      desc: 'plan / build' },
-  { cmd: '/tests',     desc: 'run tests' },
-  { cmd: '/diff',      desc: 'git diff' },
-  { cmd: '/compact',   desc: 'compress ctx' },
-  { cmd: '/memory',    desc: 'edit memory' },
-  { cmd: '/skills',    desc: 'list skills' },
-  { cmd: '/runs',      desc: 'list runs' },
-  { cmd: '/diagnose',  desc: 'health check' },
+  { cmd: "/help", desc: "all commands" },
+  { cmd: "/model", desc: "pick model" },
+  { cmd: "/plan", desc: "create plan" },
+  { cmd: "/providers", desc: "manage keys" },
+  { cmd: "/mode", desc: "plan / build" },
+  { cmd: "/tests", desc: "run tests" },
+  { cmd: "/diff", desc: "git diff" },
+  { cmd: "/compact", desc: "compress ctx" },
+  { cmd: "/memory", desc: "edit memory" },
+  { cmd: "/skills", desc: "list skills" },
+  { cmd: "/runs", desc: "list runs" },
+  { cmd: "/diagnose", desc: "health check" },
 ];
 
 /**
@@ -493,26 +535,30 @@ const DEFAULT_COMMANDS: ReadonlyArray<CommandEntry> = [
  * letter-spaced caps, commands in LAVA, descriptions in
  * SNOW3.
  */
-export function renderCommandGrid(commands: ReadonlyArray<CommandEntry> = DEFAULT_COMMANDS): void {
+export function renderCommandGrid(
+  commands: ReadonlyArray<CommandEntry> = DEFAULT_COMMANDS,
+): void {
   const w = Math.min(100, cols() - 4);
-  const titleText = 'QUICK REFERENCE';
-  safeWriteLine('');
-  safeWriteLine(`  ${C.SNOW4}${titleText}${C.RESET}  ${C.VOID4_FG}${'─'.repeat(Math.max(0, w - titleText.length - 4))}${C.RESET}`);
-  safeWriteLine('');
+  const titleText = "QUICK REFERENCE";
+  safeWriteLine("");
+  safeWriteLine(
+    `  ${C.SNOW4}${titleText}${C.RESET}  ${C.VOID4_FG}${"─".repeat(Math.max(0, w - titleText.length - 4))}${C.RESET}`,
+  );
+  safeWriteLine("");
   const cmdW = 14;
   const descW = Math.max(20, Math.floor((w - 8) / 2) - cmdW);
   for (let i = 0; i < commands.length; i += 2) {
     const left = commands[i]!;
     const right = commands[i + 1];
-    const leftStr = `  ${C.LAVA}${padToVisual(left.cmd, cmdW, ' ')}${C.RESET}${C.SNOW3}${padToVisual(left.desc, descW, ' ')}${C.RESET}`;
+    const leftStr = `  ${C.LAVA}${padToVisual(left.cmd, cmdW, " ")}${C.RESET}${C.SNOW3}${padToVisual(left.desc, descW, " ")}${C.RESET}`;
     const rightStr = right
-      ? `${C.LAVA}${padToVisual(right.cmd, cmdW, ' ')}${C.RESET}${C.SNOW3}${right.desc}${C.RESET}`
-      : '';
+      ? `${C.LAVA}${padToVisual(right.cmd, cmdW, " ")}${C.RESET}${C.SNOW3}${right.desc}${C.RESET}`
+      : "";
     safeWriteLine(leftStr + rightStr);
   }
-  safeWriteLine('');
-  safeWriteLine(`  ${C.VOID4_FG}${'─'.repeat(w)}${C.RESET}`);
-  safeWriteLine('');
+  safeWriteLine("");
+  safeWriteLine(`  ${C.VOID4_FG}${"─".repeat(w)}${C.RESET}`);
+  safeWriteLine("");
 }
 
 /* ──────────────────────── Mode selector ──────────────────────── */
@@ -537,20 +583,22 @@ export interface ModeGroup {
  */
 export function renderModeSelector(group: ModeGroup): void {
   const w = Math.min(100, cols() - 4);
-  safeWriteLine('');
-  safeWriteLine(`  ${C.SNOW4}${group.title}${C.RESET}  ${C.VOID4_FG}${'─'.repeat(Math.max(0, w - group.title.length - 4))}${C.RESET}`);
-  safeWriteLine('');
+  safeWriteLine("");
+  safeWriteLine(
+    `  ${C.SNOW4}${group.title}${C.RESET}  ${C.VOID4_FG}${"─".repeat(Math.max(0, w - group.title.length - 4))}${C.RESET}`,
+  );
+  safeWriteLine("");
   for (const mode of group.modes) {
     const isSelected = mode.id === group.selected;
     const dot = isSelected ? `${C.LAVA}◉${C.RESET}` : `${C.SNOW4}○${C.RESET}`;
     const label = isSelected
       ? `${C.SNOW}${C.BOLD}${mode.label}${C.RESET}`
       : `${C.SNOW3}${mode.label}${C.RESET}`;
-    const desc = isSelected ? `${C.SNOW3}${mode.description}${C.RESET}` : `${C.SNOW4}${mode.description}${C.RESET}`;
-    const badge = isSelected
-      ? `  ${C.LAVA_BG}${C.LAVA} active ${C.RESET}`
-      : '';
+    const desc = isSelected
+      ? `${C.SNOW3}${mode.description}${C.RESET}`
+      : `${C.SNOW4}${mode.description}${C.RESET}`;
+    const badge = isSelected ? `  ${C.LAVA_BG}${C.LAVA} active ${C.RESET}` : "";
     safeWriteLine(`  ${dot}  ${label}  ${desc}${badge}`);
   }
-  safeWriteLine('');
+  safeWriteLine("");
 }

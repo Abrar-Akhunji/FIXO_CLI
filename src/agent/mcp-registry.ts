@@ -12,10 +12,10 @@
  * (add/remove) are kept in an in-memory layer that is
  * consumed by /mcp add and /mcp remove.
  */
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import yaml from 'js-yaml';
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import yaml from "js-yaml";
 
 /** Shape of a single MCP server config entry (matches MCP spec). */
 export interface McpServerConfig {
@@ -23,13 +23,13 @@ export interface McpServerConfig {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
-  type?: 'stdio' | 'sse';
+  type?: "stdio" | "sse";
   [key: string]: unknown;
 }
 
 /** A single source of MCP servers. */
 export interface McpSourceView {
-  name: 'global' | 'project' | 'local';
+  name: "global" | "project" | "local";
   configPath: string | null;
   servers: Record<string, McpServerConfig>;
 }
@@ -53,13 +53,18 @@ function getLocal(cwd: string): Record<string, McpServerConfig> {
 }
 
 /** Read the global MCP config from `~/.freellmapi/mcp.json`. */
-export function readGlobalMcpConfig(): { configPath: string | null; servers: Record<string, McpServerConfig> } {
-  const configPath = path.join(os.homedir(), '.freellmapi', 'mcp.json');
+export function readGlobalMcpConfig(): {
+  configPath: string | null;
+  servers: Record<string, McpServerConfig>;
+} {
+  const configPath = path.join(os.homedir(), ".freellmapi", "mcp.json");
   if (!fs.existsSync(configPath)) {
     return { configPath: null, servers: {} };
   }
   try {
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { mcpServers?: Record<string, McpServerConfig> };
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf-8")) as {
+      mcpServers?: Record<string, McpServerConfig>;
+    };
     return { configPath, servers: raw.mcpServers ?? {} };
   } catch {
     return { configPath, servers: {} };
@@ -67,15 +72,24 @@ export function readGlobalMcpConfig(): { configPath: string | null; servers: Rec
 }
 
 /** Read the project MCP config from `<cwd>/.fixo.yml` or `.fixo.yaml`. */
-export function readProjectMcpConfig(cwd: string): { configPath: string | null; servers: Record<string, McpServerConfig> } {
-  const yml = path.join(cwd, '.fixo.yml');
-  const yamlAlt = path.join(cwd, '.fixo.yaml');
-  const configPath = fs.existsSync(yml) ? yml : fs.existsSync(yamlAlt) ? yamlAlt : null;
+export function readProjectMcpConfig(cwd: string): {
+  configPath: string | null;
+  servers: Record<string, McpServerConfig>;
+} {
+  const yml = path.join(cwd, ".fixo.yml");
+  const yamlAlt = path.join(cwd, ".fixo.yaml");
+  const configPath = fs.existsSync(yml)
+    ? yml
+    : fs.existsSync(yamlAlt)
+      ? yamlAlt
+      : null;
   if (!configPath) {
     return { configPath: null, servers: {} };
   }
   try {
-    const raw = yaml.load(fs.readFileSync(configPath, 'utf-8')) as { mcpServers?: Record<string, McpServerConfig> } | null;
+    const raw = yaml.load(fs.readFileSync(configPath, "utf-8")) as {
+      mcpServers?: Record<string, McpServerConfig>;
+    } | null;
     return { configPath, servers: raw?.mcpServers ?? {} };
   } catch {
     return { configPath, servers: {} };
@@ -87,14 +101,18 @@ export function listAllMcpSources(cwd: string): McpRegistryView {
   const g = readGlobalMcpConfig();
   const p = readProjectMcpConfig(cwd);
   return {
-    global: { name: 'global', configPath: g.configPath, servers: g.servers },
-    project: { name: 'project', configPath: p.configPath, servers: p.servers },
-    local: { name: 'local', configPath: null, servers: { ...getLocal(cwd) } },
+    global: { name: "global", configPath: g.configPath, servers: g.servers },
+    project: { name: "project", configPath: p.configPath, servers: p.servers },
+    local: { name: "local", configPath: null, servers: { ...getLocal(cwd) } },
   };
 }
 
 /** Add a server to the in-memory local layer for `cwd`. */
-export function addLocalMcpServer(cwd: string, name: string, config: McpServerConfig): void {
+export function addLocalMcpServer(
+  cwd: string,
+  name: string,
+  config: McpServerConfig,
+): void {
   getLocal(cwd)[name] = config;
 }
 

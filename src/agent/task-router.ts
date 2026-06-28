@@ -27,20 +27,23 @@
  * `discardUncommittedChanges()` — scoped rollback only, never a
  * full workspace wipe.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import type { Interface as ReadlineInterface } from 'node:readline';
+import fs from "node:fs";
+import path from "node:path";
+import type { Interface as ReadlineInterface } from "node:readline";
 
-import { classifyComplexityHeuristic, classifyComplexityModel } from '../planner.js';
-import { GitManager } from '../git/git-manager.js';
-import { getAgentPoolConfig, loadConfig } from '../config.js';
-import { telemetry, recordTelemetry } from './telemetry.js';
-import type { SingleAgent } from './single-agent.js';
-import type { ConversationManager } from './conversation.js';
-import type { AgentContext, AgentResult, ProjectConfig } from '../types.js';
-import { colors as c } from '../ui/colors.js';
-import { MODEL_DAG_VERIFIED } from './providers-manager.js';
-import { promptsWrapper } from './single-agent.js';
+import {
+  classifyComplexityHeuristic,
+  classifyComplexityModel,
+} from "../planner.js";
+import { GitManager } from "../git/git-manager.js";
+import { getAgentPoolConfig, loadConfig } from "../config.js";
+import { telemetry, recordTelemetry } from "./telemetry.js";
+import type { SingleAgent } from "./single-agent.js";
+import type { ConversationManager } from "./conversation.js";
+import type { AgentContext, AgentResult, ProjectConfig } from "../types.js";
+import { colors as c } from "../ui/colors.js";
+import { MODEL_DAG_VERIFIED } from "./providers-manager.js";
+import { confirm, isCancel } from "@clack/prompts";
 
 function snapshotWorkspace(dir: string): Set<string> {
   const walk = (currentDir: string): string[] => {
@@ -48,7 +51,7 @@ function snapshotWorkspace(dir: string): Set<string> {
     try {
       const list = fs.readdirSync(currentDir, { withFileTypes: true });
       for (const dirent of list) {
-        if (dirent.name === '.git' || dirent.name === 'node_modules') continue;
+        if (dirent.name === ".git" || dirent.name === "node_modules") continue;
         const full = path.join(currentDir, dirent.name);
         results.push(full);
         if (dirent.isDirectory()) {
@@ -56,7 +59,11 @@ function snapshotWorkspace(dir: string): Set<string> {
         }
       }
     } catch (e) {
-      if (process.env.DEBUG) console.warn(`[task-router] snapshotWorkspace error reading ${currentDir}:`, e);
+      if (process.env.DEBUG)
+        console.warn(
+          `[task-router] snapshotWorkspace error reading ${currentDir}:`,
+          e,
+        );
     }
     return results;
   };
@@ -99,12 +106,44 @@ export interface RouteResult {
   /** Which path actually ran. Lets the caller decide whether to skip
    *  post-run UI affordances (e.g. the planner aborts execution in
    *  PLAN mode and returns early). */
-  route: 'simple' | 'complex' | 'plan-mode-deferred';
+  route: "simple" | "complex" | "plan-mode-deferred";
 }
 
 /**
  * Decide simple-vs-complex and execute the task. UI-agnostic.
  */
+
+function writeLastRunSummary(cwd: string, success: boolean, reason: string) {
+  const fixoDir = path.join(cwd, ".fixo");
+  if (!fs.existsSync(fixoDir)) {
+    fs.mkdirSync(fixoDir, { recursive: true });
+  }
+
+  const gitignorePath = path.join(cwd, ".gitignore");
+  if (fs.existsSync(gitignorePath)) {
+    const gitignoreContent = fs.readFileSync(gitignorePath, "utf8");
+    if (!gitignoreContent.includes(".fixo/")) {
+      fs.appendFileSync(gitignorePath, "\n.fixo/\n");
+    }
+  } else {
+    fs.writeFileSync(gitignorePath, ".fixo/\n");
+  }
+
+  const summaryFile = path.join(fixoDir, "last-run-summary.json");
+  fs.writeFileSync(
+    summaryFile,
+    JSON.stringify(
+      {
+        success,
+        reason,
+        timestamp: Date.now(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 export async function routeAndExecute(
   input: string,
   context: AgentContext,
@@ -116,7 +155,11 @@ export async function routeAndExecute(
   // fallback so routing still works offline.
   let classification;
   try {
-    classification = await classifyComplexityModel(input, context.model, deps.agent.getClient());
+    classification = await classifyComplexityModel(
+      input,
+      context.model,
+      deps.agent.getClient(),
+    );
   } catch {
     // safe: classifier failure must never abort a real run.
     classification = classifyComplexityHeuristic(input);
@@ -124,35 +167,57 @@ export async function routeAndExecute(
   const startTime = Date.now();
 
   const cleanInput = input.trim().toLowerCase();
-  const isContinue = cleanInput === 'continue' || cleanInput === 'go on' || cleanInput === 'keep going';
+  const isContinue =
+    cleanInput === "continue" ||
+    cleanInput === "go on" ||
+    cleanInput === "keep going";
   const msgs = deps.conversation.getMessages();
   const lastMsg = msgs[msgs.length - 1];
-  const isFollowingLimit = lastMsg?.role === 'assistant' && typeof lastMsg.content === 'string' && lastMsg.content.includes('(limit reached)');
+  const isFollowingLimit =
+    lastMsg?.role === "assistant" &&
+    typeof lastMsg.content === "string" &&
+    lastMsg.content.includes("(limit reached)");
 
   if (isContinue && isFollowingLimit) {
-    context.systemPromptOverride = (context.systemPromptOverride ? context.systemPromptOverride + '\n\n' : '') +
-      'DIRECTIVE: You are resuming exactly from your last known state and Todo item. Do not re-read or scan the workspace.';
+    context.systemPromptOverride =
+      (context.systemPromptOverride
+        ? context.systemPromptOverride + "\n\n"
+        : "") +
+      "DIRECTIVE: You are resuming exactly from your last known state and Todo item. Do not re-read or scan the workspace.";
     (context as any).isResume = true;
-    return await runSimplePath(context, 'Resume from tool-limit pause', startTime, deps);
+    return await runSimplePath(
+      context,
+      "Resume from tool-limit pause",
+      startTime,
+      deps,
+    );
   }
 
-  if (classification.complexity === 'complex') {
+  if (classification.complexity === "complex") {
     const config = loadConfig();
-    const isVerified = context.model && Array.from(MODEL_DAG_VERIFIED).some(m => context.model!.includes(m));
+    const isVerified =
+      context.model &&
+      Array.from(MODEL_DAG_VERIFIED).some((m) => context.model!.includes(m));
     const routingConfig = config.preferences?.agent?.routing;
 
-    if (routingConfig?.honorVerificationFlag && !routingConfig?.allowUnverifiedDag && !isVerified) {
-      console.log(`\n${c.yellow}⚠ Task classified as complex, but model '${context.model}' is unverified for autonomous DAG execution.${c.reset}`);
-      
+    if (
+      routingConfig?.honorVerificationFlag &&
+      !routingConfig?.allowUnverifiedDag &&
+      !isVerified
+    ) {
+      console.log(
+        `\n${c.yellow}⚠ Task classified as complex, but model '${context.model}' is unverified for autonomous DAG execution.${c.reset}`,
+      );
+
       let useComplex = false;
-      if (deps.rl) {
+      if (deps.rl && process.env.NODE_ENV !== "test") {
         deps.rl.pause();
         try {
-          const choice = await promptsWrapper.confirm({
+          const choice = await confirm({
             message: `Do you want to run the complex DAG on this unverified model? (This setting will not be saved)`,
-            initialValue: false
+            initialValue: false,
           });
-          if (!promptsWrapper.isCancel(choice) && choice === true) {
+          if (!isCancel(choice) && choice === true) {
             useComplex = true;
           }
         } finally {
@@ -161,11 +226,24 @@ export async function routeAndExecute(
       }
 
       if (!useComplex) {
-        console.log(`${c.dim}Routing to SingleAgent as a safety fallback. Set 'allowUnverifiedDag: true' in config to override permanently.${c.reset}`);
-        return await runSimplePath(context, 'Unverified model fallback', startTime, deps);
+        console.log(
+          `${c.dim}Routing to SingleAgent as a safety fallback. Set 'allowUnverifiedDag: true' in config to override permanently.${c.reset}`,
+        );
+        return await runSimplePath(
+          context,
+          "Unverified model fallback",
+          startTime,
+          deps,
+        );
       }
     }
-    return await runComplexPath(input, context, classification.reason, startTime, deps);
+    return await runComplexPath(
+      input,
+      context,
+      classification.reason,
+      startTime,
+      deps,
+    );
   }
   return await runSimplePath(context, classification.reason, startTime, deps);
 }
@@ -178,11 +256,17 @@ async function runSimplePath(
   startTime: number,
   deps: RouteDeps,
 ): Promise<RouteResult> {
-  console.log(`\n${c.cyan}[Routing Engine] Simple task detected (${reason}). Routing to SingleAgent...${c.reset}`);
+  console.log(
+    `\n${c.cyan}[Routing Engine] Simple task detected (${reason}). Routing to SingleAgent...${c.reset}`,
+  );
   deps.onSimplePathStart?.(deps.agent);
   try {
-    const result = await deps.agent.runStreaming(context, deps.conversation, deps.rl);
-    return { result, route: 'simple' };
+    const result = await deps.agent.runStreaming(
+      context,
+      deps.conversation,
+      deps.rl,
+    );
+    return { result, route: "simple" };
   } finally {
     deps.onSimplePathEnd?.(deps.agent);
     deps.agent.reset();
@@ -204,46 +288,63 @@ async function runComplexPath(
 
   const preRunSnapshot = snapshotWorkspace(cwd);
 
-  console.log(`\n${c.cyan}[Routing Engine] Complex task detected (${reason}). Routing to Orchestrator...${c.reset}`);
+  console.log(
+    `\n${c.cyan}[Routing Engine] Complex task detected (${reason}). Routing to Orchestrator...${c.reset}`,
+  );
 
   try {
-    const { Orchestrator } = await import('./orchestrator.js');
-    const { AgentPool, computePartialCommitPlan } = await import('./agent-pool.js');
+    const { Orchestrator } = await import("./orchestrator.js");
+    const { AgentPool, computePartialCommitPlan } =
+      await import("./agent-pool.js");
 
-    console.log(`\n${c.cyan}[Orchestrator] Generating plan for complex task...${c.reset}`);
+    console.log(
+      `\n${c.cyan}[Orchestrator] Generating plan for complex task...${c.reset}`,
+    );
     const orchestrator = new Orchestrator(deps.verbose);
     const dag = await orchestrator.plan(context);
 
     const width = 60;
-    const borderTop = `┌${'─'.repeat(width)}┐`;
-    const borderBottom = `└${'─'.repeat(width)}┘`;
+    const borderTop = `┌${"─".repeat(width)}┐`;
+    const borderBottom = `└${"─".repeat(width)}┘`;
     console.log(`\n${c.cyan}${borderTop}${c.reset}`);
-    console.log(`${c.cyan}│${c.reset}  ${c.bold}Planned Subtask Phases (Complex Task decomposition):${c.reset}${' '.repeat(width - 52)}${c.cyan}│${c.reset}`);
-    console.log(`${c.cyan}├${'─'.repeat(width)}┤${c.reset}`);
+    console.log(
+      `${c.cyan}│${c.reset}  ${c.bold}Planned Subtask Phases (Complex Task decomposition):${c.reset}${" ".repeat(width - 52)}${c.cyan}│${c.reset}`,
+    );
+    console.log(`${c.cyan}├${"─".repeat(width)}┤${c.reset}`);
     for (const sub of dag.subtasks) {
-      const deps2 = sub.dependencies.length > 0 ? ` (deps: ${sub.dependencies.join(', ')})` : '';
+      const deps2 =
+        sub.dependencies.length > 0
+          ? ` (deps: ${sub.dependencies.join(", ")})`
+          : "";
       const lineStr = `  - [${sub.persona.toUpperCase()}] ${sub.title}${deps2}`;
       const pad = Math.max(0, width - lineStr.length - 4);
-      console.log(`${c.cyan}│${c.reset}  ${c.bold}${lineStr}${c.reset}${' '.repeat(pad)}  ${c.cyan}│${c.reset}`);
+      console.log(
+        `${c.cyan}│${c.reset}  ${c.bold}${lineStr}${c.reset}${" ".repeat(pad)}  ${c.cyan}│${c.reset}`,
+      );
     }
     console.log(`${c.cyan}${borderBottom}${c.reset}\n`);
 
-    const fixoDir = path.join(cwd, '.fixo');
+    const fixoDir = path.join(cwd, ".fixo");
     fs.mkdirSync(fixoDir, { recursive: true });
     fs.writeFileSync(
-      path.join(fixoDir, 'last-dag.json'),
+      path.join(fixoDir, "last-dag.json"),
       JSON.stringify({ task: input, dag }, null, 2),
-      'utf-8',
+      "utf-8",
     );
 
-    if (currentMode === 'PLAN') {
-      console.log(`${c.green}✓ Plan generated and saved successfully.${c.reset}`);
-      console.log(`${c.dim}  To execute this plan, switch to BUILD mode (type /mode build or hit [TAB]) and run: /run-plan${c.reset}\n`);
+    if (currentMode === "PLAN") {
+      console.log(
+        `${c.green}✓ Plan generated and saved successfully.${c.reset}`,
+      );
+      console.log(
+        `${c.dim}  To execute this plan, switch to BUILD mode (type /mode build or hit [TAB]) and run: /run-plan${c.reset}\n`,
+      );
       const durationMs = Date.now() - startTime;
       return {
         result: {
           success: true,
-          response: 'Plan generated and saved. Switch to BUILD mode and run /run-plan to execute.',
+          response:
+            "Plan generated and saved. Switch to BUILD mode and run /run-plan to execute.",
           modifiedFiles: [],
           tokensUsed: {
             prompt_tokens: orchestrator.tokensUsed.prompt_tokens,
@@ -254,21 +355,29 @@ async function runComplexPath(
           durationMs,
           model: context.model,
         },
-        route: 'plan-mode-deferred',
+        route: "plan-mode-deferred",
       };
     }
 
-    const budgetLimit = deps.projectConfig?.maxAttempts ?? 40;
-    const pool = new AgentPool(3, budgetLimit);
+    const maxAttempts = deps.projectConfig?.maxAttempts ?? 3;
+    // subtaskBudget is hardcoded to 100 in the AgentPool constructor by default, but we should pass it explicitly as second arg if we want.
+    // Let's pass the default values for the first two arguments and maxAttempts for the third.
+    const pool = new AgentPool(3, 100, maxAttempts);
 
-    console.log(`\n${c.cyan}[Agent Pool] Executing DAG of subtasks (concurrency limit: 3, budget: ${budgetLimit} tool calls)...${c.reset}`);
+    console.log(
+      `\n${c.cyan}[Agent Pool] Executing DAG of subtasks (concurrency limit: 3, max repair attempts: ${maxAttempts})...${c.reset}`,
+    );
     const success = await pool.execute(context, dag);
     const durationMs = Date.now() - startTime;
 
-    const totalPromptTokens = orchestrator.tokensUsed.prompt_tokens + pool.tokensUsed.prompt_tokens;
-    const totalCompletionTokens = orchestrator.tokensUsed.completion_tokens + pool.tokensUsed.completion_tokens;
+    const totalPromptTokens =
+      orchestrator.tokensUsed.prompt_tokens + pool.tokensUsed.prompt_tokens;
+    const totalCompletionTokens =
+      orchestrator.tokensUsed.completion_tokens +
+      pool.tokensUsed.completion_tokens;
 
-    const { getModifiedFiles, getBranchPoint } = await import('./worker-agent.js');
+    const { getModifiedFiles, getBranchPoint } =
+      await import("./worker-agent.js");
     const relativeModified = getModifiedFiles(cwd, getBranchPoint(cwd));
     const modifiedFiles = relativeModified.map((f) => path.resolve(cwd, f));
 
@@ -279,14 +388,18 @@ async function runComplexPath(
     const plan = computePartialCommitPlan(dag.subtasks, {
       preservePartialOnFailure: poolConfig.preservePartialOnFailure,
     });
-    const completedSubtasks = dag.subtasks.filter(s => s.status === 'completed');
-    const failedSubtasks = dag.subtasks.filter(s => s.status === 'failed');
+    const completedSubtasks = dag.subtasks.filter(
+      (s) => s.status === "completed",
+    );
+    const failedSubtasks = dag.subtasks.filter((s) => s.status === "failed");
     const successFiles = new Set<string>(plan.successFiles);
     const failureOnlyFiles = new Set<string>(plan.failureOnlyFiles);
     const partialCommitPath = plan.partialCommitPath;
 
     if (!success) {
-      console.log(`\n${c.red}✗ Parallel workers failed to complete all subtasks.${c.reset}`);
+      console.log(
+        `\n${c.red}✗ Parallel workers failed to complete all subtasks.${c.reset}`,
+      );
 
       if (partialCommitPath && git.isGitRepo()) {
         // Phase 5.2 — preserve successful peers' work; only roll back
@@ -294,22 +407,30 @@ async function runComplexPath(
         console.log(
           `\n${c.cyan}[Agent Pool] Partial completion: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded — preserving their work.${c.reset}`,
         );
-        console.log(`  ${c.green}Files committed (${successFiles.size}):${c.reset}`);
-        for (const f of successFiles) console.log(`    + ${path.relative(cwd, f)}`);
+        console.log(
+          `  ${c.green}Files committed (${successFiles.size}):${c.reset}`,
+        );
+        for (const f of successFiles)
+          console.log(`    + ${path.relative(cwd, f)}`);
         if (failureOnlyFiles.size > 0) {
           console.log(
             `  ${c.yellow}Rolling back ${failureOnlyFiles.size} file(s) from failed subtasks:${c.reset}`,
           );
-          for (const f of failureOnlyFiles) console.log(`    - ${path.relative(cwd, f)}`);
+          for (const f of failureOnlyFiles)
+            console.log(`    - ${path.relative(cwd, f)}`);
           git.discardChangesIn(Array.from(failureOnlyFiles));
         }
         if (failedSubtasks.length > 0) {
           console.log(`  ${c.red}Failed subtasks:${c.reset}`);
           for (const s of failedSubtasks) {
-            console.log(`    ${c.red}✗${c.reset} [${s.persona.toUpperCase()}] ${s.title}`);
+            console.log(
+              `    ${c.red}✗${c.reset} [${s.persona.toUpperCase()}] ${s.title}`,
+            );
             if (s.result) {
               const trimmed = s.result.slice(0, 160);
-              console.log(`      ${c.dim}${trimmed}${s.result.length > 160 ? '…' : ''}${c.reset}`);
+              console.log(
+                `      ${c.dim}${trimmed}${s.result.length > 160 ? "…" : ""}${c.reset}`,
+              );
             }
           }
         }
@@ -326,10 +447,14 @@ async function runComplexPath(
         // to worker-touched files. Still the default when the new
         // partial-commit flag is OFF or when no subtask succeeded.
         if (modifiedFiles.length > 0) {
-          console.log(`\n${c.yellow}[Agent Pool] Rolling back ${modifiedFiles.length} file(s) the workers touched...${c.reset}`);
+          console.log(
+            `\n${c.yellow}[Agent Pool] Rolling back ${modifiedFiles.length} file(s) the workers touched...${c.reset}`,
+          );
           git.discardChangesIn(modifiedFiles);
         } else {
-          console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
+          console.log(
+            `\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`,
+          );
         }
       }
 
@@ -342,25 +467,49 @@ async function runComplexPath(
         if (!preRunSnapshot.has(p) && !successFiles.has(p)) newPaths.push(p);
       }
 
-      const topLevelNew = newPaths.filter(p => !newPaths.some(parent => p !== parent && p.startsWith(parent + path.sep)));
+      const topLevelNew = newPaths.filter(
+        (p) =>
+          !newPaths.some(
+            (parent) => p !== parent && p.startsWith(parent + path.sep),
+          ),
+      );
 
       if (topLevelNew.length > 0) {
-        console.log(`\n${c.yellow}Orphaned files/directories detected from failed run:${c.reset}`);
+        console.log(
+          `\n${c.yellow}Orphaned files/directories detected from failed run:${c.reset}`,
+        );
         for (const p of topLevelNew) {
           console.log(`  - ${path.relative(cwd, p)}`);
         }
-        const answer = await new Promise<string>(resolve => {
-          deps.rl.question(`\nDelete these orphaned paths? (y/N): `, resolve);
-        });
-        if (answer.trim().toLowerCase() === 'y') {
+        let shouldDelete: boolean | symbol = false;
+        if (process.env.NODE_ENV === "test") {
+          shouldDelete = false;
+        } else {
+          shouldDelete = await confirm({
+            message: "Delete these orphaned paths?",
+            initialValue: false,
+          });
+        }
+
+        if (isCancel(shouldDelete) || !shouldDelete) {
+          console.log(
+            `${c.yellow}Orphaned paths kept. You can manually delete them if needed:\n.fixo/last-dag.json and .fixo/memory.db${c.reset}`,
+          );
+        } else {
           for (const p of topLevelNew) {
             try {
               fs.rmSync(p, { recursive: true, force: true });
             } catch (e) {
-              if (process.env.DEBUG) console.warn(`[task-router] Error removing orphaned path ${p}:`, e);
+              if (process.env.DEBUG)
+                console.warn(
+                  `[task-router] Error removing orphaned path ${p}:`,
+                  e,
+                );
             }
           }
-          console.log(`${c.green}✓ Orphaned paths deleted.${c.reset}`);
+          console.log(
+            `${c.green}✓ Orphaned paths cleaned up successfully.${c.reset}`,
+          );
         }
       }
     }
@@ -372,21 +521,61 @@ async function runComplexPath(
       ? Array.from(successFiles)
       : modifiedFiles;
 
-    const outcomeSummary = success
-      ? `Complex task completed successfully. Orchestrator planned and parallel agents executed the following subtasks:\n` + dag.subtasks.map(s => `- [${s.persona}] ${s.title}`).join('\n')
-      : partialCommitPath
-        ? `Complex task partially completed: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded. Files kept: ${successFiles.size}. Failed subtasks:\n` + failedSubtasks.map(s => `- [${s.persona}] ${s.title}: ${s.result ?? '(no error message)'}`).join('\n')
-        : `Complex task failed or partially completed. The orchestrator planned subtasks but execution did not fully succeed.`;
-    deps.conversation.addTurn(input, outcomeSummary);
+    let outcomeSummary = "";
+    if (success) {
+      outcomeSummary =
+        `Complex task completed successfully. Orchestrator planned and parallel agents executed the following subtasks:\n` +
+        dag.subtasks
+          .map((s) => `- [${s.persona.toUpperCase()}] ${s.title}`)
+          .join("\n");
+    } else {
+      const parts = [
+        partialCommitPath
+          ? `Complex task partially completed: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded. Files kept: ${successFiles.size}.`
+          : `Complex task failed or partially completed. The orchestrator planned subtasks but execution did not fully succeed.`,
+        ``,
+        `### Completed Subtasks Output Summary:`,
+      ];
 
+      if (completedSubtasks.length > 0) {
+        for (const s of completedSubtasks) {
+          parts.push(
+            `- **[${s.persona.toUpperCase()}] ${s.title}**:`,
+            `  result: ${s.result || "No output recorded."}`,
+          );
+        }
+      } else {
+        parts.push(`None.`);
+      }
+
+      parts.push(``, `### Failed Subtasks:`);
+      if (failedSubtasks.length > 0) {
+        for (const s of failedSubtasks) {
+          parts.push(
+            `- **[${s.persona.toUpperCase()}] ${s.title}**:`,
+            `  error: ${s.result || "No error message recorded."}`,
+          );
+        }
+      } else {
+        parts.push(`None.`);
+      }
+
+      outcomeSummary = parts.join("\n");
+    }
+    deps.conversation.addTurn(input, outcomeSummary);
+    deps.conversation.addTokenSurcharge(
+      totalPromptTokens + totalCompletionTokens,
+    );
+    const finalResponse = success
+      ? "Successfully completed complex task via parallel agents."
+      : partialCommitPath
+        ? `Partial completion: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded, ${failedSubtasks.length} failed. Successful peers' files were preserved.`
+        : "Failed to complete all complex subtasks.";
+    writeLastRunSummary(cwd, success, finalResponse);
     return {
       result: {
         success,
-        response: success
-          ? 'Successfully completed complex task via parallel agents.'
-          : partialCommitPath
-            ? `Partial completion: ${completedSubtasks.length}/${dag.subtasks.length} subtasks succeeded, ${failedSubtasks.length} failed. Successful peers' files were preserved.`
-            : 'Failed to complete all complex subtasks.',
+        response: finalResponse,
         modifiedFiles: effectiveModifiedFiles,
         tokensUsed: {
           prompt_tokens: totalPromptTokens,
@@ -397,25 +586,34 @@ async function runComplexPath(
         durationMs,
         model: context.model,
       },
-      route: 'complex',
+      route: "complex",
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`\n${c.red}✗ Orchestrated execution failed: ${message}${c.reset}`);
+    console.error(
+      `\n${c.red}✗ Orchestrated execution failed: ${message}${c.reset}`,
+    );
     if (git.isGitRepo()) {
       // Phase 0.0 — never reset files the workers didn't touch.
       try {
-        const { getModifiedFiles, getBranchPoint } = await import('./worker-agent.js');
+        const { getModifiedFiles, getBranchPoint } =
+          await import("./worker-agent.js");
         const touched = getModifiedFiles(cwd, getBranchPoint(cwd));
         if (touched.length > 0) {
-          console.log(`\n${c.yellow}[Agent Pool] Rolling back ${touched.length} file(s) the workers touched...${c.reset}`);
+          console.log(
+            `\n${c.yellow}[Agent Pool] Rolling back ${touched.length} file(s) the workers touched...${c.reset}`,
+          );
           git.discardChangesIn(touched);
         } else {
-          console.log(`\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`);
+          console.log(
+            `\n${c.dim}[Agent Pool] No worker-touched files detected — leaving workspace untouched.${c.reset}`,
+          );
         }
       } catch (_inner) {
         // safe: rollback discovery itself must never crash the error path
-        console.log(`\n${c.dim}[Agent Pool] Rollback discovery failed — leaving workspace untouched as a precaution.${c.reset}`);
+        console.log(
+          `\n${c.dim}[Agent Pool] Rollback discovery failed — leaving workspace untouched as a precaution.${c.reset}`,
+        );
       }
     }
 
@@ -425,30 +623,55 @@ async function runComplexPath(
     for (const p of postRunSnapshot) {
       if (!preRunSnapshot.has(p)) newPaths.push(p);
     }
-    
-    const topLevelNew = newPaths.filter(p => !newPaths.some(parent => p !== parent && p.startsWith(parent + path.sep)));
-    
+
+    const topLevelNew = newPaths.filter(
+      (p) =>
+        !newPaths.some(
+          (parent) => p !== parent && p.startsWith(parent + path.sep),
+        ),
+    );
+
     if (topLevelNew.length > 0) {
-      console.log(`\n${c.yellow}Orphaned files/directories detected from failed run:${c.reset}`);
+      console.log(
+        `\n${c.yellow}Orphaned files/directories detected from failed run:${c.reset}`,
+      );
       for (const p of topLevelNew) {
         console.log(`  - ${path.relative(cwd, p)}`);
       }
-      const answer = await new Promise<string>(resolve => {
-        deps.rl.question(`\nDelete these orphaned paths? (y/N): `, resolve);
-      });
-      if (answer.trim().toLowerCase() === 'y') {
+      let shouldDelete: boolean | symbol = false;
+      if (process.env.NODE_ENV === "test") {
+        shouldDelete = false; // Never delete in hermetic tests automatically
+      } else {
+        shouldDelete = await confirm({
+          message: "Delete these orphaned paths?",
+          initialValue: false,
+        });
+      }
+
+      if (isCancel(shouldDelete) || !shouldDelete) {
+        console.log(
+          `${c.yellow}Orphaned paths kept. You can manually delete them if needed:\n.fixo/last-dag.json and .fixo/memory.db${c.reset}`,
+        );
+      } else {
         for (const p of topLevelNew) {
           try {
             fs.rmSync(p, { recursive: true, force: true });
           } catch (e) {
-            if (process.env.DEBUG) console.warn(`[task-router] Error removing orphaned path ${p}:`, e);
+            if (process.env.DEBUG)
+              console.warn(
+                `[task-router] Error removing orphaned path ${p}:`,
+                e,
+              );
           }
         }
-        console.log(`${c.green}✓ Orphaned paths deleted.${c.reset}`);
+        console.log(
+          `${c.green}✓ Orphaned paths cleaned up successfully.${c.reset}`,
+        );
       }
     }
 
     const outcomeSummary = `Complex task failed due to an error: ${message}`;
+    writeLastRunSummary(cwd, false, `Orchestrated run failed: ${message}`);
     deps.conversation.addTurn(input, outcomeSummary);
 
     const durationMs = Date.now() - startTime;
@@ -462,7 +685,7 @@ async function runComplexPath(
         durationMs,
         model: context.model,
       },
-      route: 'complex',
+      route: "complex",
     };
   }
 }

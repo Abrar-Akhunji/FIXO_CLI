@@ -18,17 +18,33 @@
  * for adapters that do not delegate to that module.
  */
 
-import path from 'node:path';
-import os from 'node:os';
-import type { ParsedCommand } from '../parser-adapter.js';
+import path from "node:path";
+import os from "node:os";
+import type { ParsedCommand } from "../parser-adapter.js";
 
 const DANGEROUS_MODIFIERS = new Set([
-  'rm', 'mv', 'cp', 'mkdir', 'touch', 'chmod', 'chown', 'dd', 'ln', 'rmdir',
+  "rm",
+  "mv",
+  "cp",
+  "mkdir",
+  "touch",
+  "chmod",
+  "chown",
+  "dd",
+  "ln",
+  "rmdir",
 ]);
-const DANGEROUS_READERS = new Set(['cat', 'less', 'more', 'grep', 'head', 'tail']);
+const DANGEROUS_READERS = new Set([
+  "cat",
+  "less",
+  "more",
+  "grep",
+  "head",
+  "tail",
+]);
 
 export function extractShellTokens(command: string): ParsedCommand[] {
-  const segments = splitTopLevel(command, ['&&', '||', ';', '|', '\n']);
+  const segments = splitTopLevel(command, ["&&", "||", ";", "|", "\n"]);
   const out: ParsedCommand[] = [];
   for (const segment of segments) {
     const trimmed = segment.trim();
@@ -46,7 +62,7 @@ function splitTopLevel(input: string, separators: string[]): string[] {
   // small state machine that emits the current accumulator every time a
   // separator is encountered at depth 0.
   const result: string[] = [];
-  let buf = '';
+  let buf = "";
   let single = false;
   let dquote = false;
   let escape = false;
@@ -59,7 +75,7 @@ function splitTopLevel(input: string, separators: string[]): string[] {
       i++;
       continue;
     }
-    if (!single && ch === '\\') {
+    if (!single && ch === "\\") {
       buf += ch;
       escape = true;
       i++;
@@ -87,7 +103,7 @@ function splitTopLevel(input: string, separators: string[]): string[] {
       }
       if (matchedSep) {
         result.push(buf);
-        buf = '';
+        buf = "";
         i += matchedSep.length;
         continue;
       }
@@ -101,7 +117,7 @@ function splitTopLevel(input: string, separators: string[]): string[] {
 
 function shlex(input: string): string[] {
   const tokens: string[] = [];
-  let buf = '';
+  let buf = "";
   let single = false;
   let dquote = false;
   let escape = false;
@@ -114,7 +130,7 @@ function shlex(input: string): string[] {
       started = true;
       continue;
     }
-    if (!single && ch === '\\') {
+    if (!single && ch === "\\") {
       escape = true;
       started = true;
       continue;
@@ -132,7 +148,7 @@ function shlex(input: string): string[] {
     if (!single && !dquote && /\s/.test(ch)) {
       if (started) {
         tokens.push(buf);
-        buf = '';
+        buf = "";
         started = false;
       }
       continue;
@@ -156,41 +172,52 @@ function unquote(str: string): string {
 
 function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
-export function isCommandSafeShellFallback(command: string, workspaceRoot: string): boolean {
+export function isCommandSafeShellFallback(
+  command: string,
+  workspaceRoot: string,
+): boolean {
   const parsed = extractShellTokens(command);
   for (const cmd of parsed) {
     const binaryLower = cmd.binary.toLowerCase();
-    if (binaryLower.startsWith('/') || binaryLower.startsWith('.')) {
+    if (binaryLower.startsWith("/") || binaryLower.startsWith(".")) {
       const resolvedBin = path.resolve(workspaceRoot, unquote(binaryLower));
       if (!isInside(resolvedBin, workspaceRoot)) return false;
     }
     for (const arg of cmd.arguments) {
-      if (arg.startsWith('-')) continue;
+      if (arg.startsWith("-")) continue;
       const cleanArg = unquote(arg);
-      const looksLikePath = cleanArg.includes('/') || cleanArg.includes('\\') || cleanArg.includes('.') || cleanArg === '~';
+      const looksLikePath =
+        cleanArg.includes("/") ||
+        cleanArg.includes("\\") ||
+        cleanArg.includes(".") ||
+        cleanArg === "~";
       if (!looksLikePath) continue;
       let targetPath = cleanArg;
-      if (cleanArg === '~') targetPath = os.homedir();
-      else if (cleanArg.startsWith('~/') || cleanArg.startsWith('~\\')) {
+      if (cleanArg === "~") targetPath = os.homedir();
+      else if (cleanArg.startsWith("~/") || cleanArg.startsWith("~\\")) {
         targetPath = path.join(os.homedir(), cleanArg.slice(2));
       }
       const resolved = path.resolve(workspaceRoot, targetPath);
-      if (DANGEROUS_MODIFIERS.has(binaryLower) && !isInside(resolved, workspaceRoot)) {
+      if (
+        DANGEROUS_MODIFIERS.has(binaryLower) &&
+        !isInside(resolved, workspaceRoot)
+      ) {
         return false;
       }
       const filename = path.basename(resolved).toLowerCase();
       const isSensitive =
-        filename === '.env' ||
-        filename.includes('.env.') ||
-        filename === 'id_rsa' ||
-        filename === 'credentials' ||
-        (filename === 'config' && resolved.includes('.aws'));
+        filename === ".env" ||
+        filename.includes(".env.") ||
+        filename === "id_rsa" ||
+        filename === "credentials" ||
+        (filename === "config" && resolved.includes(".aws"));
       if (isSensitive) {
         if (DANGEROUS_MODIFIERS.has(binaryLower)) return false;
-        if (DANGEROUS_READERS.has(binaryLower) || binaryLower === 'grep') return false;
+        if (DANGEROUS_READERS.has(binaryLower) || binaryLower === "grep")
+          return false;
       }
     }
   }

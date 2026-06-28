@@ -16,21 +16,21 @@
  * resolves deterministically without touching the user's home
  * directory.
  */
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { FixoMdWatcher } from '../context/fixo-md-watcher.js';
+import { FixoMdWatcher } from "../context/fixo-md-watcher.js";
 
 function mkTmp(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-md-watcher-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "fixo-md-watcher-"));
 }
 
 function writeFixoMd(cwd: string, content: string): string {
-  const p = path.join(cwd, 'FIXO.md');
-  fs.writeFileSync(p, content, 'utf-8');
+  const p = path.join(cwd, "FIXO.md");
+  fs.writeFileSync(p, content, "utf-8");
   return p;
 }
 
@@ -48,17 +48,17 @@ function bumpMtime(p: string): void {
 
 /* ──────────────────── (a) no file ──────────────────── */
 
-test('no FIXO.md present → always unchanged, no directive', () => {
+test("no FIXO.md present → always unchanged, no directive", () => {
   const cwd = mkTmp();
   try {
     const watcher = new FixoMdWatcher(cwd);
     const r1 = watcher.check();
-    assert.equal(r1.kind, 'unchanged');
+    assert.equal(r1.kind, "unchanged");
     assert.equal(watcher.formatDirective(r1), null);
 
     // Re-check immediately. Still nothing on disk.
     const r2 = watcher.check();
-    assert.equal(r2.kind, 'unchanged');
+    assert.equal(r2.kind, "unchanged");
     assert.equal(watcher.formatDirective(r2), null);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -67,16 +67,16 @@ test('no FIXO.md present → always unchanged, no directive', () => {
 
 /* ──────────────────── (b) present at start ──────────────────── */
 
-test('FIXO.md present at start → first check is unchanged', () => {
+test("FIXO.md present at start → first check is unchanged", () => {
   const cwd = mkTmp();
   try {
-    writeFixoMd(cwd, '# rules\nNo writes to dist/');
+    writeFixoMd(cwd, "# rules\nNo writes to dist/");
     const watcher = new FixoMdWatcher(cwd);
     // Baseline was captured by the constructor; the FIRST check
     // after that must be a no-op because the system prompt already
     // contains this file.
     const r = watcher.check();
-    assert.equal(r.kind, 'unchanged');
+    assert.equal(r.kind, "unchanged");
     assert.equal(watcher.formatDirective(r), null);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -85,18 +85,22 @@ test('FIXO.md present at start → first check is unchanged', () => {
 
 /* ──────────────────── (c) updated mid-run ──────────────────── */
 
-test('FIXO.md updated mid-run → updated directive with new content', () => {
+test("FIXO.md updated mid-run → updated directive with new content", () => {
   const cwd = mkTmp();
   try {
-    const p = writeFixoMd(cwd, '# rules v1\nFollow the staging guard.');
+    const p = writeFixoMd(cwd, "# rules v1\nFollow the staging guard.");
     const watcher = new FixoMdWatcher(cwd);
 
     // Edit the file after the watcher captured the baseline.
-    fs.writeFileSync(p, '# rules v2\nNow forbid auto-generated code in src/.', 'utf-8');
+    fs.writeFileSync(
+      p,
+      "# rules v2\nNow forbid auto-generated code in src/.",
+      "utf-8",
+    );
     bumpMtime(p);
 
     const r = watcher.check();
-    assert.equal(r.kind, 'updated');
+    assert.equal(r.kind, "updated");
     const directive = watcher.formatDirective(r);
     assert.ok(directive);
     assert.match(directive!, /\[Project Instructions\]/);
@@ -111,21 +115,24 @@ test('FIXO.md updated mid-run → updated directive with new content', () => {
 
 /* ──────────────────── (d) deleted mid-run ──────────────────── */
 
-test('FIXO.md deleted mid-run → deleted directive names previous path', () => {
+test("FIXO.md deleted mid-run → deleted directive names previous path", () => {
   const cwd = mkTmp();
   try {
-    const p = writeFixoMd(cwd, '# rules\nstaging is mandatory');
+    const p = writeFixoMd(cwd, "# rules\nstaging is mandatory");
     const watcher = new FixoMdWatcher(cwd);
 
     fs.unlinkSync(p);
 
     const r = watcher.check();
-    assert.equal(r.kind, 'deleted');
+    assert.equal(r.kind, "deleted");
     const directive = watcher.formatDirective(r);
     assert.ok(directive);
     assert.match(directive!, /\[Project Instructions\]/);
     assert.match(directive!, /removed mid-run/);
-    assert.match(directive!, new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(
+      directive!,
+      new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -133,16 +140,16 @@ test('FIXO.md deleted mid-run → deleted directive names previous path', () => 
 
 /* ──────────────────── (e) created mid-run ──────────────────── */
 
-test('FIXO.md created mid-run → created directive with the new content', () => {
+test("FIXO.md created mid-run → created directive with the new content", () => {
   const cwd = mkTmp();
   try {
     // Empty cwd → baseline is "no file".
     const watcher = new FixoMdWatcher(cwd);
 
-    writeFixoMd(cwd, '# new rules\nstr_replace before write_file');
+    writeFixoMd(cwd, "# new rules\nstr_replace before write_file");
 
     const r = watcher.check();
-    assert.equal(r.kind, 'created');
+    assert.equal(r.kind, "created");
     const directive = watcher.formatDirective(r);
     assert.ok(directive);
     assert.match(directive!, /\[Project Instructions\]/);
@@ -156,22 +163,22 @@ test('FIXO.md created mid-run → created directive with the new content', () =>
 
 /* ──────────────────── (f) dedup ──────────────────── */
 
-test('updated → unchanged dedup on the second consecutive check', () => {
+test("updated → unchanged dedup on the second consecutive check", () => {
   const cwd = mkTmp();
   try {
-    const p = writeFixoMd(cwd, '# v1');
+    const p = writeFixoMd(cwd, "# v1");
     const watcher = new FixoMdWatcher(cwd);
 
-    fs.writeFileSync(p, '# v2', 'utf-8');
+    fs.writeFileSync(p, "# v2", "utf-8");
     bumpMtime(p);
 
     const r1 = watcher.check();
-    assert.equal(r1.kind, 'updated');
+    assert.equal(r1.kind, "updated");
 
     // No further edits. The next check must NOT re-announce the
     // same content as another `updated` event.
     const r2 = watcher.check();
-    assert.equal(r2.kind, 'unchanged');
+    assert.equal(r2.kind, "unchanged");
     assert.equal(watcher.formatDirective(r2), null);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });

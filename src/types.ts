@@ -1,8 +1,8 @@
 /**
  * CLI-specific type definitions extending the shared types.
  */
-import type { ChatContentBlock, ChatMessage, ChatToolDefinition } from './shared/types.js';
-import type { PolicyProfile } from './runtime/policy.js';
+import type { ChatContentBlock } from "./shared/types.js";
+import type { PolicyProfile } from "./runtime/policy.js";
 
 /** Runtime context for a single agent invocation. */
 export interface AgentContext {
@@ -27,7 +27,7 @@ export interface AgentContext {
   /** Allow low-risk actions without repeated prompts. */
   yes?: boolean;
   /** Execution mode: PLAN (read-only), BUILD (mutating allowed), EXPLORE (read+lsp), or SCOUT (web only) */
-  mode?: 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT';
+  mode?: "PLAN" | "BUILD" | "EXPLORE" | "SCOUT";
   /**
    * Image (or future non-text) blocks attached to the next user
    * message. Populated by the REPL's `/image` slash command. The
@@ -69,7 +69,7 @@ export interface ProjectConfig {
   include?: string[];
   exclude?: string[];
   policy?: PolicyProfile;
-  executionMode?: 'host' | 'container';
+  executionMode?: "host" | "container";
   maxAttempts?: number;
   plugins?: string[];
   trustedPlugins?: string[];
@@ -79,10 +79,10 @@ export interface Subtask {
   id: string;
   title: string;
   description: string;
-  persona: 'code' | 'test' | 'doc' | 'reviewer';
+  persona: "code" | "test" | "doc" | "reviewer";
   dependencies: string[]; // ids of subtasks that must complete first
   files: string[]; // files relevant to this task
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: "pending" | "running" | "completed" | "failed";
   result?: string;
   /**
    * Phase 5.2 — absolute paths of files this subtask wrote, renamed, or
@@ -92,9 +92,9 @@ export interface Subtask {
    * Undefined until the worker finishes.
    */
   touchedFiles?: string[];
+  attemptCount?: number;
 }
 
 export interface TaskDAG {
   subtasks: Subtask[];
 }
-

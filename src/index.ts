@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+process.on("warning", (warning) => {
+  if (
+    warning.name === "ExperimentalWarning" &&
+    warning.message.includes("SQLite")
+  ) {
+    return;
+  }
+});
 /**
  * FixO CLI — Entry Point
  *
@@ -11,16 +19,20 @@
  * 6. Print the session header
  * 7. Launch interactive REPL
  */
-import fs from 'fs';
-import path from 'path';
-import { loadConfig, saveConfig, getDefaultConfig, DEFAULT_API_URL, type FreeLLMConfig } from './config.js';
-import { runSetupWizard } from './setup-wizard.js';
-import { startREPL } from './ui/prompt.js';
-import type { ProjectConfig } from './types.js';
-import yaml from 'js-yaml';
+import fs from "fs";
+import path from "path";
+import { loadConfig, saveConfig, DEFAULT_API_URL } from "./config.js";
+import { runSetupWizard } from "./setup-wizard.js";
+import { startREPL } from "./ui/prompt.js";
+import type { ProjectConfig } from "./types.js";
+import yaml from "js-yaml";
 
-import { C } from './ui/colors.js';
-import { renderLogo, renderCommandGrid, renderSessionHeader } from './ui/index.js';
+import { C } from "./ui/colors.js";
+import {
+  renderLogo,
+  renderCommandGrid,
+  renderSessionHeader,
+} from "./ui/index.js";
 
 /* ──────────────────────── CLI Args ──────────────────────── */
 
@@ -33,7 +45,7 @@ function parseArgs(): {
   port?: number;
   task?: string;
   resume?: string;
-  sandboxMode?: 'guard' | 'os-sandbox';
+  sandboxMode?: "guard" | "os-sandbox";
 } {
   const args = process.argv.slice(2);
   const result = {
@@ -45,62 +57,64 @@ function parseArgs(): {
     port: undefined as number | undefined,
     task: undefined as string | undefined,
     resume: undefined as string | undefined,
-    sandboxMode: undefined as 'guard' | 'os-sandbox' | undefined,
+    sandboxMode: undefined as "guard" | "os-sandbox" | undefined,
   };
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     switch (arg) {
-      case '--help':
-      case '-h':
+      case "--help":
+      case "-h":
         result.help = true;
         break;
-      case '--version':
-      case '-V':
+      case "--version":
+      case "-V":
         result.version = true;
         break;
-      case '--verbose':
-      case '-v':
+      case "--verbose":
+      case "-v":
         result.verbose = true;
         break;
-      case '--yes':
-      case '-y':
+      case "--yes":
+      case "-y":
         result.yes = true;
         break;
-      case '--model':
-      case '-m':
+      case "--model":
+      case "-m":
         if (i + 1 < args.length) result.model = args[++i];
         break;
-      case '--port':
-      case '-p':
+      case "--port":
+      case "-p":
         if (i + 1 < args.length) result.port = parseInt(args[++i], 10);
         break;
-      case '--resume':
-      case '-r':
+      case "--resume":
+      case "-r":
         if (i + 1 < args.length) result.resume = args[++i];
         break;
-      case '--task':
-      case '-t':
+      case "--task":
+      case "-t":
         if (i + 1 < args.length && !result.task) {
-          result.task = args.slice(i + 1).join(' ');
+          result.task = args.slice(i + 1).join(" ");
           i = args.length; // consume rest
         }
         break;
-      case '--sandbox-mode':
+      case "--sandbox-mode":
         if (i + 1 < args.length) {
           const v = args[++i];
-          if (v === 'guard' || v === 'os-sandbox') {
+          if (v === "guard" || v === "os-sandbox") {
             result.sandboxMode = v;
           } else {
-            console.error(`Invalid --sandbox-mode value '${v}'. Expected 'guard' or 'os-sandbox'.`);
+            console.error(
+              `Invalid --sandbox-mode value '${v}'. Expected 'guard' or 'os-sandbox'.`,
+            );
             process.exit(1);
           }
         }
         break;
       default:
         // If no flag, treat rest as task
-        if (!arg.startsWith('-') && !result.task) {
-          result.task = args.slice(i).join(' ');
+        if (!arg.startsWith("-") && !result.task) {
+          result.task = args.slice(i).join(" ");
           i = args.length;
         }
         break;
@@ -177,11 +191,21 @@ ${C.BOLD}EXAMPLES${C.RESET}
 
 /* ──────────────────────── Project Config ──────────────────────── */
 
-const KNOWN_CONFIG_KEYS = new Set(['model', 'checkCommand', 'autoCommit', 'policy', 'executionMode', 'maxAttempts', 'systemPrompt', 'plugins', 'trustedPlugins']);
+const KNOWN_CONFIG_KEYS = new Set([
+  "model",
+  "checkCommand",
+  "autoCommit",
+  "policy",
+  "executionMode",
+  "maxAttempts",
+  "systemPrompt",
+  "plugins",
+  "trustedPlugins",
+]);
 
 function loadProjectConfig(cwd: string): ProjectConfig | undefined {
-  const yamlPath = path.join(cwd, '.freellmapi.yml');
-  const yamlAltPath = path.join(cwd, '.freellmapi.yaml');
+  const yamlPath = path.join(cwd, ".freellmapi.yml");
+  const yamlAltPath = path.join(cwd, ".freellmapi.yaml");
 
   let configPath: string | undefined;
   if (fs.existsSync(yamlPath)) configPath = yamlPath;
@@ -190,26 +214,36 @@ function loadProjectConfig(cwd: string): ProjectConfig | undefined {
   if (!configPath) return undefined;
 
   try {
-    const content = fs.readFileSync(configPath, 'utf-8');
+    const content = fs.readFileSync(configPath, "utf-8");
     const doc = yaml.load(content) as Record<string, unknown>;
-    if (!doc || typeof doc !== 'object') return undefined;
+    if (!doc || typeof doc !== "object") return undefined;
 
     for (const key of Object.keys(doc)) {
       if (!KNOWN_CONFIG_KEYS.has(key)) {
-        console.warn(`${C.YELLOW}⚠ Unknown config key "${key}" in ${path.basename(configPath)}${C.RESET}`);
+        console.warn(
+          `${C.YELLOW}⚠ Unknown config key "${key}" in ${path.basename(configPath)}${C.RESET}`,
+        );
       }
     }
 
     const config: ProjectConfig = {};
-    if (typeof doc.model === 'string') config.model = doc.model;
-    if (typeof doc.checkCommand === 'string') config.checkCommand = doc.checkCommand;
-    if (doc.autoCommit !== undefined) config.autoCommit = Boolean(doc.autoCommit);
-    if (typeof doc.policy === 'string') config.policy = doc.policy as ProjectConfig['policy'];
-    if (typeof doc.executionMode === 'string') config.executionMode = doc.executionMode as ProjectConfig['executionMode'];
-    if (doc.maxAttempts !== undefined) config.maxAttempts = parseInt(String(doc.maxAttempts), 10);
-    if (typeof doc.systemPrompt === 'string') config.systemPrompt = doc.systemPrompt;
+    if (typeof doc.model === "string") config.model = doc.model;
+    if (typeof doc.checkCommand === "string")
+      config.checkCommand = doc.checkCommand;
+    if (doc.autoCommit !== undefined)
+      config.autoCommit = Boolean(doc.autoCommit);
+    if (typeof doc.policy === "string")
+      config.policy = doc.policy as ProjectConfig["policy"];
+    if (typeof doc.executionMode === "string")
+      config.executionMode =
+        doc.executionMode as ProjectConfig["executionMode"];
+    if (doc.maxAttempts !== undefined)
+      config.maxAttempts = parseInt(String(doc.maxAttempts), 10);
+    if (typeof doc.systemPrompt === "string")
+      config.systemPrompt = doc.systemPrompt;
     if (Array.isArray(doc.plugins)) config.plugins = doc.plugins.map(String);
-    if (Array.isArray(doc.trustedPlugins)) config.trustedPlugins = doc.trustedPlugins.map(String);
+    if (Array.isArray(doc.trustedPlugins))
+      config.trustedPlugins = doc.trustedPlugins.map(String);
 
     return config;
   } catch {
@@ -225,9 +259,11 @@ async function main(): Promise<void> {
   renderCommandGrid();
 
   // Node version check (major >= 20)
-  const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+  const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
   if (nodeMajor < 20) {
-    console.error(`${C.RED}Error: FixO CLI requires Node.js version 20.0.0 or higher (current version: ${process.version}).${C.RESET}`);
+    console.error(
+      `${C.RED}Error: FixO CLI requires Node.js version 20.0.0 or higher (current version: ${process.version}).${C.RESET}`,
+    );
     process.exit(1);
   }
 
@@ -240,11 +276,11 @@ async function main(): Promise<void> {
 
   if (args.version) {
     try {
-      const pkgPath = new URL('../package.json', import.meta.url);
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      const pkgPath = new URL("../package.json", import.meta.url);
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
       console.log(`fixo-cli v${pkg.version}`);
     } catch {
-      console.log('fixo-cli v1.0.0');
+      console.log("fixo-cli v1.0.0");
     }
     process.exit(0);
   }
@@ -258,12 +294,12 @@ async function main(): Promise<void> {
   // via the `LspPreSaveGate` and falls back to a brace-balance
   // check when `FIXO_LSP_FALLBACK=syntax-only` is set.
   try {
-    const { checkLspSanity } = await import('./lsp/syntax-fallback.js');
+    const { checkLspSanity } = await import("./lsp/syntax-fallback.js");
     const sanity = checkLspSanity(process.env);
     if (!sanity.ok) {
       console.warn(
         `${C.YELLOW}⚠  ${sanity.reason}${C.RESET}\n` +
-        `${C.SNOW4}   Set FIXO_LSP_FALLBACK=syntax-only to enable brace-balance fallback.${C.RESET}`,
+          `${C.SNOW4}   Set FIXO_LSP_FALLBACK=syntax-only to enable brace-balance fallback.${C.RESET}`,
       );
     }
   } catch {
@@ -273,13 +309,18 @@ async function main(): Promise<void> {
   // ──── Step 2: First-run wizard & Validation ────
   const needsSetup =
     !config._firstRunComplete ||
-    (config.provider_mode === 'proxy' && (!config.freellmapi_api_key || !config.apiUrl)) ||
-    (config.provider_mode === 'direct' && !config.directProvider?.name);
+    (config.provider_mode === "proxy" &&
+      (!config.freellmapi_api_key || !config.apiUrl)) ||
+    (config.provider_mode === "direct" && !config.directProvider?.name);
 
   if (needsSetup) {
     config = await runSetupWizard();
     saveConfig(config);
-  } else if (config.provider_mode === 'proxy' && config.freellmapi_api_key && config.apiUrl) {
+  } else if (
+    config.provider_mode === "proxy" &&
+    config.freellmapi_api_key &&
+    config.apiUrl
+  ) {
     // Proxy mode: validate the FreeLLMAPI key by pinging /models.
     // Direct mode skips this — the proxy isn't in the loop at all.
     try {
@@ -287,26 +328,33 @@ async function main(): Promise<void> {
       const timeoutId = setTimeout(() => controller.abort(), 5000);
       const res = await fetch(`${config.apiUrl}/models`, {
         headers: { Authorization: `Bearer ${config.freellmapi_api_key}` },
-        signal: controller.signal
+        signal: controller.signal,
       });
       clearTimeout(timeoutId);
       if (res.status === 401 || res.status === 403) {
-        console.warn(`${C.YELLOW}⚠ Warning: API Key appears invalid (HTTP ${res.status}). You may need to re-run setup.${C.RESET}`);
+        console.warn(
+          `${C.YELLOW}⚠ Warning: API Key appears invalid (HTTP ${res.status}). You may need to re-run setup.${C.RESET}`,
+        );
       }
     } catch (_err: unknown) {
-      console.warn(`${C.YELLOW}⚠ Warning: Could not validate API key (connection failed). Proceeding in offline mode or assuming temporary network issue.${C.RESET}`);
+      console.warn(
+        `${C.YELLOW}⚠ Warning: Could not validate API key (connection failed). Proceeding in offline mode or assuming temporary network issue.${C.RESET}`,
+      );
     }
-  } else if (config.provider_mode === 'direct') {
+  } else if (config.provider_mode === "direct") {
     if (config.lastSession?.provider && config.lastSession?.model) {
       try {
-        const { ProvidersManager } = await import('./agent/providers-manager.js');
+        const { ProvidersManager } =
+          await import("./agent/providers-manager.js");
         ProvidersManager.hydrateVault();
         ProvidersManager.setModelProviderHint(
           config.lastSession.model,
           config.lastSession.provider,
         );
         // Fire-and-forget background cache warm
-        ProvidersManager.fetchRemoteModels(config.lastSession.provider).catch(() => {});
+        ProvidersManager.fetchRemoteModels(config.lastSession.provider).catch(
+          () => {},
+        );
       } catch (_err: unknown) {
         // best-effort
       }
@@ -316,7 +364,8 @@ async function main(): Promise<void> {
       // first request resolves correctly without the user having to
       // visit the /model picker.
       try {
-        const { ProvidersManager } = await import('./agent/providers-manager.js');
+        const { ProvidersManager } =
+          await import("./agent/providers-manager.js");
         ProvidersManager.hydrateVault();
         ProvidersManager.setModelProviderHint(
           config.directProvider.defaultModel,
@@ -332,15 +381,17 @@ async function main(): Promise<void> {
   // ──── Apply CLI overrides ────
   if (args.sandboxMode) {
     config.preferences.safety.sandboxMode = args.sandboxMode;
-    if (args.sandboxMode === 'os-sandbox') {
+    if (args.sandboxMode === "os-sandbox") {
       // Loud, visible boot-time check so the user finds out at start
       // — not at the first run_command — if the platform binary is
       // missing.
       try {
-        const { probeSandbox } = await import('./runtime/os-sandbox.js');
+        const { probeSandbox } = await import("./runtime/os-sandbox.js");
         const probe = probeSandbox();
         if (!probe.ok) {
-          console.warn(`${C.YELLOW}⚠ --sandbox-mode os-sandbox requested but unavailable: ${probe.reason}${C.RESET}`);
+          console.warn(
+            `${C.YELLOW}⚠ --sandbox-mode os-sandbox requested but unavailable: ${probe.reason}${C.RESET}`,
+          );
         }
       } catch (_err: unknown) {
         // best-effort — sandbox check failure is non-blocking at boot
@@ -364,40 +415,59 @@ async function main(): Promise<void> {
 
   // ──── Step 3: Load project config ────
   const cwd = process.cwd();
+
+  // Phase 7: Cleanup stale/orphaned metadata from previous abnormal exits
+  try {
+    const fixoDir = path.join(cwd, ".fixo");
+    const stagingDir = path.join(fixoDir, "staging");
+    const lastDagFile = path.join(fixoDir, "last-dag.json");
+    if (fs.existsSync(stagingDir))
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    if (fs.existsSync(lastDagFile)) fs.rmSync(lastDagFile, { force: true });
+  } catch (e) {
+    if (process.env.DEBUG)
+      console.warn("[boot] Failed to cleanup stale metadata:", e);
+  }
+
   const projectConfig = loadProjectConfig(cwd);
 
   // ──── Step 3.5: Initialize MCP & Plugins ────
-  const { mcpManager, mcpBridgeManager, initializePlugins } = await import('./agent/tool-executor.js');
+  const { mcpManager, mcpBridgeManager, initializePlugins } =
+    await import("./agent/tool-executor.js");
   await mcpManager.initialize();
   await mcpBridgeManager.initialize(cwd);
 
-  const { skillsManager } = await import('./agent/skills.js');
+  const { skillsManager } = await import("./agent/skills.js");
   skillsManager.initialize(cwd);
 
   await initializePlugins(cwd, projectConfig);
 
   // Register shutdown hook
-  process.on('exit', () => {
+  process.on("exit", () => {
     mcpManager.shutdown();
     mcpBridgeManager.shutdown();
   });
 
   // ──── Apply CLI overrides ────
-  const model = args.model ?? projectConfig?.model ?? config.lastSession?.model ?? config.defaultModel;
+  const model =
+    args.model ??
+    projectConfig?.model ??
+    config.lastSession?.model ??
+    config.defaultModel;
   const verbose = args.verbose;
 
   // ──── Step 4: Launch ────
   if (args.task) {
     // One-shot mode: run task and exit
-    const { SingleAgent } = await import('./agent/single-agent.js');
-    const { ConversationManager } = await import('./agent/conversation.js');
+    const { SingleAgent } = await import("./agent/single-agent.js");
+    const { ConversationManager } = await import("./agent/conversation.js");
     const agent = new SingleAgent(verbose);
     const conversation = new ConversationManager();
 
     const result = await agent.runStreaming(
       {
         task: args.task,
-        model: model ?? 'auto',
+        model: model ?? "auto",
         cwd,
         verbose,
         selectedFiles: [],
@@ -410,12 +480,12 @@ async function main(): Promise<void> {
     );
 
     // Print final stats
-    const modelPart = result.model ? `${result.model} · ` : '';
+    const modelPart = result.model ? `${result.model} · ` : "";
     console.log(
       `\n${C.SNOW4}${modelPart}${result.tokensUsed.total_tokens} tokens · ${result.toolCallCount} tool calls · ${(result.durationMs / 1000).toFixed(1)}s${C.RESET}`,
     );
 
-    const { stopLspManager } = await import('./agent/tool-executor.js');
+    const { stopLspManager } = await import("./agent/tool-executor.js");
     await stopLspManager();
 
     process.exit(result.success ? 0 : 1);
@@ -424,28 +494,31 @@ async function main(): Promise<void> {
   // Interactive REPL mode — print the session header before
   // handing off to startREPL so the boot sequence is:
   // logo → command grid → session header → › prompt.
-  const sessionModel = model ?? 'auto';
+  const sessionModel = model ?? "auto";
   const envEndpoint = process.env.FIXO_API_URL?.trim();
   let resolvedEndpoint: string;
   let providerLabel: string;
-  if (config.provider_mode === 'direct') {
-    const { PROVIDER_REGISTRY } = await import('./agent/providers-manager.js');
-    const providerName = config.lastSession?.provider ?? config.directProvider?.name;
-    const def = providerName ? PROVIDER_REGISTRY.find((d) => d.name === providerName) : undefined;
-    resolvedEndpoint = envEndpoint || def?.baseUrl || 'direct';
-    providerLabel = providerName ?? 'auto';
+  if (config.provider_mode === "direct") {
+    const { PROVIDER_REGISTRY } = await import("./agent/providers-manager.js");
+    const providerName =
+      config.lastSession?.provider ?? config.directProvider?.name;
+    const def = providerName
+      ? PROVIDER_REGISTRY.find((d) => d.name === providerName)
+      : undefined;
+    resolvedEndpoint = envEndpoint || def?.baseUrl || "direct";
+    providerLabel = providerName ?? "auto";
   } else {
     resolvedEndpoint = envEndpoint || config.apiUrl || DEFAULT_API_URL;
-    providerLabel = 'auto';
+    providerLabel = "auto";
   }
   renderSessionHeader({
-    status: 'new',
+    status: "new",
     startedAt: new Date().toISOString(),
     provider: providerLabel,
     model: sessionModel,
-    mode: 'BUILD',
-    routing: 'auto',
-    contextWindow: '200k',
+    mode: "BUILD",
+    routing: "auto",
+    contextWindow: "200k",
     endpoint: resolvedEndpoint,
     endpointFromEnv: Boolean(envEndpoint),
   });
@@ -457,7 +530,7 @@ async function main(): Promise<void> {
     resume: args.resume,
   });
 
-  const { stopLspManager } = await import('./agent/tool-executor.js');
+  const { stopLspManager } = await import("./agent/tool-executor.js");
   await stopLspManager();
 }
 

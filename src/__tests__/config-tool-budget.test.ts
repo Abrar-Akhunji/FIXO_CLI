@@ -6,14 +6,14 @@
  * the on-disk config in the developer's actual home directory is
  * not consulted. This pattern is reused elsewhere in the suite.
  */
-import assert from 'node:assert/strict';
-import test from 'node:test';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { getDefaultConfig, loadConfig } from '../config.js';
+import assert from "node:assert/strict";
+import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { getDefaultConfig, loadConfig } from "../config.js";
 
-test('getDefaultConfig: toolCalls budget defaults to soft=50, hard=100, autoExtend=true, investigationMultiplier=3', () => {
+test("getDefaultConfig: toolCalls budget defaults to soft=50, hard=100, autoExtend=true, investigationMultiplier=3", () => {
   const cfg = getDefaultConfig();
   assert.deepEqual(cfg.preferences.safety.toolCalls, {
     softLimit: 50,
@@ -23,25 +23,25 @@ test('getDefaultConfig: toolCalls budget defaults to soft=50, hard=100, autoExte
   });
 });
 
-test('loadConfig: missing toolCalls in config.json falls back to defaults', () => {
-  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-cfg-'));
+test("loadConfig: missing toolCalls in config.json falls back to defaults", () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-cfg-"));
   const originalHome = process.env.HOME;
   process.env.HOME = tempHome;
   try {
     // Write a config that pre-dates the toolCalls field.
-    const cfgDir = path.join(tempHome, '.fixocli');
+    const cfgDir = path.join(tempHome, ".fixocli");
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
-      path.join(cfgDir, 'config.json'),
+      path.join(cfgDir, "config.json"),
       JSON.stringify({
-        defaultModel: 'auto',
+        defaultModel: "auto",
         preferences: {
           safety: {
             atomicStaging: true,
           },
         },
       }),
-      { encoding: 'utf-8', mode: 0o600 },
+      { encoding: "utf-8", mode: 0o600 },
     );
     const loaded = loadConfig();
     assert.equal(loaded.preferences.safety.toolCalls.softLimit, 50);
@@ -53,15 +53,15 @@ test('loadConfig: missing toolCalls in config.json falls back to defaults', () =
   }
 });
 
-test('loadConfig: partial toolCalls overrides merge with defaults', () => {
-  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-cfg-'));
+test("loadConfig: partial toolCalls overrides merge with defaults", () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-cfg-"));
   const originalHome = process.env.HOME;
   process.env.HOME = tempHome;
   try {
-    const cfgDir = path.join(tempHome, '.fixocli');
+    const cfgDir = path.join(tempHome, ".fixocli");
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
-      path.join(cfgDir, 'config.json'),
+      path.join(cfgDir, "config.json"),
       JSON.stringify({
         preferences: {
           safety: {
@@ -69,7 +69,7 @@ test('loadConfig: partial toolCalls overrides merge with defaults', () => {
           },
         },
       }),
-      { encoding: 'utf-8', mode: 0o600 },
+      { encoding: "utf-8", mode: 0o600 },
     );
     const loaded = loadConfig();
     assert.equal(loaded.preferences.safety.toolCalls.softLimit, 25);

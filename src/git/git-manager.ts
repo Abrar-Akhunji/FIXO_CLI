@@ -2,11 +2,11 @@
  * Git integration manager for automated commits, undo, and diff viewing.
  * All git operations are safely sandboxed to the workspace directory.
  */
-import { execFileSync } from 'child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import { C } from '../ui/colors.js';
+import { execFileSync } from "child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import { C } from "../ui/colors.js";
 
 /* ──────────────────────── ANSI Colors ──────────────────────── */
 
@@ -34,12 +34,16 @@ export class GitManager {
   /** Check if the current directory is inside a git repository. */
   isGitRepo(): boolean {
     try {
-      const result = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-        cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      return result.trim() === 'true';
+      const result = execFileSync(
+        "git",
+        ["rev-parse", "--is-inside-work-tree"],
+        {
+          cwd: this.cwd,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
+      return result.trim() === "true";
     } catch {
       return false;
     }
@@ -48,23 +52,25 @@ export class GitManager {
   /** Get the current branch name. */
   getCurrentBranch(): string {
     try {
-      return execFileSync('git', ['branch', '--show-current'], {
-        cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim() || 'HEAD';
+      return (
+        execFileSync("git", ["branch", "--show-current"], {
+          cwd: this.cwd,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim() || "HEAD"
+      );
     } catch {
-      return 'unknown';
+      return "unknown";
     }
   }
 
   /** Check if there are uncommitted changes. */
   hasChanges(): boolean {
     try {
-      const result = execFileSync('git', ['status', '--porcelain'], {
+      const result = execFileSync("git", ["status", "--porcelain"], {
         cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       });
       return result.trim().length > 0;
     } catch {
@@ -76,24 +82,24 @@ export class GitManager {
   getDirtyFiles(): string[] {
     if (!this.isGitRepo()) return [];
     try {
-      const output = execFileSync('git', ['status', '--porcelain', '-z'], {
+      const output = execFileSync("git", ["status", "--porcelain", "-z"], {
         cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       });
       if (!output) return [];
 
       const files: string[] = [];
-      const parts = output.split('\0');
+      const parts = output.split("\0");
       for (let i = 0; i < parts.length; i++) {
         const part = parts[i];
         if (!part) continue;
-        
+
         const xy = part.slice(0, 2);
         files.push(part.slice(3));
-        
+
         // If it's a rename (R) or copy (C), skip the old path that follows
-        if (xy[0] === 'R' || xy[0] === 'C') {
+        if (xy[0] === "R" || xy[0] === "C") {
           i++;
         }
       }
@@ -105,26 +111,26 @@ export class GitManager {
 
   /** Get a colored diff summary for display. */
   getDiff(): string {
-    if (!this.isGitRepo()) return '(not a git repository)';
-    if (!this.hasChanges()) return '(no changes)';
+    if (!this.isGitRepo()) return "(not a git repository)";
+    if (!this.hasChanges()) return "(no changes)";
 
     try {
-      const stat = execFileSync('git', ['diff', '--stat'], {
+      const stat = execFileSync("git", ["diff", "--stat"], {
         cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
 
-      const stagedStat = execFileSync('git', ['diff', '--cached', '--stat'], {
+      const stagedStat = execFileSync("git", ["diff", "--cached", "--stat"], {
         cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
 
       const untrackedFiles = execFileSync(
-        'git',
-        ['ls-files', '--others', '--exclude-standard'],
-        { cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+        "git",
+        ["ls-files", "--others", "--exclude-standard"],
+        { cwd: this.cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
       ).trim();
 
       const parts: string[] = [];
@@ -138,15 +144,16 @@ export class GitManager {
         parts.push(stat);
       }
       if (untrackedFiles) {
-        const files = untrackedFiles.split('\n').slice(0, 10);
+        const files = untrackedFiles.split("\n").slice(0, 10);
         parts.push(`${colors.cyan}Untracked (${files.length}):${colors.reset}`);
         for (const f of files) parts.push(`  + ${f}`);
-        if (untrackedFiles.split('\n').length > 10) parts.push(`  ... and more`);
+        if (untrackedFiles.split("\n").length > 10)
+          parts.push(`  ... and more`);
       }
 
-      return parts.join('\n') || '(no changes)';
+      return parts.join("\n") || "(no changes)";
     } catch {
-      return '(could not generate diff)';
+      return "(could not generate diff)";
     }
   }
 
@@ -154,9 +161,9 @@ export class GitManager {
   isDetachedHead(): boolean {
     if (!this.isGitRepo()) return false;
     try {
-      execFileSync('git', ['symbolic-ref', '-q', 'HEAD'], {
+      execFileSync("git", ["symbolic-ref", "-q", "HEAD"], {
         cwd: this.cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ["pipe", "pipe", "pipe"],
       });
       return false;
     } catch {
@@ -172,68 +179,82 @@ export class GitManager {
     if (modifiedFiles.length === 0) return null;
     if (!this.isGitRepo()) return null;
     if (this.isDetachedHead()) {
-      console.log(`  ${colors.yellow}⚠ Auto-commit refused: Workspace is in a detached HEAD state. Please checkout a branch first to prevent data loss.${colors.reset}`);
+      console.log(
+        `  ${colors.yellow}⚠ Auto-commit refused: Workspace is in a detached HEAD state. Please checkout a branch first to prevent data loss.${colors.reset}`,
+      );
       return null;
     }
 
     try {
-      const status = execFileSync('git', ['status', '--porcelain'], {
+      const status = execFileSync("git", ["status", "--porcelain"], {
         cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
-      
+
       if (!status) {
-        console.log('  ℹ No local filesystem variations detected. Skipping git commit.');
+        console.log(
+          "  ℹ No local filesystem variations detected. Skipping git commit.",
+        );
         return null;
       }
       const lowerTask = task.toLowerCase();
-      let prefix = 'feat';
-      if (/\bfix(es|ed|ing)?\b/.test(lowerTask)) prefix = 'fix';
-      else if (/\brefactor/.test(lowerTask)) prefix = 'refactor';
-      else if (/\btest/.test(lowerTask)) prefix = 'test';
-      else if (/\bdoc(s|umentation)?/.test(lowerTask)) prefix = 'docs';
-      else if (/\bstyle|format/.test(lowerTask)) prefix = 'style';
+      let prefix = "feat";
+      if (/\bfix(es|ed|ing)?\b/.test(lowerTask)) prefix = "fix";
+      else if (/\brefactor/.test(lowerTask)) prefix = "refactor";
+      else if (/\btest/.test(lowerTask)) prefix = "test";
+      else if (/\bdoc(s|umentation)?/.test(lowerTask)) prefix = "docs";
+      else if (/\bstyle|format/.test(lowerTask)) prefix = "style";
 
-      const taskSummary = task.length > 68 ? task.slice(0, 65) + '...' : task;
+      const taskSummary = task.length > 68 ? task.slice(0, 65) + "..." : task;
       const message = `${prefix}: ${taskSummary}`;
 
       for (const file of modifiedFiles) {
-        const relativePath = this.guard.relative(this.guard.resolve(file, 'commit file', true));
-        execFileSync('git', ['add', '--', relativePath], {
+        const relativePath = this.guard.relative(
+          this.guard.resolve(file, "commit file", true),
+        );
+        execFileSync("git", ["add", "--", relativePath], {
           cwd: this.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
+          stdio: ["pipe", "pipe", "pipe"],
         });
       }
 
-      const fileListForGit = modifiedFiles
-        .map((f) => this.guard.relative(this.guard.resolve(f, 'commit file', true)));
+      const fileListForGit = modifiedFiles.map((f) =>
+        this.guard.relative(this.guard.resolve(f, "commit file", true)),
+      );
 
-      execFileSync('git', ['commit', '-m', `${message} [fixo-run:auto]`, '--', ...fileListForGit], {
-        cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      execFileSync(
+        "git",
+        ["commit", "-m", `${message} [fixo-run:auto]`, "--", ...fileListForGit],
+        {
+          cwd: this.cwd,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
 
-      const hash = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      const hash = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
         cwd: this.cwd,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
 
       const fileList = modifiedFiles
         .map((f) => this.guard.relative(f))
         .slice(0, 5)
-        .join(', ');
+        .join(", ");
 
       console.log(
         `${colors.green}  ✓ Committed ${colors.bold}${hash}${colors.reset}${colors.green}: ${message}${colors.reset}`,
       );
-      if (fileList) console.log(`${colors.dim}    Files: ${fileList}${colors.reset}`);
+      if (fileList)
+        console.log(`${colors.dim}    Files: ${fileList}${colors.reset}`);
       return hash;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.log(`${colors.yellow}  ⚠ Auto-commit failed: ${msg.slice(0, 80)}${colors.reset}`);
+      console.log(
+        `${colors.yellow}  ⚠ Auto-commit failed: ${msg.slice(0, 80)}${colors.reset}`,
+      );
       return null;
     }
   }
@@ -253,39 +274,62 @@ export class GitManager {
     }
 
     try {
-      const currentHash = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-        cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-      const commitMsg = execFileSync('git', ['log', '-1', '--format=%s'], {
-        cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      const currentHash = execFileSync(
+        "git",
+        ["rev-parse", "--short", "HEAD"],
+        {
+          cwd: this.cwd,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      ).trim();
+      const commitMsg = execFileSync("git", ["log", "-1", "--format=%s"], {
+        cwd: this.cwd,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
 
-      if (!commitMsg.includes('[fixo-run:')) {
-        console.log(`${colors.red}  ✗ Undo refused: last commit is not marked as FixO-owned${colors.reset}`);
+      if (!commitMsg.includes("[fixo-run:")) {
+        console.log(
+          `${colors.red}  ✗ Undo refused: last commit is not marked as FixO-owned${colors.reset}`,
+        );
         return false;
       }
 
-      execFileSync('git', ['reset', '--hard', 'HEAD~1'], { cwd: this.cwd, stdio: 'ignore' });
+      execFileSync("git", ["reset", "--hard", "HEAD~1"], {
+        cwd: this.cwd,
+        stdio: "ignore",
+      });
 
-      console.log(`${colors.green}  ⏪ Hard-reset commit ${colors.bold}${currentHash}${colors.reset}${colors.green}: ${commitMsg}${colors.reset}`);
-      console.log(`${colors.dim}    All files have been restored to the previous clean commit state.${colors.reset}`);
+      console.log(
+        `${colors.green}  ⏪ Hard-reset commit ${colors.bold}${currentHash}${colors.reset}${colors.green}: ${commitMsg}${colors.reset}`,
+      );
+      console.log(
+        `${colors.dim}    All files have been restored to the previous clean commit state.${colors.reset}`,
+      );
       return true;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.log(`${colors.red}  ✗ Undo failed: ${msg.slice(0, 80)}${colors.reset}`);
+      console.log(
+        `${colors.red}  ✗ Undo failed: ${msg.slice(0, 80)}${colors.reset}`,
+      );
       return false;
     }
   }
 
   /** Get last N commit messages for display. */
   getRecentCommits(count = 5): string {
-    if (!this.isGitRepo()) return '(not a git repository)';
+    if (!this.isGitRepo()) return "(not a git repository)";
     try {
-      return execFileSync('git', ['log', '--oneline', '-n', String(count)], {
-        cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim() || '(no commits)';
+      return (
+        execFileSync("git", ["log", "--oneline", "-n", String(count)], {
+          cwd: this.cwd,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim() || "(no commits)"
+      );
     } catch {
-      return '(no commits)';
+      return "(no commits)";
     }
   }
 
@@ -314,37 +358,49 @@ export class GitManager {
   discardChangesIn(files: string[]): void {
     if (!this.isGitRepo()) return;
     if (files.length === 0) {
-      console.log(`${colors.dim}  ⏪ Rollback: nothing to discard (0 files reported).${colors.reset}`);
+      console.log(
+        `${colors.dim}  ⏪ Rollback: nothing to discard (0 files reported).${colors.reset}`,
+      );
       return;
     }
-    const relativeFiles = files.map((f) => path.isAbsolute(f) ? path.relative(this.cwd, f) : f);
+    const relativeFiles = files.map((f) =>
+      path.isAbsolute(f) ? path.relative(this.cwd, f) : f,
+    );
     const tracked: string[] = [];
     const untracked: string[] = [];
     try {
       for (const rel of relativeFiles) {
-        let status = '';
+        let status = "";
         try {
-          status = execFileSync('git', ['status', '--porcelain', '-z', '--', rel], {
-            cwd: this.cwd,
-            encoding: 'utf-8',
-            stdio: ['pipe', 'pipe', 'pipe'],
-          });
+          status = execFileSync(
+            "git",
+            ["status", "--porcelain", "-z", "--", rel],
+            {
+              cwd: this.cwd,
+              encoding: "utf-8",
+              stdio: ["pipe", "pipe", "pipe"],
+            },
+          );
         } catch {
           // safe: file may have been deleted mid-run; treat as no-op
           continue;
         }
         if (!status) continue; // file is clean — nothing to roll back
-        if (status.startsWith('??')) untracked.push(rel);
+        if (status.startsWith("??")) untracked.push(rel);
         else tracked.push(rel);
       }
       if (tracked.length > 0) {
-        execFileSync('git', ['checkout', 'HEAD', '--', ...tracked], {
+        execFileSync("git", ["checkout", "HEAD", "--", ...tracked], {
           cwd: this.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
+          stdio: ["pipe", "pipe", "pipe"],
         });
       }
       for (const rel of untracked) {
-        try { fs.unlinkSync(path.join(this.cwd, rel)); } catch { /* safe: best-effort */ }
+        try {
+          fs.unlinkSync(path.join(this.cwd, rel));
+        } catch {
+          /* safe: best-effort */
+        }
       }
       const total = tracked.length + untracked.length;
       if (total > 0) {
@@ -352,11 +408,15 @@ export class GitManager {
           `${colors.green}  ⏪ Rolled back ${tracked.length} modified + ${untracked.length} new file(s) the agent touched.${colors.reset}`,
         );
       } else {
-        console.log(`${colors.dim}  ⏪ Rollback: agent-touched files were already clean.${colors.reset}`);
+        console.log(
+          `${colors.dim}  ⏪ Rollback: agent-touched files were already clean.${colors.reset}`,
+        );
       }
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.log(`${colors.yellow}  ⚠ Failed to discard targeted changes: ${msg}${colors.reset}`);
+      console.log(
+        `${colors.yellow}  ⚠ Failed to discard targeted changes: ${msg}${colors.reset}`,
+      );
     }
   }
 
@@ -371,12 +431,22 @@ export class GitManager {
     if (!opts.iAmCertain) return;
     if (!this.isGitRepo()) return;
     try {
-      execFileSync('git', ['checkout', '--', '.'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-      execFileSync('git', ['clean', '-fd'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-      console.log(`${colors.green}  ⏪ Discarded ALL uncommitted workspace changes (explicit user request).${colors.reset}`);
+      execFileSync("git", ["checkout", "--", "."], {
+        cwd: this.cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      execFileSync("git", ["clean", "-fd"], {
+        cwd: this.cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      console.log(
+        `${colors.green}  ⏪ Discarded ALL uncommitted workspace changes (explicit user request).${colors.reset}`,
+      );
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.log(`${colors.yellow}  ⚠ Failed to discard uncommitted changes: ${msg}${colors.reset}`);
+      console.log(
+        `${colors.yellow}  ⚠ Failed to discard uncommitted changes: ${msg}${colors.reset}`,
+      );
     }
   }
 
@@ -387,38 +457,65 @@ export class GitManager {
    */
   createSnapshot(label: string): string | null {
     if (!this.isGitRepo()) {
-      console.log(`${colors.red}  ✗ Not a git repository — cannot create snapshot.${colors.reset}`);
+      console.log(
+        `${colors.red}  ✗ Not a git repository — cannot create snapshot.${colors.reset}`,
+      );
       return null;
     }
     if (this.isDetachedHead()) {
-      console.log(`${colors.yellow}  ⚠ Snapshot refused: Workspace is in a detached HEAD state. Please checkout a branch first.${colors.reset}`);
+      console.log(
+        `${colors.yellow}  ⚠ Snapshot refused: Workspace is in a detached HEAD state. Please checkout a branch first.${colors.reset}`,
+      );
       return null;
     }
     try {
-      const status = execFileSync('git', ['status', '--porcelain'], {
-        cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      const status = execFileSync("git", ["status", "--porcelain"], {
+        cwd: this.cwd,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
 
       if (!status) {
-        console.log(`${colors.yellow}  ℹ No changes to snapshot.${colors.reset}`);
+        console.log(
+          `${colors.yellow}  ℹ No changes to snapshot.${colors.reset}`,
+        );
         return null;
       }
 
-      execFileSync('git', ['add', '-A'], { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-      const safeLabel = label.slice(0, 60).replace(/[^\w\s\-]/g, '').trim() || 'manual';
-      execFileSync('git', ['commit', '-m', `fixo-snapshot: ${safeLabel} [fixo-run:snapshot]`], {
-        cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      execFileSync("git", ["add", "-A"], {
+        cwd: this.cwd,
+        stdio: ["pipe", "pipe", "pipe"],
       });
+      const safeLabel =
+        label
+          .slice(0, 60)
+          .replace(/[^\w\s\-]/g, "")
+          .trim() || "manual";
+      execFileSync(
+        "git",
+        ["commit", "-m", `fixo-snapshot: ${safeLabel} [fixo-run:snapshot]`],
+        {
+          cwd: this.cwd,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
 
-      const hash = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-        cwd: this.cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      const hash = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+        cwd: this.cwd,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
       }).trim();
 
-      console.log(`${colors.green}  📸 Snapshot committed ${colors.bold}${hash}${colors.reset}${colors.green}: fixo-snapshot: ${safeLabel}${colors.reset}`);
+      console.log(
+        `${colors.green}  📸 Snapshot committed ${colors.bold}${hash}${colors.reset}${colors.green}: fixo-snapshot: ${safeLabel}${colors.reset}`,
+      );
       return hash;
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.log(`${colors.yellow}  ⚠ Snapshot failed: ${msg.slice(0, 80)}${colors.reset}`);
+      console.log(
+        `${colors.yellow}  ⚠ Snapshot failed: ${msg.slice(0, 80)}${colors.reset}`,
+      );
       return null;
     }
   }

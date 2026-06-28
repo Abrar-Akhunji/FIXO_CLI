@@ -12,22 +12,23 @@
  * glyphs in the supplementary plane.
  */
 
-import { C } from './colors.js';
+import { C } from "./colors.js";
 
 const LOGO_LINES: ReadonlyArray<string> = [
-  ' ███████╗██╗██╗  ██╗ ██████╗      ██████╗██╗     ██╗',
-  ' ██╔════╝██║╚██╗██╔╝██╔═══██╗    ██╔════╝██║     ██║',
-  ' █████╗  ██║ ╚███╔╝ ██║   ██║    ██║     ██║     ██║',
-  ' ██╔══╝  ██║ ██╔██╗ ██║   ██║    ██║     ██║     ██║',
-  ' ██║     ██║██╔╝ ██╗╚██████╔╝    ╚██████╗███████╗██║',
-  ' ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝      ╚═════╝╚══════╝╚═╝',
+  " ███████╗██╗██╗  ██╗ ██████╗      ██████╗██╗     ██╗",
+  " ██╔════╝██║╚██╗██╔╝██╔═══██╗    ██╔════╝██║     ██║",
+  " █████╗  ██║ ╚███╔╝ ██║   ██║    ██║     ██║     ██║",
+  " ██╔══╝  ██║ ██╔██╗ ██║   ██║    ██║     ██║     ██║",
+  " ██║     ██║██╔╝ ██╗╚██████╔╝    ╚██████╗███████╗██║",
+  " ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝      ╚═════╝╚══════╝╚═╝",
 ];
 
-const TAGLINE = ' v2.0.0  ·  autonomous  ·  free  ·  multi-provider  ·  freellmapi';
+const TAGLINE =
+  " v2.0.0  ·  autonomous  ·  free  ·  multi-provider  ·  freellmapi";
 
 /** Returns the logo lines, each pre-coloured in LAVA. */
 export function getLavaLogo(): string {
-  return LOGO_LINES.map((line) => `${C.LAVA}${line}${C.RESET}`).join('\n');
+  return LOGO_LINES.map((line) => `${C.LAVA}${line}${C.RESET}`).join("\n");
 }
 
 /** Returns just the tagline (used by tests and by `renderLogo`). */
@@ -41,8 +42,8 @@ export function getTagline(): string {
  */
 export function renderLogo(): void {
   try {
-    process.stdout.write(getLavaLogo() + '\n');
-    process.stdout.write(getTagline() + '\n\n');
+    process.stdout.write(getLavaLogo() + "\n");
+    process.stdout.write(getTagline() + "\n\n");
   } catch {
     // stdout may be closed during teardown — never let that crash the agent.
   }

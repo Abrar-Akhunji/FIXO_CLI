@@ -1,14 +1,14 @@
-import assert from 'node:assert/strict';
-import test from 'node:test';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import { LspClient, filePathToUri } from '../lsp/lsp-client.js';
-import { LspManager } from '../lsp/lsp-manager.js';
+import assert from "node:assert/strict";
+import test from "node:test";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { LspClient, filePathToUri } from "../lsp/lsp-client.js";
+import { LspManager } from "../lsp/lsp-manager.js";
 
-test('LspClient lifecycle, synchronization and queries with a mock LSP server', async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-lsp-test-'));
-  const mockServerPath = path.join(tempDir, 'mock-lsp.js');
+test("LspClient lifecycle, synchronization and queries with a mock LSP server", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-lsp-test-"));
+  const mockServerPath = path.join(tempDir, "mock-lsp.js");
 
   const mockServerCode = `
 import { Buffer } from 'buffer';
@@ -111,24 +111,24 @@ function handleMessage(msg) {
 }
 `;
 
-  fs.writeFileSync(mockServerPath, mockServerCode, 'utf-8');
+  fs.writeFileSync(mockServerPath, mockServerCode, "utf-8");
 
   // Instantiate and run LspClient against the mock server script
-  const client = new LspClient('node', [mockServerPath], tempDir);
+  const client = new LspClient("node", [mockServerPath], tempDir);
   await client.start();
 
-  const testFile = path.join(tempDir, 'test.ts');
-  fs.writeFileSync(testFile, 'const x = 42;', 'utf-8');
+  const testFile = path.join(tempDir, "test.ts");
+  fs.writeFileSync(testFile, "const x = 42;", "utf-8");
 
   // Test didOpen and diagnostics receiving
-  client.syncFile(testFile, 'const x = 42;');
+  client.syncFile(testFile, "const x = 42;");
 
   // Wait a short moment for notification to arrive
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   const diagnostics = client.getDiagnostics(testFile);
   assert.equal(diagnostics.length, 1);
-  assert.equal(diagnostics[0].message, 'Mock compile warning/error');
+  assert.equal(diagnostics[0].message, "Mock compile warning/error");
   assert.equal(diagnostics[0].severity, 1);
 
   // Test gotoDefinition
@@ -144,7 +144,7 @@ function handleMessage(msg) {
   // Test hover
   const hoverVal = await client.hover(testFile, 0, 6);
   assert.ok(hoverVal);
-  assert.equal(hoverVal.contents.value, '### Mock Hover');
+  assert.equal(hoverVal.contents.value, "### Mock Hover");
 
   // Stop client
   await client.stop();
@@ -153,21 +153,23 @@ function handleMessage(msg) {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test('LspManager gracefully degrades for unsupported extensions and missing binaries', async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fixo-lsp-manager-test-'));
+test("LspManager gracefully degrades for unsupported extensions and missing binaries", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "fixo-lsp-manager-test-"),
+  );
   const manager = new LspManager(tempDir);
 
   // Unsupported file extension should degrade gracefully (return null/empty diagnostics)
-  const def = await manager.gotoDefinition('test.xyz', 0, 0);
+  const def = await manager.gotoDefinition("test.xyz", 0, 0);
   assert.equal(def, null);
 
-  const refs = await manager.findReferences('test.xyz', 0, 0);
+  const refs = await manager.findReferences("test.xyz", 0, 0);
   assert.equal(refs, null);
 
-  const hoverVal = await manager.hover('test.xyz', 0, 0);
+  const hoverVal = await manager.hover("test.xyz", 0, 0);
   assert.equal(hoverVal, null);
 
-  const diagnostics = await manager.getDiagnostics('test.xyz');
+  const diagnostics = await manager.getDiagnostics("test.xyz");
   assert.deepEqual(diagnostics, []);
 
   // Cleanup

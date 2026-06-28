@@ -20,8 +20,8 @@
  * problems (413, 404) from transient provider failures.
  */
 
-import type { StreamChunk } from './agent-client.js';
-import { HttpError } from './agent-client.js';
+import type { StreamChunk } from "./agent-client.js";
+import { HttpError } from "./agent-client.js";
 
 /**
  * Marker class. Wrap a thrown error in this to signal that the
@@ -32,7 +32,7 @@ export class NonRetryableError extends Error {
   readonly cause: unknown;
   constructor(message: string, cause?: unknown) {
     super(message);
-    this.name = 'NonRetryableError';
+    this.name = "NonRetryableError";
     this.cause = cause;
   }
 }
@@ -49,21 +49,23 @@ export class NonRetryableError extends Error {
  *
  * `done` and `usage` chunks are ignored.
  */
-export function reconstructPartialResponse(chunks: ReadonlyArray<StreamChunk>): string {
-  let out = '';
+export function reconstructPartialResponse(
+  chunks: ReadonlyArray<StreamChunk>,
+): string {
+  let out = "";
   for (const chunk of chunks) {
     switch (chunk.type) {
-      case 'content':
+      case "content":
         out += chunk.content;
         break;
-      case 'thinking':
-        out += chunk.thinking ?? '';
+      case "thinking":
+        out += chunk.thinking ?? "";
         break;
-      case 'tool_call_start':
-      case 'tool_call_delta':
+      case "tool_call_start":
+      case "tool_call_delta":
         // Cannot resume mid-tool-call. Caller decides what to do.
         return out;
-      case 'done':
+      case "done":
         break;
     }
   }
@@ -90,7 +92,7 @@ export function reconstructPartialResponse(chunks: ReadonlyArray<StreamChunk>): 
  *   - Timeouts that fired *during* streaming (not before any chunk).
  */
 export function isMidStreamResumable(err: unknown): boolean {
-  if (err instanceof Error && err.name === 'AbortError') return false;
+  if (err instanceof Error && err.name === "AbortError") return false;
   if (err instanceof NonRetryableError) return false;
   if (err instanceof HttpError) {
     if (err.status === 408 || err.status === 425) return true;
@@ -100,12 +102,12 @@ export function isMidStreamResumable(err: unknown): boolean {
   if (err instanceof Error) {
     const m = err.message;
     if (
-      m.includes('ECONNRESET') ||
-      m.includes('ETIMEDOUT') ||
-      m.includes('fetch failed') ||
-      m.includes('socket hang up') ||
-      m.includes('aborted due to timeout') ||
-      err.name === 'TimeoutError'
+      m.includes("ECONNRESET") ||
+      m.includes("ETIMEDOUT") ||
+      m.includes("fetch failed") ||
+      m.includes("socket hang up") ||
+      m.includes("aborted due to timeout") ||
+      err.name === "TimeoutError"
     ) {
       return true;
     }
@@ -134,7 +136,7 @@ export class StreamResumeExhaustedError extends Error {
   readonly context: StreamResumeExhaustedContext;
   constructor(message: string, context: StreamResumeExhaustedContext) {
     super(message);
-    this.name = 'StreamResumeExhaustedError';
+    this.name = "StreamResumeExhaustedError";
     this.context = context;
   }
 }

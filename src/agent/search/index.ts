@@ -15,13 +15,16 @@
  * the key never escapes the callback scope and never
  * appears in tool results, telemetry, or error messages.
  */
-import { withRetry, defaultIsRetryable } from '../retry.js';
-import { getProviderKeyVault, ProviderNotInVaultError } from '../../runtime/credential-vault.js';
+import { withRetry, defaultIsRetryable } from "../retry.js";
+import {
+  getProviderKeyVault,
+  ProviderNotInVaultError,
+} from "../../runtime/credential-vault.js";
 import {
   recordProviderError,
   recordProviderQuality,
-} from '../provider-cooldown.js';
-import * as cheerio from 'cheerio';
+} from "../provider-cooldown.js";
+import * as cheerio from "cheerio";
 
 export interface SearchResult {
   readonly title: string;
@@ -36,7 +39,7 @@ export interface SearchOptions {
 }
 
 export interface SearchProvider {
-  readonly id: 'brave' | 'tavily' | 'ddg';
+  readonly id: "brave" | "tavily" | "ddg";
   /**
    * True if the provider can run right now (key configured, not
    * currently rate-limited). The chain uses this to skip a
@@ -57,9 +60,9 @@ export class SearchExhaustedError extends Error {
   ) {
     super(
       `All search providers failed for query "${query}". ` +
-        `Tried: ${attempts.map((a) => a.provider).join(' → ')}.`,
+        `Tried: ${attempts.map((a) => a.provider).join(" → ")}.`,
     );
-    this.name = 'SearchExhaustedError';
+    this.name = "SearchExhaustedError";
     this.query = query;
     this.attempts = attempts;
   }
@@ -67,12 +70,12 @@ export class SearchExhaustedError extends Error {
 
 /* ──────────────────────── Brave ──────────────────────── */
 
-const BRAVE_PROVIDER_NAME = 'search.brave';
-const BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
-const BRAVE_KEY_NOT_CONFIGURED = '__not_configured__';
+const BRAVE_PROVIDER_NAME = "search.brave";
+const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const BRAVE_KEY_NOT_CONFIGURED = "__not_configured__";
 
 class BraveProvider implements SearchProvider {
-  public readonly id = 'brave' as const;
+  public readonly id = "brave" as const;
 
   public async isAvailable(): Promise<boolean> {
     try {
@@ -82,7 +85,10 @@ class BraveProvider implements SearchProvider {
     }
   }
 
-  public async search(query: string, opts: SearchOptions = {}): Promise<SearchResult[]> {
+  public async search(
+    query: string,
+    opts: SearchOptions = {},
+  ): Promise<SearchResult[]> {
     const maxResults = opts.maxResults ?? 10;
     const t0 = Date.now();
 
@@ -91,46 +97,56 @@ class BraveProvider implements SearchProvider {
         const headers = await getProviderKeyVault().buildAuthHeaders(
           BRAVE_PROVIDER_NAME,
           (cred) => ({
-            'X-Subscription-Token': cred.apiKey,
-            'Accept': 'application/json',
-            'User-Agent': 'FixO-CLI/2.0 (search)',
+            "X-Subscription-Token": cred.apiKey,
+            Accept: "application/json",
+            "User-Agent": "FixO-CLI/2.0 (search)",
           }),
         );
         const url = new URL(BRAVE_ENDPOINT);
-        url.searchParams.set('q', query);
-        url.searchParams.set('count', String(Math.min(maxResults, 20)));
+        url.searchParams.set("q", query);
+        url.searchParams.set("count", String(Math.min(maxResults, 20)));
         const response = await fetch(url.toString(), {
-          method: 'GET',
+          method: "GET",
           headers,
           signal,
         });
         if (!response.ok) {
           const status = response.status;
-          recordProviderError('brave', status, `HTTP ${status} ${response.statusText}`);
+          recordProviderError(
+            "brave",
+            status,
+            `HTTP ${status} ${response.statusText}`,
+          );
           if (status === 401 || status === 403) {
             throw new ProviderNotInVaultError(BRAVE_PROVIDER_NAME);
           }
           throw new Error(`Brave HTTP ${status}`);
         }
         const json = (await response.json()) as {
-          web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
+          web?: {
+            results?: Array<{
+              title?: string;
+              url?: string;
+              description?: string;
+            }>;
+          };
         };
         const results: SearchResult[] = (json.web?.results ?? [])
           .filter((r) => r.title && r.url)
           .slice(0, maxResults)
           .map((r) => ({
-            title: r.title ?? '',
-            url: r.url ?? '',
-            snippet: r.description ?? '',
+            title: r.title ?? "",
+            url: r.url ?? "",
+            snippet: r.description ?? "",
           }));
-        recordProviderQuality('brave', Date.now() - t0, results.length);
+        recordProviderQuality("brave", Date.now() - t0, results.length);
         return results;
       },
       {
         maxAttempts: 2,
         baseDelayMs: 500,
         maxDelayMs: 4_000,
-        jitter: 'full',
+        jitter: "full",
         isRetryable: (err) => {
           if (err instanceof ProviderNotInVaultError) return false;
           return defaultIsRetryable(err);
@@ -143,11 +159,11 @@ class BraveProvider implements SearchProvider {
 
 /* ──────────────────────── Tavily ──────────────────────── */
 
-const TAVILY_PROVIDER_NAME = 'search.tavily';
-const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
+const TAVILY_PROVIDER_NAME = "search.tavily";
+const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 
 class TavilyProvider implements SearchProvider {
-  public readonly id = 'tavily' as const;
+  public readonly id = "tavily" as const;
 
   public async isAvailable(): Promise<boolean> {
     try {
@@ -157,7 +173,10 @@ class TavilyProvider implements SearchProvider {
     }
   }
 
-  public async search(query: string, opts: SearchOptions = {}): Promise<SearchResult[]> {
+  public async search(
+    query: string,
+    opts: SearchOptions = {},
+  ): Promise<SearchResult[]> {
     const maxResults = opts.maxResults ?? 10;
     const t0 = Date.now();
 
@@ -168,48 +187,57 @@ class TavilyProvider implements SearchProvider {
           async (key) => key,
         );
         const response = await fetch(TAVILY_ENDPOINT, {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'FixO-CLI/2.0 (search)',
+            "Content-Type": "application/json",
+            "User-Agent": "FixO-CLI/2.0 (search)",
           },
           body: JSON.stringify({
             api_key: apiKey,
             query,
             max_results: Math.min(maxResults, 20),
             include_answer: false,
-            search_depth: 'basic',
+            search_depth: "basic",
           }),
           signal,
         });
         if (!response.ok) {
           const status = response.status;
-          recordProviderError('tavily', status, `HTTP ${status} ${response.statusText}`);
+          recordProviderError(
+            "tavily",
+            status,
+            `HTTP ${status} ${response.statusText}`,
+          );
           if (status === 401 || status === 403) {
             throw new ProviderNotInVaultError(TAVILY_PROVIDER_NAME);
           }
           throw new Error(`Tavily HTTP ${status}`);
         }
         const json = (await response.json()) as {
-          results?: Array<{ title?: string; url?: string; content?: string; score?: number }>;
+          results?: Array<{
+            title?: string;
+            url?: string;
+            content?: string;
+            score?: number;
+          }>;
         };
         const results: SearchResult[] = (json.results ?? [])
           .filter((r) => r.title && r.url)
           .slice(0, maxResults)
           .map((r) => ({
-            title: r.title ?? '',
-            url: r.url ?? '',
-            snippet: r.content ?? '',
+            title: r.title ?? "",
+            url: r.url ?? "",
+            snippet: r.content ?? "",
             score: r.score,
           }));
-        recordProviderQuality('tavily', Date.now() - t0, results.length);
+        recordProviderQuality("tavily", Date.now() - t0, results.length);
         return results;
       },
       {
         maxAttempts: 2,
         baseDelayMs: 500,
         maxDelayMs: 4_000,
-        jitter: 'full',
+        jitter: "full",
         isRetryable: (err) => {
           if (err instanceof ProviderNotInVaultError) return false;
           return defaultIsRetryable(err);
@@ -231,48 +259,55 @@ class TavilyProvider implements SearchProvider {
  * provider.
  */
 class DdgProvider implements SearchProvider {
-  public readonly id = 'ddg' as const;
+  public readonly id = "ddg" as const;
 
   public async isAvailable(): Promise<boolean> {
     return true; // always available, no key required
   }
 
-  public async search(query: string, opts: SearchOptions = {}): Promise<SearchResult[]> {
+  public async search(
+    query: string,
+    opts: SearchOptions = {},
+  ): Promise<SearchResult[]> {
     const maxResults = opts.maxResults ?? 10;
     const t0 = Date.now();
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     const response = await fetch(url, {
-      method: 'GET',
+      method: "GET",
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-          '(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         Accept:
-          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
       signal: opts.signal,
     });
     if (!response.ok) {
       const status = response.status;
-      recordProviderError('ddg', status, `HTTP ${status} ${response.statusText}`);
+      recordProviderError(
+        "ddg",
+        status,
+        `HTTP ${status} ${response.statusText}`,
+      );
       throw new Error(`DDG HTTP ${status}`);
     }
     const html = await response.text();
     const $ = cheerio.load(html);
     const results: SearchResult[] = [];
-    $('.result').each((_i, elem) => {
+    $(".result").each((_i, elem) => {
       if (results.length >= maxResults) return false;
-      const titleElem = $(elem).find('.result__title a');
-      const snippetElem = $(elem).find('.result__snippet');
+      const titleElem = $(elem).find(".result__title a");
+      const snippetElem = $(elem).find(".result__snippet");
       if (titleElem.length === 0) return;
-      let rawUrl = titleElem.attr('href') ?? '';
-      if (rawUrl.startsWith('//duckduckgo.com/l/?')) {
+      let rawUrl = titleElem.attr("href") ?? "";
+      if (rawUrl.startsWith("//duckduckgo.com/l/?")) {
         const m = rawUrl.match(/uddg=([^&]+)/);
         if (m && m[1]) {
           try {
             rawUrl = decodeURIComponent(m[1]);
           } catch {
-            rawUrl = '';
+            rawUrl = "";
           }
         }
       }
@@ -283,7 +318,7 @@ class DdgProvider implements SearchProvider {
         snippet: snippetElem.text().trim(),
       });
     });
-    recordProviderQuality('ddg', Date.now() - t0, results.length);
+    recordProviderQuality("ddg", Date.now() - t0, results.length);
     return results;
   }
 }
@@ -297,27 +332,43 @@ class DdgProvider implements SearchProvider {
  */
 export class SearchProviderChain {
   private readonly providers: SearchProvider[];
-  private readonly onProviderTried?: (provider: string, results: number, durationMs: number) => void;
+  private readonly onProviderTried?: (
+    provider: string,
+    results: number,
+    durationMs: number,
+  ) => void;
 
   constructor(
     providers?: SearchProvider[],
-    hooks?: { onProviderTried?: (provider: string, results: number, durationMs: number) => void },
+    hooks?: {
+      onProviderTried?: (
+        provider: string,
+        results: number,
+        durationMs: number,
+      ) => void;
+    },
   ) {
-    this.providers =
-      providers ?? [new BraveProvider(), new TavilyProvider(), new DdgProvider()];
+    this.providers = providers ?? [
+      new BraveProvider(),
+      new TavilyProvider(),
+      new DdgProvider(),
+    ];
     this.onProviderTried = hooks?.onProviderTried;
   }
 
-  public async search(query: string, opts: SearchOptions = {}): Promise<{
+  public async search(
+    query: string,
+    opts: SearchOptions = {},
+  ): Promise<{
     results: SearchResult[];
-    provider: SearchProvider['id'] | null;
+    provider: SearchProvider["id"] | null;
     attempts: Array<{ provider: string; error: string }>;
   }> {
     const attempts: Array<{ provider: string; error: string }> = [];
     for (const provider of this.providers) {
       const available = await provider.isAvailable();
       if (!available) {
-        attempts.push({ provider: provider.id, error: 'not_configured' });
+        attempts.push({ provider: provider.id, error: "not_configured" });
         continue;
       }
       const t0 = Date.now();
@@ -328,7 +379,7 @@ export class SearchProviderChain {
         if (results.length > 0) {
           return { results, provider: provider.id, attempts };
         }
-        attempts.push({ provider: provider.id, error: 'no_results' });
+        attempts.push({ provider: provider.id, error: "no_results" });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         attempts.push({ provider: provider.id, error: msg });
@@ -358,15 +409,15 @@ export function resetDefaultSearchChain(): void {
 
 function formatAsMarkdown(
   results: SearchResult[],
-  providerId: SearchProvider['id'] | null,
+  providerId: SearchProvider["id"] | null,
 ): string {
   if (results.length === 0) {
-    return 'No results found.';
+    return "No results found.";
   }
-  const header = providerId ? `_via ${providerId}_\n\n` : '';
+  const header = providerId ? `_via ${providerId}_\n\n` : "";
   const body = results
     .map((r) => `### [${r.title}](${r.url})\n${r.snippet}\n`)
-    .join('\n');
+    .join("\n");
   return header + body;
 }
 
@@ -381,7 +432,7 @@ export async function webSearch(query: string): Promise<string> {
     return formatAsMarkdown(results, provider);
   } catch (err) {
     if (err instanceof SearchExhaustedError) {
-      return `No results found. Tried: ${err.attempts.map((a) => a.provider).join(', ')}.`;
+      return `No results found. Tried: ${err.attempts.map((a) => a.provider).join(", ")}.`;
     }
     return `Error performing web search: ${err instanceof Error ? err.message : String(err)}`;
   }

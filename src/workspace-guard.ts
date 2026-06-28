@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import fs from "fs";
+import path from "path";
 
 /**
  * Workspace boundary guard.
@@ -16,7 +16,7 @@ import path from 'path';
 export class WorkspaceGuard {
   constructor(
     public readonly root: string,
-    private readonly allowedOutsidePaths?: Set<string>
+    private readonly allowedOutsidePaths?: Set<string>,
   ) {
     try {
       this.root = fs.realpathSync(path.resolve(root));
@@ -30,7 +30,7 @@ export class WorkspaceGuard {
       return fs.realpathSync(p);
     } catch (err: unknown) {
       const code = (err as { code?: string }).code;
-      if (code === 'ENOENT') {
+      if (code === "ENOENT") {
         const parent = path.dirname(p);
         if (parent === p) return p;
         return path.join(this.safeRealPath(parent), path.basename(p));
@@ -39,12 +39,12 @@ export class WorkspaceGuard {
     }
   }
 
-  resolve(input: string | undefined, label = 'path', strict = false): string {
-    const raw = input?.trim() || '.';
+  resolve(input: string | undefined, label = "path", strict = false): string {
+    const raw = input?.trim() || ".";
     const resolved = path.resolve(this.root, raw);
     if (strict && !this.isInside(resolved)) {
       if (!this.allowedOutsidePaths?.has(resolved)) {
-        throw new Error(`${label} escapes workspace: ${input ?? '.'}`);
+        throw new Error(`${label} escapes workspace: ${input ?? "."}`);
       }
     }
     return resolved;
@@ -53,15 +53,18 @@ export class WorkspaceGuard {
   isInside(target: string): boolean {
     const resolvedTarget = this.safeRealPath(path.resolve(target));
     const relative = path.relative(this.root, resolvedTarget);
-    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    return (
+      relative === "" ||
+      (!relative.startsWith("..") && !path.isAbsolute(relative))
+    );
   }
 
   relative(target: string): string {
-    return path.relative(this.root, path.resolve(target)) || '.';
+    return path.relative(this.root, path.resolve(target)) || ".";
   }
 
   ensureFile(target: string): string {
-    const resolved = this.resolve(target, 'file', true);
+    const resolved = this.resolve(target, "file", true);
     try {
       const stat = fs.statSync(resolved);
       if (!stat.isFile()) {
@@ -69,7 +72,7 @@ export class WorkspaceGuard {
       }
     } catch (err: unknown) {
       const code = (err as { code?: string }).code;
-      if (code === 'ENOENT') {
+      if (code === "ENOENT") {
         throw new Error(`File does not exist: ${target}`);
       }
       throw err;
@@ -78,7 +81,7 @@ export class WorkspaceGuard {
   }
 
   isBinaryFile(target: string, sampleBytes = 4096): boolean {
-    const fd = fs.openSync(target, 'r');
+    const fd = fs.openSync(target, "r");
     try {
       const buffer = Buffer.alloc(sampleBytes);
       const bytesRead = fs.readSync(fd, buffer, 0, sampleBytes, 0);
@@ -133,7 +136,7 @@ export class WorkspaceGuard {
   }
 
   private static isPlatformPathStatic(relativePath: string): boolean {
-    const normalised = relativePath.replace(/\\/g, '/').toLowerCase();
+    const normalised = relativePath.replace(/\\/g, "/").toLowerCase();
     for (const pattern of WorkspaceGuard.PLATFORM_PATH_PATTERNS) {
       if (pattern.test(normalised)) return true;
     }
@@ -149,16 +152,17 @@ export class WorkspaceGuard {
   public assertNotPlatformPath(target: string): void {
     // Only enforce platform path lock if the workspace itself IS the platform (Fixo CLI codebase).
     // Otherwise, we block the user from editing their own src/ and package.json!
-    const isFixoRepo = fs.existsSync(path.join(this.root, 'src', 'workspace-guard.ts')) && 
-                       fs.existsSync(path.join(this.root, 'package.json'));
-    
+    const isFixoRepo =
+      fs.existsSync(path.join(this.root, "src", "workspace-guard.ts")) &&
+      fs.existsSync(path.join(this.root, "package.json"));
+
     if (!isFixoRepo) {
       return; // Not running inside the Fixo CLI source code, so no system paths to lock.
     }
 
     // Resolve to an absolute path so symlinks and `..` tricks
     // cannot escape the check.
-    const resolved = this.resolve(target, 'platform path');
+    const resolved = this.resolve(target, "platform path");
     const relative = this.relative(resolved);
     if (this.isPlatformPath(relative)) {
       throw new PlatformPathLockedError(resolved, relative);
@@ -177,9 +181,9 @@ export class PlatformPathLockedError extends Error {
   public readonly relative: string;
   constructor(resolved: string, relative: string) {
     super(
-      `Error: STOP TRYING TO EDIT THIS FILE. IT IS SYSTEM PROTECTED. MOVE ON TO OTHER TASKS. (target: ${relative})`
+      `Error: STOP TRYING TO EDIT THIS FILE. IT IS SYSTEM PROTECTED. MOVE ON TO OTHER TASKS. (target: ${relative})`,
     );
-    this.name = 'PlatformPathLockedError';
+    this.name = "PlatformPathLockedError";
     this.resolved = resolved;
     this.relative = relative;
   }

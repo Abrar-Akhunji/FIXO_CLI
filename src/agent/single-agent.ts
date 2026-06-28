@@ -6,57 +6,66 @@
  *   User Input → Complexity Check → Agentic Tool Loop → Result
  *   (trivial queries skip the tool loop entirely)
  */
-import path from 'path';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import type { ChatContentBlock, ChatMessage, TokenUsage } from '../shared/types.js';
-import { AgentClient, type ChatResult, type StreamChunk } from './agent-client.js';
-import { ConversationManager, sanitizeUserContent } from './conversation.js';
-import { getActiveTools, TOOL_DEFINITIONS, executeTool, classifyExecutionRole, type ToolCallEvent } from './tool-executor.js';
-import { isTrivialQuery } from '../planner.js';
-import { decideAutoVerify, classifyVerifyOutput, buildRepairMessage } from './auto-verifier.js';
-import { buildRepoMap } from './repo-map.js';
-import type { AgentContext, AgentResult } from '../types.js';
-import { loadConfig, getAgentLoopGuardConfig } from '../config.js';
-import { recordTelemetry, telemetry } from './telemetry.js';
+import path from "path";
+import fs from "fs";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import type {
+  ChatContentBlock,
+  ChatMessage,
+  TokenUsage,
+} from "../shared/types.js";
+import { AgentClient } from "./agent-client.js";
+import { ConversationManager, sanitizeUserContent } from "./conversation.js";
+import {
+  getActiveTools,
+  executeTool,
+  classifyExecutionRole,
+  type ToolCallEvent,
+} from "./tool-executor.js";
+import { isTrivialQuery } from "../planner.js";
+import {
+  decideAutoVerify,
+  classifyVerifyOutput,
+  buildRepairMessage,
+} from "./auto-verifier.js";
+import { buildRepoMap } from "./repo-map.js";
+import type { AgentContext, AgentResult } from "../types.js";
+import { loadConfig, getAgentLoopGuardConfig } from "../config.js";
+import { recordTelemetry, telemetry } from "./telemetry.js";
 import {
   buildProjectInstructionsBlock,
   recordFixoMdLoad,
-} from '../context/fixo-md.js';
+} from "../context/fixo-md.js";
+import { loadTodoList, summariseTodoList } from "../context/todo.js";
+import { C } from "../ui/colors.js";
 import {
-  loadTodoList,
-  summariseTodoList,
-} from '../context/todo.js';
-import { C } from '../ui/colors.js';
-import { MarkdownStreamRenderer, renderMarkdown } from '../ui/markdown-stream.js';
+  MarkdownStreamRenderer,
+  renderMarkdown,
+} from "../ui/markdown-stream.js";
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
   toSafetyAlertDirective,
-} from '../runtime/loop-trap.js';
+} from "../runtime/loop-trap.js";
 import {
   LoopMitigationTracker,
   isReadTool,
   buildLoopBlockedReadResult,
-} from '../runtime/loop-mitigation.js';
-import { dashboard } from '../ui/render.js';
-import { LoadingAnimation } from '../ui/loading-animation.js';
-import * as p from '@clack/prompts';
+} from "../runtime/loop-mitigation.js";
+import { dashboard } from "../ui/render.js";
+import { LoadingAnimation } from "../ui/loading-animation.js";
+import * as p from "@clack/prompts";
 export const promptsWrapper = {
   select: p.select,
   confirm: p.confirm,
   spinner: p.spinner,
   isCancel: p.isCancel,
 };
-import type readline from 'readline';
-import { TaskSession } from '../runtime/task-session.js';
-import {
-  applyWorktreeAnnotations,
-  parseWorktreeAnnotations,
-  stripWorktreeAnnotations,
-} from '../runtime/worktree.js';
-import { BackgroundAwareness } from './background-awareness.js';
-import { FixoMdWatcher } from '../context/fixo-md-watcher.js';
-import { FILE_WRITING_RULES_BLOCK } from './file-writing-rules.js';
+import type readline from "readline";
+import { TaskSession } from "../runtime/task-session.js";
+import { BackgroundAwareness } from "./background-awareness.js";
+import { FixoMdWatcher } from "../context/fixo-md-watcher.js";
+import { FILE_WRITING_RULES_BLOCK } from "./file-writing-rules.js";
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -70,19 +79,19 @@ const MAX_TOOL_RESULT_LENGTH = 30_000;
  * user sees in the approval prompt.
  */
 export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'write_file',
-  'run_command',
-  'run_command_async',
-  'apply_patch',
-  'replace_range',
-  'insert_after',
-  'str_replace',
-  'rename_file',
-  'delete_file',
-  'create_branch',
-  'commit_changes',
-  'push_branch',
-  'create_pull_request',
+  "write_file",
+  "run_command",
+  "run_command_async",
+  "apply_patch",
+  "replace_range",
+  "insert_after",
+  "str_replace",
+  "rename_file",
+  "delete_file",
+  "create_branch",
+  "commit_changes",
+  "push_branch",
+  "create_pull_request",
 ]);
 
 /**
@@ -105,39 +114,72 @@ const colors = {
   magenta: C.PURPLE,
 };
 
-export function evaluateInputIntent(task: string): 'CHAT_ONLY' | 'MUTATION' {
+export function evaluateInputIntent(task: string): "CHAT_ONLY" | "MUTATION" {
   const cleanTask = task.toLowerCase().trim();
-  
+
   // Strong mutation indicators override any chat keywords (e.g. "refactor the list component")
   const mutationKeywords = [
-    /\bcreate\b/, /\bwrite\b/, /\bfix\b/, /\brefactor\b/, /\bupdate\b/, 
-    /\bdelete\b/, /\badd\b/, /\bimplement\b/, /\bmodify\b/, /\bchange\b/, /\bmake\b/
+    /\bcreate\b/,
+    /\bwrite\b/,
+    /\bfix\b/,
+    /\brefactor\b/,
+    /\bupdate\b/,
+    /\bdelete\b/,
+    /\badd\b/,
+    /\bimplement\b/,
+    /\bmodify\b/,
+    /\bchange\b/,
+    /\bmake\b/,
   ];
-  if (mutationKeywords.some(pattern => pattern.test(cleanTask))) {
-    return 'MUTATION';
+  if (mutationKeywords.some((pattern) => pattern.test(cleanTask))) {
+    return "MUTATION";
   }
 
   // Codebase or file reference queries must have tools enabled
   const codebaseKeywords = [
-    /\bcodebase\b/, /\brepo\b/, /\brepository\b/, /\bvulnerab\w*\b/, /\bfile\b/, 
-    /\bfolder\b/, /\bdirectory\b/, /\bpath\b/, /\btest\b/, /\berror\b/, 
-    /\bwarning\b/, /\bbug\b/, /\bissue\b/, /\bcompile\b/, /\bbuild\b/
+    /\bcodebase\b/,
+    /\brepo\b/,
+    /\brepository\b/,
+    /\bvulnerab\w*\b/,
+    /\bfile\b/,
+    /\bfolder\b/,
+    /\bdirectory\b/,
+    /\bpath\b/,
+    /\btest\b/,
+    /\berror\b/,
+    /\bwarning\b/,
+    /\bbug\b/,
+    /\bissue\b/,
+    /\bcompile\b/,
+    /\bbuild\b/,
   ];
-  const fileRefPattern = /\b[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|css|scss|json|md|yml|yaml|toml|sh|bash|txt|html|vue|svelte)\b/i;
+  const fileRefPattern =
+    /\b[\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|css|scss|json|md|yml|yaml|toml|sh|bash|txt|html|vue|svelte)\b/i;
 
-  if (codebaseKeywords.some(pattern => pattern.test(cleanTask)) || fileRefPattern.test(cleanTask)) {
-    return 'MUTATION';
+  if (
+    codebaseKeywords.some((pattern) => pattern.test(cleanTask)) ||
+    fileRefPattern.test(cleanTask)
+  ) {
+    return "MUTATION";
   }
 
   const chatKeywords = [
-    /\bguide\b/, /\bexplain\b/, /\bwhy\b/, /\bhow to\b/, /\blist\b/, 
-    /\breview\b/, /\btell me\b/, /\bwhat is\b/, /\bsuggest\b/, /\bwhat are\b/
+    /\bguide\b/,
+    /\bexplain\b/,
+    /\bwhy\b/,
+    /\bhow to\b/,
+    /\blist\b/,
+    /\breview\b/,
+    /\btell me\b/,
+    /\bwhat is\b/,
+    /\bsuggest\b/,
+    /\bwhat are\b/,
   ];
-  
-  if (chatKeywords.some(pattern => pattern.test(cleanTask))) {
-    return 'CHAT_ONLY';
+
+  if (chatKeywords.some((pattern) => pattern.test(cleanTask))) {
+    return "CHAT_ONLY";
   }
-  return 'MUTATION';
+  return "MUTATION";
 }
 
 /* ──────────────────────── Permission helpers ──────────────────────── */
@@ -147,28 +189,28 @@ function formatPermissionPrompt(
   args: Record<string, string>,
 ): string {
   switch (name) {
-    case 'write_file':
-      return `Allow write to ${colors.cyan}${colors.bold}${args.path || 'unknown path'}${colors.reset}?`;
-    case 'run_command':
-      return `Allow command execution: ${colors.yellow}${colors.bold}${args.command || 'unknown command'}${colors.reset}?`;
-    case 'apply_patch':
-      return `Allow apply_patch (unified diff, ${(args.patch ?? '').length} chars)?`;
-    case 'replace_range':
+    case "write_file":
+      return `Allow write to ${colors.cyan}${colors.bold}${args.path || "unknown path"}${colors.reset}?`;
+    case "run_command":
+      return `Allow command execution: ${colors.yellow}${colors.bold}${args.command || "unknown command"}${colors.reset}?`;
+    case "apply_patch":
+      return `Allow apply_patch (unified diff, ${(args.patch ?? "").length} chars)?`;
+    case "replace_range":
       return `Allow replace_range on ${colors.cyan}${args.path}${colors.reset} lines ${args.startLine}..${args.endLine}?`;
-    case 'insert_after':
+    case "insert_after":
       return `Allow insert_after on ${colors.cyan}${args.path}${colors.reset}?`;
-    case 'rename_file':
+    case "rename_file":
       return `Allow rename ${colors.cyan}${args.from}${colors.reset} → ${colors.cyan}${args.to}${colors.reset}?`;
-    case 'delete_file':
+    case "delete_file":
       return `Allow ${colors.red}delete${colors.reset} ${colors.cyan}${args.path}${colors.reset}?`;
-    case 'create_branch':
+    case "create_branch":
       return `Allow create git branch "${args.branchName}"?`;
-    case 'commit_changes':
-      return `Allow git commit: "${(args.message ?? '').slice(0, 80)}"?`;
-    case 'push_branch':
-      return `Allow git push to ${args.remote || 'origin'}?`;
-    case 'create_pull_request':
-      return `Allow create pull request (base: ${args.baseBranch || 'main'})?`;
+    case "commit_changes":
+      return `Allow git commit: "${(args.message ?? "").slice(0, 80)}"?`;
+    case "push_branch":
+      return `Allow git push to ${args.remote || "origin"}?`;
+    case "create_pull_request":
+      return `Allow create pull request (base: ${args.baseBranch || "main"})?`;
     default:
       return `Allow ${name}?`;
   }
@@ -190,7 +232,7 @@ function buildUserContent(context: AgentContext): string | ChatContentBlock[] {
   if (!attachments || attachments.length === 0) {
     return sanitizedTask;
   }
-  const blocks: ChatContentBlock[] = [{ type: 'text', text: sanitizedTask }];
+  const blocks: ChatContentBlock[] = [{ type: "text", text: sanitizedTask }];
   for (const a of attachments) blocks.push(a);
   return blocks;
 }
@@ -240,15 +282,11 @@ function buildSystemPrompt(
     );
   }
 
-  parts.push(
-    ``,
-    `## Workspace`,
-    `Working directory: ${context.cwd}`,
-  );
+  parts.push(``, `## Workspace`, `Working directory: ${context.cwd}`);
 
   // Add pinned files info
   if (context.selectedFiles.length > 0) {
-    parts.push(`Pinned files: ${context.selectedFiles.join(', ')}`);
+    parts.push(`Pinned files: ${context.selectedFiles.join(", ")}`);
   }
 
   // Add verification command
@@ -264,7 +302,8 @@ function buildSystemPrompt(
   // Add FIXO.md block (project-local instructions from the
   // configured lookup chain). Telemetry is emitted in a
   // microtask so the system-prompt build remains sync.
-  const { block: fixoBlock, result: fixoResult } = buildProjectInstructionsBlock(context.cwd);
+  const { block: fixoBlock, result: fixoResult } =
+    buildProjectInstructionsBlock(context.cwd);
   if (fixoBlock.length > 0) {
     parts.push(fixoBlock);
     void recordFixoMdLoad(fixoResult);
@@ -281,7 +320,7 @@ function buildSystemPrompt(
     parts.push(``, `## Todo`, todoSummary);
   }
 
-  return parts.join('\n');
+  return parts.join("\n");
 }
 
 /* ──────────────────────── SingleAgent ──────────────────────── */
@@ -300,7 +339,7 @@ export class SingleAgent {
   constructor(verbose = false) {
     const config = loadConfig();
     this.client = new AgentClient(
-      config.freellmapi_api_key || '',
+      config.freellmapi_api_key || "",
       config.apiUrl,
       verbose,
       config.provider_mode,
@@ -335,33 +374,80 @@ export class SingleAgent {
     rl?: readline.Interface,
   ): Promise<AgentResult> {
     const startTime = Date.now();
-    const totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    const totalUsage: TokenUsage = {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
     let toolCallCount = 0;
     const modifiedFiles: string[] = [];
     let resolvedModel = context.model;
 
     this.activeAnimation = new LoadingAnimation();
     this.activeAnimation.start();
-
     // Set model context limit for accurate overflow detection
     conversation.setContextLimit(context.model);
+
+    // Phase 4: Read persistent summary
+    try {
+      const fixoDir = path.join(context.cwd || process.cwd(), ".fixo");
+      const summaryFile = path.join(fixoDir, "last-run-summary.json");
+      if (fs.existsSync(summaryFile)) {
+        const summaryRaw = fs.readFileSync(summaryFile, "utf8");
+        fs.rmSync(summaryFile, { force: true });
+        const summary = JSON.parse(summaryRaw);
+        if (
+          summary &&
+          summary.timestamp &&
+          typeof summary.success === "boolean"
+        ) {
+          const ageMs = Date.now() - summary.timestamp;
+          if (ageMs < 15 * 60 * 1000 && summary.success === false) {
+            conversation.addMessage({
+              role: "system",
+              content:
+                "Previous DAG Run Failed: " +
+                (summary.reason || "Unknown error"),
+            });
+          }
+        }
+      }
+    } catch (e) {
+      if (process.env.DEBUG)
+        console.warn("[single-agent] Error reading last-run-summary.json", e);
+    }
 
     // ──── Trivial query → stream directly ────
     if (isTrivialQuery(context.task)) {
       const trivialSystem = `You are FixO CLI, a friendly AI coding assistant. Respond briefly and helpfully.`;
 
       // Auto-compact if context is getting large
-      await this.autoCompactIfNeeded(conversation, trivialSystem, context.task, context.model);
+      await this.autoCompactIfNeeded(
+        conversation,
+        trivialSystem,
+        context.task,
+        context.model,
+      );
       // Pillar 4 — proactive budget enforcement
-      await this.enforceContextBudget(conversation, trivialSystem, context.task, context.model);
+      await this.enforceContextBudget(
+        conversation,
+        trivialSystem,
+        context.task,
+        context.model,
+      );
 
       const messages: ChatMessage[] = [
-        { role: 'system', content: trivialSystem },
+        { role: "system", content: trivialSystem },
         ...conversation.getMessages(),
-        { role: 'user', content: buildUserContent(context) },
+        { role: "user", content: buildUserContent(context) },
       ];
 
-      const streamRes = await this.streamResponse(messages, context.model, totalUsage, this.abortController.signal);
+      const streamRes = await this.streamResponse(
+        messages,
+        context.model,
+        totalUsage,
+        this.abortController.signal,
+      );
       const fullResponse = streamRes.responseText;
       conversation.addTurn(context.task, fullResponse);
 
@@ -377,13 +463,17 @@ export class SingleAgent {
     }
 
     const intent = evaluateInputIntent(context.task);
-    if (intent === 'CHAT_ONLY') {
-      return await this.executePureChatStream(context.task, conversation, context);
+    if (intent === "CHAT_ONLY") {
+      return await this.executePureChatStream(
+        context.task,
+        conversation,
+        context,
+      );
     }
 
     // ──── Complex task → tool loop ────
-    let repoMap = '';
-    let referencesBlock = '';
+    let repoMap = "";
+    let referencesBlock = "";
 
     if (!(context as any).isResume) {
       repoMap = await buildRepoMap(context.cwd, {
@@ -397,8 +487,9 @@ export class SingleAgent {
       // unconditionally is safe on machines without an LSP installed.
       if (context.selectedFiles && context.selectedFiles.length > 0) {
         try {
-          const { gatherReferencesForTargets } = await import('./context-builder.js');
-          const { getLspManager } = await import('./tool-executor.js');
+          const { gatherReferencesForTargets } =
+            await import("./context-builder.js");
+          const { getLspManager } = await import("./tool-executor.js");
           referencesBlock = await gatherReferencesForTargets(
             context.cwd,
             context.selectedFiles.map((f) => ({ file: f })),
@@ -410,10 +501,10 @@ export class SingleAgent {
       }
 
       try {
-        const { getFrameworkGuidance } = await import('./context-builder.js');
+        const { getFrameworkGuidance } = await import("./context-builder.js");
         const frameworkBlock = getFrameworkGuidance(context.cwd);
         if (frameworkBlock) {
-          referencesBlock = referencesBlock 
+          referencesBlock = referencesBlock
             ? `${referencesBlock}\n\n${frameworkBlock}`
             : frameworkBlock;
         }
@@ -427,14 +518,24 @@ export class SingleAgent {
       : buildSystemPrompt(repoMap, context);
 
     // Auto-compact before building messages if context is near limit
-    await this.autoCompactIfNeeded(conversation, systemPrompt, context.task, context.model);
+    await this.autoCompactIfNeeded(
+      conversation,
+      systemPrompt,
+      context.task,
+      context.model,
+    );
     // Pillar 4 — proactive budget enforcement
-    await this.enforceContextBudget(conversation, systemPrompt, context.task, context.model);
+    await this.enforceContextBudget(
+      conversation,
+      systemPrompt,
+      context.task,
+      context.model,
+    );
 
     const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt },
+      { role: "system", content: systemPrompt },
       ...conversation.getMessages(),
-      { role: 'user', content: buildUserContent(context) },
+      { role: "user", content: buildUserContent(context) },
     ];
 
     /**
@@ -445,13 +546,13 @@ export class SingleAgent {
      * turn. The base system prompt is preserved untouched.
      */
     const injectSafetyDirective = (directive: string): void => {
-      if (messages.length === 0 || messages[0]?.role !== 'system') {
-        messages.unshift({ role: 'system', content: directive });
+      if (messages.length === 0 || messages[0]?.role !== "system") {
+        messages.unshift({ role: "system", content: directive });
         return;
       }
       const first = messages[0]!;
       messages[0] = {
-        role: 'system',
+        role: "system",
         content: `${directive}\n\n${first.content}`,
       };
     };
@@ -468,7 +569,7 @@ export class SingleAgent {
     // sessions are quarantined to a single TTL-bounded folder
     // and removed here. Safe to run on every run start.
     try {
-      const { AtomicStagingManager } = await import('../runtime/staging.js');
+      const { AtomicStagingManager } = await import("../runtime/staging.js");
       AtomicStagingManager.garbageCollectAll(context.cwd);
     } catch {
       // Staging is best-effort cleanup; never block the run.
@@ -478,9 +579,13 @@ export class SingleAgent {
     // mutation tools. Read-only / review / analysis tasks run
     // without write_file, apply_patch, etc. visible to the LLM.
     const role = classifyExecutionRole(context.task);
-    const activeTools = getActiveTools(role === 'READ_ONLY' ? 'READ_ONLY' : context.mode);
-    if (role === 'READ_ONLY') {
-      console.log(`${colors.dim}🛡  Read-only role — mutation tools hidden.${colors.reset}`);
+    const activeTools = getActiveTools(
+      role === "READ_ONLY" ? "READ_ONLY" : context.mode,
+    );
+    if (role === "READ_ONLY") {
+      console.log(
+        `${colors.dim}🛡  Read-only role — mutation tools hidden.${colors.reset}`,
+      );
     }
     const safety = loadConfig().preferences.safety;
     // Tool-call budget. The agent loop runs at most `softLimit` calls
@@ -498,7 +603,10 @@ export class SingleAgent {
      * mid-investigation (the failure mode seen in Test 2 of the log).
      * Snaps back to `hardLimit` the moment a mutation fires.
      */
-    const investigationMultiplier = Math.max(1, budget.investigationMultiplier ?? 1);
+    const investigationMultiplier = Math.max(
+      1,
+      budget.investigationMultiplier ?? 1,
+    );
     const toolCallInvestigationCeiling = Math.max(
       toolCallHardLimit,
       Math.floor(toolCallHardLimit * investigationMultiplier),
@@ -522,7 +630,9 @@ export class SingleAgent {
     // still wired in (callers may pass safety.loopTrap) so the two
     // detectors run in parallel; the semantic one covers the most
     // common accidental "stare at one file" failure mode.
-    const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
+    const semanticLoopDetector = new SemanticLoopDetector(
+      safety.semanticLoopTrap,
+    );
     // Phase 1b — opt-in sliding-window block accounting. Default is OFF
     // (legacy session-lifetime lockout) until Phase 7 flips the default
     // after soak. Sliding mode prevents the "immortal file" deadlock
@@ -573,7 +683,8 @@ export class SingleAgent {
             const previous = toolCallLimit;
             toolCallLimit = Math.min(ceiling, toolCallLimit * 2);
             if (toolCallLimit > previous) {
-              const investigation = !anyMutationSeen && investigationMultiplier > 1;
+              const investigation =
+                !anyMutationSeen && investigationMultiplier > 1;
               if (investigation && !investigationModeAnnounced) {
                 console.log(
                   `${colors.dim}ⓘ Investigation mode — extended budget to ${toolCallLimit} (read-only tools only).${colors.reset}`,
@@ -611,41 +722,58 @@ export class SingleAgent {
           }
         }
 
-        indicator.setPhase({ id: 'reasoning', label: 'Reasoning…', detail: 'Analyzing context paths', icon: '⚡' });
+        indicator.setPhase({
+          id: "reasoning",
+          label: "Reasoning…",
+          detail: "Analyzing context paths",
+          icon: "⚡",
+        });
         indicator.setTurn(toolCallCount + 1);
         dashboard.emit({
-          type: 'turn-start',
+          type: "turn-start",
           turnIndex: toolCallCount + 1,
           task: context.task,
         });
         // Check for pre-turn cancellation
         if (this.abortController.signal.aborted) {
-          throw new Error('Task cancelled by user.');
+          throw new Error("Task cancelled by user.");
         }
 
         let result;
         try {
           result = await this.client.chat(messages, context.model, {
             tools: activeTools,
-            tool_choice: 'auto',
+            tool_choice: "auto",
             signal: this.abortController.signal,
           });
           resolvedModel = result.model;
         } catch (err: any) {
           // Handle context overflow — auto-compact and retry once
           if (ConversationManager.isContextOverflowError(err)) {
-            indicator.setPhase({ id: 'reasoning', label: 'Context full…', detail: 'Auto-compacting history', icon: '🔄' });
-            console.log(`${colors.yellow}🔄 Context window full — auto-compacting...${colors.reset}`);
-            const compacted = await conversation.compact(this.client, context.model);
+            indicator.setPhase({
+              id: "reasoning",
+              label: "Context full…",
+              detail: "Auto-compacting history",
+              icon: "🔄",
+            });
+            console.log(
+              `${colors.yellow}🔄 Context window full — auto-compacting...${colors.reset}`,
+            );
+            const compacted = await conversation.compact(
+              this.client,
+              context.model,
+            );
             if (compacted) {
               const info = conversation.getLastCompactionInfo();
-              console.log(`${colors.green}✓ Compacted: ${info?.messagesBefore ?? '?'} messages → summary + ${conversation.getMessageCount()} recent. ~${((info?.tokensFreed ?? 0) / 1000).toFixed(0)}k tokens freed.${colors.reset}`);
+              console.log(
+                `${colors.green}✓ Compacted: ${info?.messagesBefore ?? "?"} messages → summary + ${conversation.getMessageCount()} recent. ~${((info?.tokensFreed ?? 0) / 1000).toFixed(0)}k tokens freed.${colors.reset}`,
+              );
               // Rebuild messages with compacted history
               messages.length = 0;
               messages.push(
-                { role: 'system', content: systemPrompt },
+                { role: "system", content: systemPrompt },
                 ...conversation.getMessages(),
-                { role: 'user', content: buildUserContent(context) },
+                { role: "user", content: buildUserContent(context) },
               );
               continue; // Retry the LLM call
             }
@@ -653,7 +781,7 @@ export class SingleAgent {
           throw err;
         } finally {
           dashboard.emit({
-            type: 'status',
+            type: "status",
             message: `Turn ${toolCallCount + 1} complete`,
           });
         }
@@ -666,7 +794,7 @@ export class SingleAgent {
         // No tool calls → potentially run the auto-verifier, then
         // either continue the loop (one repair pass) or return.
         if (!result.tool_calls || result.tool_calls.length === 0) {
-          const response = result.content ?? '';
+          const response = result.content ?? "";
 
           // Print the response (already received in non-streaming mode)
           if (response) {
@@ -681,10 +809,10 @@ export class SingleAgent {
             repairsUsed: autoVerifyRepairsUsed,
           });
           if (verifyGate.run) {
-            const { runProjectTests } = await import('../test-runner.js');
+            const { runProjectTests } = await import("../test-runner.js");
             const verifyOutput = runProjectTests(context.cwd);
             const outcome = classifyVerifyOutput(verifyOutput);
-            if (outcome === 'failing') {
+            if (outcome === "failing") {
               autoVerifyRepairsUsed += 1;
               console.log(
                 `\n${colors.yellow}🔍 [Auto-Verify] Verification failed (repair attempt ${autoVerifyRepairsUsed}/${autoVerifyMaxRepairs}). Asking the model to fix...${colors.reset}`,
@@ -692,8 +820,11 @@ export class SingleAgent {
               if (this.verbose) {
                 console.log(`${colors.dim}${verifyOutput}${colors.reset}\n`);
               }
-              messages.push({ role: 'assistant', content: response });
-              messages.push({ role: 'user', content: buildRepairMessage(verifyOutput) });
+              messages.push({ role: "assistant", content: response });
+              messages.push({
+                role: "user",
+                content: buildRepairMessage(verifyOutput),
+              });
               // Counts toward tool budget so pathological repairs
               // don't extend the run indefinitely.
               toolCallCount += 1;
@@ -707,9 +838,9 @@ export class SingleAgent {
           this.activeAnimation = null;
           conversation.addTurn(context.task, response);
           if (result.usage && result.usage.total_tokens) {
-            conversation.setProviderReportedTokens(result.usage.total_tokens);
+            conversation.syncProviderTokens(result.usage.total_tokens);
           }
-          taskSession.finish('success', response);
+          taskSession.finish("success", response);
 
           return {
             success: true,
@@ -724,7 +855,7 @@ export class SingleAgent {
 
         // Execute tool calls (same as non-streaming)
         const assistantMsg: ChatMessage = {
-          role: 'assistant',
+          role: "assistant",
           content: result.content,
           tool_calls: result.tool_calls,
         };
@@ -739,7 +870,7 @@ export class SingleAgent {
           try {
             parsedArgs = JSON.parse(toolCall.function.arguments);
           } catch {
-            parsedArgs = { error: 'Failed to parse tool arguments' };
+            parsedArgs = { error: "Failed to parse tool arguments" };
           }
 
           // Pillar 2 — semantic loop detection. Records the tool
@@ -754,25 +885,29 @@ export class SingleAgent {
               parsedArgs,
               context.cwd,
             );
-            if (verdict.state === 'warn') {
+            if (verdict.state === "warn") {
               pendingSafetyDirective = toSafetyAlertDirective(verdict);
               console.log(
                 `${colors.yellow}⚠  Semantic loop warning: ${verdict.target} ` +
-                `accessed ${verdict.count}× in the last ${verdict.windowSize} turns.${colors.reset}`,
+                  `accessed ${verdict.count}× in the last ${verdict.windowSize} turns.${colors.reset}`,
               );
-              const nowBlocking = loopMitigation.recordWarn(verdict.target, toolCallCount);
+              const nowBlocking = loopMitigation.recordWarn(
+                verdict.target,
+                toolCallCount,
+              );
               if (nowBlocking) {
                 const blockMsg = loopGuardConfig.useSlidingWindow
                   ? `Further reads of ${verdict.target} will be rejected for the next ${loopGuardConfig.blockWindowTurns} turns — agent will be forced to pivot.`
                   : `Further reads of ${verdict.target} will be rejected this session — agent will be forced to pivot.`;
                 console.log(`${colors.yellow}⚠  ${blockMsg}${colors.reset}`);
               }
-            } else if (verdict.state === 'hard-abort') {
+            } else if (verdict.state === "hard-abort") {
               // Rollback any staged writes from this run before
               // throwing, so a runaway agent doesn't leave a
               // half-edited workspace behind.
               try {
-                const { AtomicStagingManager } = await import('../runtime/staging.js');
+                const { AtomicStagingManager } =
+                  await import("../runtime/staging.js");
                 AtomicStagingManager.rollbackAll(context.cwd, taskSession.id);
               } catch {
                 // best-effort; never mask the abort error
@@ -802,16 +937,22 @@ export class SingleAgent {
           // the same file freely.
           if (
             isReadTool(toolCall.function.name) &&
-            typeof parsedArgs.path === 'string' &&
+            typeof parsedArgs.path === "string" &&
             loopMitigation.isBlocked(parsedArgs.path, toolCallCount)
           ) {
-            const warns = loopMitigation.warnsFor(parsedArgs.path, toolCallCount);
-            const blockedResult = buildLoopBlockedReadResult(parsedArgs.path, warns);
+            const warns = loopMitigation.warnsFor(
+              parsedArgs.path,
+              toolCallCount,
+            );
+            const blockedResult = buildLoopBlockedReadResult(
+              parsedArgs.path,
+              warns,
+            );
             console.log(
               `${colors.yellow}⚠  Loop-blocked read intercepted: ${parsedArgs.path}${colors.reset}`,
             );
             messages.push({
-              role: 'tool',
+              role: "tool",
               tool_call_id: toolCall.id,
               content: blockedResult,
             });
@@ -830,23 +971,32 @@ export class SingleAgent {
           // over after the pivot has already happened.
           if (
             MUTATING_TOOL_NAMES.has(toolCall.function.name) &&
-            typeof parsedArgs.path === 'string' &&
+            typeof parsedArgs.path === "string" &&
             loopMitigation.isBlocked(parsedArgs.path, toolCallCount)
           ) {
             taskSession.noteReadForMutation(parsedArgs.path);
             loopMitigation.reset(parsedArgs.path);
           }
 
-          const allowed = await this.askPermission(toolCall.function.name, parsedArgs, context.cwd, rl, context.yes, context);
+          const allowed = await this.askPermission(
+            toolCall.function.name,
+            parsedArgs,
+            context.cwd,
+            rl,
+            context.yes,
+            context,
+          );
 
           let event: ToolCallEvent;
           if (!allowed) {
-            console.log(`  ${colors.red}✗ Permission denied for ${toolCall.function.name}${colors.reset}`);
+            console.log(
+              `  ${colors.red}✗ Permission denied for ${toolCall.function.name}${colors.reset}`,
+            );
             dashboard.emit({
-              type: 'tool-finish',
+              type: "tool-finish",
               tool: toolCall.function.name,
-              target: parsedArgs.path ?? parsedArgs.from ?? '',
-              state: 'failed',
+              target: parsedArgs.path ?? parsedArgs.from ?? "",
+              state: "failed",
               durationMs: 0,
             });
             event = {
@@ -857,22 +1007,48 @@ export class SingleAgent {
             };
           } else {
             const toolStart = Date.now();
-            
+
             // Set dynamic phase based on tool kind
             if (isReadTool(toolCall.function.name)) {
-              indicator.setPhase({ id: 'reading', label: 'Reading codebase…', detail: parsedArgs.path || parsedArgs.from || '', icon: '✦' });
-            } else if (toolCall.function.name === 'run_command' || toolCall.function.name === 'run_command_async') {
-              indicator.setPhase({ id: 'executing', label: 'Running command…', detail: parsedArgs.command || '', icon: '$' });
-            } else if (toolCall.function.name === 'search_code' || toolCall.function.name === 'search_symbols') {
-              indicator.setPhase({ id: 'searching', label: 'Searching…', detail: parsedArgs.query || '', icon: '⌕' });
+              indicator.setPhase({
+                id: "reading",
+                label: "Reading codebase…",
+                detail: parsedArgs.path || parsedArgs.from || "",
+                icon: "✦",
+              });
+            } else if (
+              toolCall.function.name === "run_command" ||
+              toolCall.function.name === "run_command_async"
+            ) {
+              indicator.setPhase({
+                id: "executing",
+                label: "Running command…",
+                detail: parsedArgs.command || "",
+                icon: "$",
+              });
+            } else if (
+              toolCall.function.name === "search_code" ||
+              toolCall.function.name === "search_symbols"
+            ) {
+              indicator.setPhase({
+                id: "searching",
+                label: "Searching…",
+                detail: parsedArgs.query || "",
+                icon: "⌕",
+              });
             } else {
-              indicator.setPhase({ id: 'writing', label: 'Writing code…', detail: parsedArgs.path || parsedArgs.file || '', icon: '✎' });
+              indicator.setPhase({
+                id: "writing",
+                label: "Writing code…",
+                detail: parsedArgs.path || parsedArgs.file || "",
+                icon: "✎",
+              });
             }
 
             dashboard.emit({
-              type: 'tool-start',
+              type: "tool-start",
               tool: toolCall.function.name,
-              target: parsedArgs.path ?? parsedArgs.from ?? '',
+              target: parsedArgs.path ?? parsedArgs.from ?? "",
               turnIndex: toolCallCount + 1,
             });
             event = await executeTool(
@@ -888,10 +1064,10 @@ export class SingleAgent {
               },
             );
             dashboard.emit({
-              type: 'tool-finish',
+              type: "tool-finish",
               tool: toolCall.function.name,
-              target: parsedArgs.path ?? parsedArgs.from ?? '',
-              state: event.result.startsWith('Error:') ? 'failed' : 'completed',
+              target: parsedArgs.path ?? parsedArgs.from ?? "",
+              state: event.result.startsWith("Error:") ? "failed" : "completed",
               durationMs: Date.now() - toolStart,
             });
           }
@@ -924,7 +1100,7 @@ export class SingleAgent {
           }
 
           messages.push({
-            role: 'tool',
+            role: "tool",
             tool_call_id: toolCall.id,
             content: toolResult,
           });
@@ -945,11 +1121,11 @@ export class SingleAgent {
         `Task processed with ${toolCallCount} tool calls.`,
       );
       if (lastUsage && lastUsage.total_tokens) {
-        conversation.setProviderReportedTokens(lastUsage.total_tokens);
+        conversation.syncProviderTokens(lastUsage.total_tokens);
       }
 
       const limitResponse = `Completed with ${toolCallCount} tool calls (limit reached).`;
-      taskSession.finish('success', limitResponse);
+      taskSession.finish("success", limitResponse);
 
       return {
         success: true,
@@ -968,7 +1144,7 @@ export class SingleAgent {
       }
       this.activeAnimation = null;
       const errorMsg = error instanceof Error ? error.message : String(error);
-      taskSession.finish('error', errorMsg);
+      taskSession.finish("error", errorMsg);
       throw error;
     }
   }
@@ -1017,7 +1193,7 @@ export class SingleAgent {
     workspaceRoot: string,
     rl?: readline.Interface,
     allowWithoutPrompt?: boolean,
-    context?: AgentContext
+    context?: AgentContext,
   ): Promise<boolean> {
     if (!MUTATING_TOOL_NAMES.has(name)) {
       return true;
@@ -1026,7 +1202,12 @@ export class SingleAgent {
     let isOutsideWorkspace = false;
     let resolvedOutsidePath: string | undefined;
     const guard = new WorkspaceGuard(workspaceRoot);
-    const targetPath = args.path || args.to || args.file || args.target || (name === 'run_command' && args.cwd);
+    const targetPath =
+      args.path ||
+      args.to ||
+      args.file ||
+      args.target ||
+      (name === "run_command" && args.cwd);
     if (targetPath) {
       const resolved = path.resolve(workspaceRoot, targetPath);
       if (!guard.isInside(resolved)) {
@@ -1044,30 +1225,30 @@ export class SingleAgent {
     try {
       const message = formatPermissionPrompt(name, args);
       const options: any[] = [
-        { value: 'yes', label: 'Yes, allow' },
-        { value: 'no', label: 'No, deny' }
+        { value: "yes", label: "Yes, allow" },
+        { value: "no", label: "No, deny" },
       ];
       if (!isOutsideWorkspace) {
-        options.push({ value: 'all', label: 'Yes to all (trust session)' });
+        options.push({ value: "all", label: "Yes to all (trust session)" });
       }
 
       const choice = await promptsWrapper.select({
         message,
         options,
-        initialValue: 'yes',
+        initialValue: "yes",
       });
 
-      if (promptsWrapper.isCancel(choice) || choice === 'no') {
+      if (promptsWrapper.isCancel(choice) || choice === "no") {
         return false;
       }
-      
-      const isApproved = choice === 'yes' || choice === 'all';
+
+      const isApproved = choice === "yes" || choice === "all";
       if (isApproved && isOutsideWorkspace && resolvedOutsidePath && context) {
         context.allowedOutsidePaths = context.allowedOutsidePaths || new Set();
         context.allowedOutsidePaths.add(resolvedOutsidePath);
       }
-      
-      if (choice === 'all' && !isOutsideWorkspace) {
+
+      if (choice === "all" && !isOutsideWorkspace) {
         this.allowAll = true;
       }
       return isApproved;
@@ -1090,15 +1271,21 @@ export class SingleAgent {
     usage: TokenUsage,
     signal?: AbortSignal,
   ): Promise<{ responseText: string; resolvedModel: string }> {
-    let fullText = '';
+    let fullText = "";
     let resolvedModel = model;
-    const policy = loadConfig().preferences.resilience?.streamResume ?? 'auto';
+    const policy = loadConfig().preferences.resilience?.streamResume ?? "auto";
     const maxResumeAttempts =
       loadConfig().preferences.resilience?.maxResumeAttempts ?? 3;
 
-    const stream = policy === 'auto'
-      ? this.client.chatStreamWithResume(messages, model, { signal }, maxResumeAttempts)
-      : this.client.chatStream(messages, model, { signal });
+    const stream =
+      policy === "auto"
+        ? this.client.chatStreamWithResume(
+            messages,
+            model,
+            { signal },
+            maxResumeAttempts,
+          )
+        : this.client.chatStream(messages, model, { signal });
 
     const renderer = new MarkdownStreamRenderer();
     // Reasoning / chain-of-thought is suppressed by default. Models
@@ -1107,7 +1294,9 @@ export class SingleAgent {
     // Set DEBUG=1 or pass --verbose to render the raw thinking dim
     // inline so developers can still inspect it.
     const showThinking =
-      !!process.env.DEBUG || !!process.env.VERBOSE || process.argv.includes('--verbose');
+      !!process.env.DEBUG ||
+      !!process.env.VERBOSE ||
+      process.argv.includes("--verbose");
     let thinkingAnnounced = false;
 
     let firstChunkReceived = false;
@@ -1121,37 +1310,40 @@ export class SingleAgent {
             this.activeAnimation = null;
           }
         }
-        if (chunk.type === 'content' && chunk.content) {
+        if (chunk.type === "content" && chunk.content) {
           renderer.write(chunk.content);
           fullText += chunk.content;
         }
-        if (chunk.type === 'thinking' && chunk.thinking) {
+        if (chunk.type === "thinking" && chunk.thinking) {
           if (showThinking) {
             // Dim secondary colour so the thought stream is visually
             // subordinate to the actual response.
-            process.stdout.write(`${colors.dim}${chunk.thinking}${colors.reset}`);
+            process.stdout.write(
+              `${colors.dim}${chunk.thinking}${colors.reset}`,
+            );
           } else if (!thinkingAnnounced) {
-            process.stdout.write(`  ${colors.dim}⚡ Agent is reasoning…${colors.reset}\n`);
+            process.stdout.write(
+              `  ${colors.dim}⚡ Agent is reasoning…${colors.reset}\n`,
+            );
             thinkingAnnounced = true;
           }
         }
-      if (chunk.type === 'done') {
-        if (chunk.usage) {
-          usage.prompt_tokens += chunk.usage.prompt_tokens;
-          usage.completion_tokens += chunk.usage.completion_tokens;
-          usage.total_tokens += chunk.usage.total_tokens;
-        }
-        if (chunk.model) {
-          resolvedModel = chunk.model;
+        if (chunk.type === "done") {
+          if (chunk.usage) {
+            usage.prompt_tokens += chunk.usage.prompt_tokens;
+            usage.completion_tokens += chunk.usage.completion_tokens;
+            usage.total_tokens += chunk.usage.total_tokens;
+          }
+          if (chunk.model) {
+            resolvedModel = chunk.model;
+          }
         }
       }
-    }
 
-    if (fullText) {
-      if (!fullText.endsWith('\n')) renderer.write('\n');
-      renderer.flush();
-    }
-
+      if (fullText) {
+        if (!fullText.endsWith("\n")) renderer.write("\n");
+        renderer.flush();
+      }
     } finally {
       if (this.activeAnimation) {
         this.activeAnimation.stop();
@@ -1168,8 +1360,12 @@ export class SingleAgent {
     context: AgentContext,
   ): Promise<AgentResult> {
     const startTime = Date.now();
-    const totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    
+    const totalUsage: TokenUsage = {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
+
     const repoMap = await buildRepoMap(context.cwd, {
       maxDepth: loadConfig().preferences.repoMap?.maxDepth,
       maxFiles: loadConfig().preferences.repoMap?.maxFiles,
@@ -1177,17 +1373,32 @@ export class SingleAgent {
     const systemPrompt = buildSystemPrompt(repoMap, context, false);
 
     // Auto-compact before chat if context is near limit
-    await this.autoCompactIfNeeded(conversation, systemPrompt, task, context.model);
+    await this.autoCompactIfNeeded(
+      conversation,
+      systemPrompt,
+      task,
+      context.model,
+    );
     // Pillar 4 — proactive budget enforcement
-    await this.enforceContextBudget(conversation, systemPrompt, task, context.model);
+    await this.enforceContextBudget(
+      conversation,
+      systemPrompt,
+      task,
+      context.model,
+    );
 
     const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt },
+      { role: "system", content: systemPrompt },
       ...conversation.getMessages(),
-      { role: 'user', content: task },
+      { role: "user", content: task },
     ];
 
-    const streamRes = await this.streamResponse(messages, context.model, totalUsage, this.abortController.signal);
+    const streamRes = await this.streamResponse(
+      messages,
+      context.model,
+      totalUsage,
+      this.abortController.signal,
+    );
     const fullResponse = streamRes.responseText;
     conversation.addTurn(task, fullResponse);
 
@@ -1216,20 +1427,30 @@ export class SingleAgent {
       return;
     }
 
-    const estimatedTokens = conversation.estimateNextRequestTokens(systemPrompt, userMessage);
+    const estimatedTokens = conversation.estimateNextRequestTokens(
+      systemPrompt,
+      userMessage,
+    );
     const limit = conversation.getContextLimit();
-    console.log(`\n${colors.yellow}🔄 Context approaching limit (${(estimatedTokens / 1000).toFixed(0)}k / ${(limit / 1000).toFixed(0)}k tokens) — auto-compacting...${colors.reset}`);
+    console.log(
+      `\n${colors.yellow}🔄 Context approaching limit (${(estimatedTokens / 1000).toFixed(0)}k / ${(limit / 1000).toFixed(0)}k tokens) — auto-compacting...${colors.reset}`,
+    );
 
     const success = await conversation.compact(this.client, model);
     if (success) {
       const info = conversation.getLastCompactionInfo();
-      const newEstimate = conversation.estimateNextRequestTokens(systemPrompt, userMessage);
+      const newEstimate = conversation.estimateNextRequestTokens(
+        systemPrompt,
+        userMessage,
+      );
       console.log(
-        `${colors.green}✓ Compacted: ${info?.messagesBefore ?? '?'} messages → summary + ${conversation.getMessageCount()} recent messages. ` +
-        `~${((info?.tokensFreed ?? 0) / 1000).toFixed(0)}k tokens freed (${(newEstimate / 1000).toFixed(0)}k / ${(limit / 1000).toFixed(0)}k now).${colors.reset}`
+        `${colors.green}✓ Compacted: ${info?.messagesBefore ?? "?"} messages → summary + ${conversation.getMessageCount()} recent messages. ` +
+          `~${((info?.tokensFreed ?? 0) / 1000).toFixed(0)}k tokens freed (${(newEstimate / 1000).toFixed(0)}k / ${(limit / 1000).toFixed(0)}k now).${colors.reset}`,
       );
     } else {
-      console.log(`${colors.dim}[Context] Could not compact further. Proceeding with current context.${colors.reset}`);
+      console.log(
+        `${colors.dim}[Context] Could not compact further. Proceeding with current context.${colors.reset}`,
+      );
     }
   }
 
@@ -1258,8 +1479,8 @@ export class SingleAgent {
     model: string,
   ): Promise<{ trimmed: boolean; compacted: boolean; tokensAfter: number }> {
     const config = loadConfig();
-    const policy = config.preferences.resilience?.contextBudget ?? 'auto';
-    if (policy === 'never') {
+    const policy = config.preferences.resilience?.contextBudget ?? "auto";
+    if (policy === "never") {
       return { trimmed: false, compacted: false, tokensAfter: 0 };
     }
 
@@ -1269,12 +1490,16 @@ export class SingleAgent {
 
     const { trimmed, report } = conversation.enforceBudget(maxTokens, model);
     if (!trimmed) {
-      return { trimmed: false, compacted: false, tokensAfter: report.tokensAfter };
+      return {
+        trimmed: false,
+        compacted: false,
+        tokensAfter: report.tokensAfter,
+      };
     }
 
     console.log(
       `${colors.dim}[ContextBudget] ${report.tokensAfter} tokens after ` +
-      `${report.actions.join(' → ')} (was ${report.tokensBefore}).${colors.reset}`
+        `${report.actions.join(" → ")} (was ${report.tokensBefore}).${colors.reset}`,
     );
 
     recordTelemetry(
@@ -1286,11 +1511,19 @@ export class SingleAgent {
       }),
     );
 
-    if (report.markForCompaction && policy === 'auto') {
+    if (report.markForCompaction && policy === "auto") {
       // Defer to the existing auto-compaction path which produces a
       // structured LLM-generated summary.
-      await this.autoCompactIfNeeded(conversation, systemPrompt, userMessage, model);
-      const reEstimated = conversation.estimateNextRequestTokens(systemPrompt, userMessage);
+      await this.autoCompactIfNeeded(
+        conversation,
+        systemPrompt,
+        userMessage,
+        model,
+      );
+      const reEstimated = conversation.estimateNextRequestTokens(
+        systemPrompt,
+        userMessage,
+      );
       return { trimmed: true, compacted: true, tokensAfter: reEstimated };
     }
 

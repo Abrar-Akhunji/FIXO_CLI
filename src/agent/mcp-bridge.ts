@@ -1,12 +1,15 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import yaml from 'js-yaml';
-import { McpClient, type McpServerConfig } from './mcp-client.js';
-import type { ChatToolDefinition } from '../shared/types.js';
+import fs from "node:fs";
+import path from "node:path";
+import yaml from "js-yaml";
+import { McpClient, type McpServerConfig } from "./mcp-client.js";
+import type { ChatToolDefinition } from "../shared/types.js";
 
 export class McpBridgeManager {
   private clients = new Map<string, McpClient>();
-  private toolsMap = new Map<string, { client: McpClient; originalName: string }>();
+  private toolsMap = new Map<
+    string,
+    { client: McpClient; originalName: string }
+  >();
   private registeredTools: ChatToolDefinition[] = [];
 
   async initialize(cwd: string): Promise<void> {
@@ -22,31 +25,44 @@ export class McpBridgeManager {
           const tools = await client.listTools();
           for (const tool of tools) {
             const registeredName = `mcp_local_${name}_${tool.name}`;
-            this.toolsMap.set(registeredName, { client, originalName: tool.name });
+            this.toolsMap.set(registeredName, {
+              client,
+              originalName: tool.name,
+            });
             this.registeredTools.push({
-              type: 'function',
+              type: "function",
               function: {
                 name: registeredName,
-                description: tool.description || '',
-                parameters: tool.inputSchema || { type: 'object', properties: {} },
+                description: tool.description || "",
+                parameters: tool.inputSchema || {
+                  type: "object",
+                  properties: {},
+                },
               },
             });
           }
         } catch (e) {
-          console.error(`[MCP Bridge] Failed to load tools for local server ${name}:`, e);
+          console.error(
+            `[MCP Bridge] Failed to load tools for local server ${name}:`,
+            e,
+          );
         }
       }
     }
   }
 
   private loadProjectMcpConfig(cwd: string): any {
-    const ymlPath = path.join(cwd, '.fixo.yml');
-    const yamlPath = path.join(cwd, '.fixo.yaml');
-    const configPath = fs.existsSync(ymlPath) ? ymlPath : fs.existsSync(yamlPath) ? yamlPath : null;
+    const ymlPath = path.join(cwd, ".fixo.yml");
+    const yamlPath = path.join(cwd, ".fixo.yaml");
+    const configPath = fs.existsSync(ymlPath)
+      ? ymlPath
+      : fs.existsSync(yamlPath)
+        ? yamlPath
+        : null;
 
     if (configPath) {
       try {
-        const content = fs.readFileSync(configPath, 'utf-8');
+        const content = fs.readFileSync(configPath, "utf-8");
         return yaml.load(content);
       } catch (e) {
         console.warn(`[MCP Bridge] Failed to parse project MCP config:`, e);
@@ -72,10 +88,10 @@ export class McpBridgeManager {
     if (result && Array.isArray(result.content)) {
       return result.content
         .map((c: any) => {
-          if (c.type === 'text') return c.text;
+          if (c.type === "text") return c.text;
           return JSON.stringify(c);
         })
-        .join('\n');
+        .join("\n");
     }
     return JSON.stringify(result);
   }

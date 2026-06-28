@@ -22,7 +22,7 @@
  * throwing, so it is always safe to interpolate into error strings.
  */
 export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '0ms';
+  if (!Number.isFinite(ms) || ms < 0) return "0ms";
   if (ms < 1000) return `${Math.round(ms)}ms`;
 
   const totalSeconds = Math.round(ms / 1000);

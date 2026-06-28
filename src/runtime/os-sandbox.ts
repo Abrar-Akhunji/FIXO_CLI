@@ -37,12 +37,12 @@
  *    `sandbox-exec` is technically deprecated by Apple but still
  *    ships and works on darwin 25; what's available today wins.
  */
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-export type SandboxPlatform = 'darwin' | 'linux';
+export type SandboxPlatform = "darwin" | "linux";
 
 export interface SandboxOpts {
   /** Directory the shell runs in. Must be readable. */
@@ -75,9 +75,12 @@ export interface SandboxOpts {
  * usual.
  */
 export class SandboxUnavailableError extends Error {
-  constructor(public platform: NodeJS.Platform, public reason: string) {
+  constructor(
+    public platform: NodeJS.Platform,
+    public reason: string,
+  ) {
     super(`OS sandbox unavailable on ${platform}: ${reason}`);
-    this.name = 'SandboxUnavailableError';
+    this.name = "SandboxUnavailableError";
   }
 }
 
@@ -93,15 +96,21 @@ export class SandboxUnavailableError extends Error {
  * call — so the call site only differs by routing decision, not by
  * result handling.
  */
-export function runSandboxed(command: string, opts: SandboxOpts): SpawnSyncReturns<string> {
+export function runSandboxed(
+  command: string,
+  opts: SandboxOpts,
+): SpawnSyncReturns<string> {
   const platform = process.platform;
-  if (platform === 'darwin') {
+  if (platform === "darwin") {
     return runSandboxedMacos(command, opts);
   }
-  if (platform === 'linux') {
+  if (platform === "linux") {
     return runSandboxedLinux(command, opts);
   }
-  throw new SandboxUnavailableError(platform, 'no supported OS sandbox wrapper for this platform');
+  throw new SandboxUnavailableError(
+    platform,
+    "no supported OS sandbox wrapper for this platform",
+  );
 }
 
 /**
@@ -113,16 +122,22 @@ export function runSandboxed(command: string, opts: SandboxOpts): SpawnSyncRetur
  */
 export function probeSandbox(): { ok: true } | { ok: false; reason: string } {
   const platform = process.platform;
-  if (platform === 'darwin') {
-    const which = whichBinary('sandbox-exec');
-    return which ? { ok: true } : { ok: false, reason: '`sandbox-exec` not on $PATH (macOS system tool)' };
+  if (platform === "darwin") {
+    const which = whichBinary("sandbox-exec");
+    return which
+      ? { ok: true }
+      : {
+          ok: false,
+          reason: "`sandbox-exec` not on $PATH (macOS system tool)",
+        };
   }
-  if (platform === 'linux') {
-    const which = whichBinary('bwrap');
+  if (platform === "linux") {
+    const which = whichBinary("bwrap");
     if (which) return { ok: true };
     return {
       ok: false,
-      reason: '`bwrap` (bubblewrap) not installed. Install with: apt install bubblewrap | dnf install bubblewrap | apk add bubblewrap',
+      reason:
+        "`bwrap` (bubblewrap) not installed. Install with: apt install bubblewrap | dnf install bubblewrap | apk add bubblewrap",
     };
   }
   return { ok: false, reason: `unsupported platform: ${platform}` };
@@ -130,42 +145,64 @@ export function probeSandbox(): { ok: true } | { ok: false; reason: string } {
 
 /* ──────────────────────── macOS: sandbox-exec ──────────────────────── */
 
-function runSandboxedMacos(command: string, opts: SandboxOpts): SpawnSyncReturns<string> {
-  if (!whichBinary('sandbox-exec')) {
-    throw new SandboxUnavailableError('darwin', '`sandbox-exec` not on $PATH');
+function runSandboxedMacos(
+  command: string,
+  opts: SandboxOpts,
+): SpawnSyncReturns<string> {
+  if (!whichBinary("sandbox-exec")) {
+    throw new SandboxUnavailableError("darwin", "`sandbox-exec` not on $PATH");
   }
 
   const profile = buildMacosProfile({
-    allowedWritePaths: dedupeAndResolve([...opts.allowedWritePaths, os.tmpdir()]),
+    allowedWritePaths: dedupeAndResolve([
+      ...opts.allowedWritePaths,
+      os.tmpdir(),
+    ]),
     allowNetwork: opts.allowNetwork,
   });
 
   // Write the profile to a temp file. sandbox-exec will read it
   // before exec; we delete it immediately after the child returns.
-  const profilePath = path.join(os.tmpdir(), `fixo-sandbox-${process.pid}-${Date.now()}.sb`);
-  fs.writeFileSync(profilePath, profile, { encoding: 'utf-8', mode: 0o600 });
+  const profilePath = path.join(
+    os.tmpdir(),
+    `fixo-sandbox-${process.pid}-${Date.now()}.sb`,
+  );
+  fs.writeFileSync(profilePath, profile, { encoding: "utf-8", mode: 0o600 });
 
   try {
-    return spawnSync('sandbox-exec', ['-f', profilePath, '/bin/sh', '-c', command], {
-      cwd: opts.cwd,
-      encoding: 'utf-8',
-      timeout: opts.timeout ?? 60_000,
-      maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-      env: opts.env ?? process.env,
-    });
+    return spawnSync(
+      "sandbox-exec",
+      ["-f", profilePath, "/bin/sh", "-c", command],
+      {
+        cwd: opts.cwd,
+        encoding: "utf-8",
+        timeout: opts.timeout ?? 60_000,
+        maxBuffer: opts.maxBuffer ?? 1024 * 1024,
+        env: opts.env ?? process.env,
+      },
+    );
   } finally {
-    try { fs.unlinkSync(profilePath); } catch { /* safe: best-effort cleanup of tmp profile */ }
+    try {
+      fs.unlinkSync(profilePath);
+    } catch {
+      /* safe: best-effort cleanup of tmp profile */
+    }
   }
 }
 
-function buildMacosProfile(opts: { allowedWritePaths: string[]; allowNetwork: boolean }): string {
+function buildMacosProfile(opts: {
+  allowedWritePaths: string[];
+  allowNetwork: boolean;
+}): string {
   // Quote each allow-write path in TinyScheme-style string literal
   // form. sandbox-exec uses backslash-escaped double-quoted strings.
   const writeRoots = opts.allowedWritePaths
     .map((p) => `  (subpath ${quoteSb(p)})`)
-    .join('\n');
+    .join("\n");
 
-  const networkRule = opts.allowNetwork ? '(allow network*)' : '(deny network*)';
+  const networkRule = opts.allowNetwork
+    ? "(allow network*)"
+    : "(deny network*)";
 
   // Inspired by Apple's own /System/Library/Sandbox/Profiles seed
   // profiles. `allow file-read*` is total because the agent must be
@@ -199,16 +236,19 @@ ${networkRule}
 
 function quoteSb(s: string): string {
   // sandbox-exec strings use double-quotes with backslash escaping.
-  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 /* ──────────────────────── Linux: bubblewrap ──────────────────────── */
 
-function runSandboxedLinux(command: string, opts: SandboxOpts): SpawnSyncReturns<string> {
-  if (!whichBinary('bwrap')) {
+function runSandboxedLinux(
+  command: string,
+  opts: SandboxOpts,
+): SpawnSyncReturns<string> {
+  if (!whichBinary("bwrap")) {
     throw new SandboxUnavailableError(
-      'linux',
-      '`bwrap` (bubblewrap) not installed. Install with: apt install bubblewrap | dnf install bubblewrap | apk add bubblewrap',
+      "linux",
+      "`bwrap` (bubblewrap) not installed. Install with: apt install bubblewrap | dnf install bubblewrap | apk add bubblewrap",
     );
   }
 
@@ -217,38 +257,54 @@ function runSandboxedLinux(command: string, opts: SandboxOpts): SpawnSyncReturns
   const args: string[] = [
     // Read-only mount the standard system tree. /usr is the
     // important one — that's where /bin/sh, coreutils, etc. live.
-    '--ro-bind', '/usr', '/usr',
-    '--ro-bind', '/bin', '/bin',
-    '--ro-bind', '/sbin', '/sbin',
-    '--ro-bind', '/lib', '/lib',
-    '--symlink', 'usr/lib64', '/lib64',
-    '--ro-bind', '/etc', '/etc',
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/sbin",
+    "/sbin",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--symlink",
+    "usr/lib64",
+    "/lib64",
+    "--ro-bind",
+    "/etc",
+    "/etc",
     // Procfs + devtmpfs: needed by virtually every binary.
-    '--proc', '/proc',
-    '--dev', '/dev',
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
     // Tmpfs for /run and /var so the child can drop pidfiles.
-    '--tmpfs', '/run',
-    '--tmpfs', '/var',
+    "--tmpfs",
+    "/run",
+    "--tmpfs",
+    "/var",
   ];
 
   for (const wr of writeRoots) {
-    args.push('--bind', wr, wr);
+    args.push("--bind", wr, wr);
   }
 
   if (!opts.allowNetwork) {
-    args.push('--unshare-net');
+    args.push("--unshare-net");
   }
 
   // PID + user namespaces — cheap isolation that doesn't break
   // most build tools.
-  args.push('--unshare-pid');
-  args.push('--die-with-parent');
-  args.push('--chdir', opts.cwd);
-  args.push('/bin/sh', '-c', command);
+  args.push("--unshare-pid");
+  args.push("--die-with-parent");
+  args.push("--chdir", opts.cwd);
+  args.push("/bin/sh", "-c", command);
 
-  return spawnSync('bwrap', args, {
+  return spawnSync("bwrap", args, {
     cwd: opts.cwd,
-    encoding: 'utf-8',
+    encoding: "utf-8",
     timeout: opts.timeout ?? 60_000,
     maxBuffer: opts.maxBuffer ?? 1024 * 1024,
     env: opts.env ?? process.env,
@@ -258,7 +314,7 @@ function runSandboxedLinux(command: string, opts: SandboxOpts): SpawnSyncReturns
 /* ──────────────────────── Helpers ──────────────────────── */
 
 function whichBinary(name: string): boolean {
-  const which = spawnSync('which', [name], { encoding: 'utf-8' });
+  const which = spawnSync("which", [name], { encoding: "utf-8" });
   return which.status === 0 && which.stdout.trim().length > 0;
 }
 

@@ -7,15 +7,20 @@
  * and returns either a typed `ChatContentBlock` or a structured
  * error. Pure read-side — never writes, never spawns processes.
  */
-import fs from 'node:fs';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import type { ChatContentBlock, ChatImageMediaType } from '../shared/types.js';
+import fs from "node:fs";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import type { ChatContentBlock, ChatImageMediaType } from "../shared/types.js";
 
 /** Hard cap before base64 encoding. 5 MiB ≈ 7 MiB once encoded. */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export type AttachImageResult =
-  | { ok: true; block: ChatContentBlock; mediaType: ChatImageMediaType; bytes: number }
+  | {
+      ok: true;
+      block: ChatContentBlock;
+      mediaType: ChatImageMediaType;
+      bytes: number;
+    }
   | { ok: false; error: string };
 
 /**
@@ -24,27 +29,48 @@ export type AttachImageResult =
  * four magic numbers are enough for every format we support.
  */
 export function sniffImageMediaType(prefix: Buffer): ChatImageMediaType | null {
-  if (prefix.length >= 8 && prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e && prefix[3] === 0x47) {
-    return 'image/png';
+  if (
+    prefix.length >= 8 &&
+    prefix[0] === 0x89 &&
+    prefix[1] === 0x50 &&
+    prefix[2] === 0x4e &&
+    prefix[3] === 0x47
+  ) {
+    return "image/png";
   }
-  if (prefix.length >= 3 && prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff) {
-    return 'image/jpeg';
+  if (
+    prefix.length >= 3 &&
+    prefix[0] === 0xff &&
+    prefix[1] === 0xd8 &&
+    prefix[2] === 0xff
+  ) {
+    return "image/jpeg";
   }
   // WebP: 'RIFF' .... 'WEBP'
   if (
     prefix.length >= 12 &&
-    prefix[0] === 0x52 && prefix[1] === 0x49 && prefix[2] === 0x46 && prefix[3] === 0x46 &&
-    prefix[8] === 0x57 && prefix[9] === 0x45 && prefix[10] === 0x42 && prefix[11] === 0x50
+    prefix[0] === 0x52 &&
+    prefix[1] === 0x49 &&
+    prefix[2] === 0x46 &&
+    prefix[3] === 0x46 &&
+    prefix[8] === 0x57 &&
+    prefix[9] === 0x45 &&
+    prefix[10] === 0x42 &&
+    prefix[11] === 0x50
   ) {
-    return 'image/webp';
+    return "image/webp";
   }
   // GIF: 'GIF87a' or 'GIF89a'
   if (
     prefix.length >= 6 &&
-    prefix[0] === 0x47 && prefix[1] === 0x49 && prefix[2] === 0x46 && prefix[3] === 0x38 &&
-    (prefix[4] === 0x37 || prefix[4] === 0x39) && prefix[5] === 0x61
+    prefix[0] === 0x47 &&
+    prefix[1] === 0x49 &&
+    prefix[2] === 0x46 &&
+    prefix[3] === 0x38 &&
+    (prefix[4] === 0x37 || prefix[4] === 0x39) &&
+    prefix[5] === 0x61
   ) {
-    return 'image/gif';
+    return "image/gif";
   }
   return null;
 }
@@ -56,11 +82,14 @@ export function sniffImageMediaType(prefix: Buffer): ChatImageMediaType | null {
  * the slash-command dispatcher can render a friendly message
  * instead of crashing the REPL.
  */
-export function loadImageAsBlock(rawPath: string, cwd: string): AttachImageResult {
+export function loadImageAsBlock(
+  rawPath: string,
+  cwd: string,
+): AttachImageResult {
   let resolved: string;
   try {
     const guard = new WorkspaceGuard(cwd);
-    resolved = guard.resolve(rawPath, 'image');
+    resolved = guard.resolve(rawPath, "image");
   } catch (err) {
     return { ok: false, error: `path rejected: ${(err as Error).message}` };
   }
@@ -102,11 +131,11 @@ export function loadImageAsBlock(rawPath: string, cwd: string): AttachImageResul
   }
 
   const block: ChatContentBlock = {
-    type: 'image',
+    type: "image",
     source: {
-      kind: 'base64',
+      kind: "base64",
       mediaType,
-      data: bytes.toString('base64'),
+      data: bytes.toString("base64"),
     },
   };
   return { ok: true, block, mediaType, bytes: stat.size };

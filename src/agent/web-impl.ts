@@ -3,17 +3,17 @@
  * the search chain stays self-contained. Identical semantics
  * to the original (HTML → Markdown via cheerio + turndown).
  */
-import * as cheerio from 'cheerio';
-import TurndownService from 'turndown';
-import dns from 'node:dns/promises';
+import * as cheerio from "cheerio";
+import TurndownService from "turndown";
+import dns from "node:dns/promises";
 
 const turndownService = new TurndownService({
-  headingStyle: 'atx',
-  codeBlockStyle: 'fenced',
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
 });
 
 function isPrivateIP(ip: string): boolean {
-  const parts = ip.split('.');
+  const parts = ip.split(".");
   if (parts.length === 4) {
     const p1 = parseInt(parts[0], 10);
     const p2 = parseInt(parts[1], 10);
@@ -29,13 +29,13 @@ function isPrivateIP(ip: string): boolean {
     }
   }
   if (
-    ip === '::1' ||
-    ip.startsWith('fc') ||
-    ip.startsWith('fd') ||
-    ip.toLowerCase().startsWith('fe8') ||
-    ip.toLowerCase().startsWith('fe9') ||
-    ip.toLowerCase().startsWith('fea') ||
-    ip.toLowerCase().startsWith('feb')
+    ip === "::1" ||
+    ip.startsWith("fc") ||
+    ip.startsWith("fd") ||
+    ip.toLowerCase().startsWith("fe8") ||
+    ip.toLowerCase().startsWith("fe9") ||
+    ip.toLowerCase().startsWith("fea") ||
+    ip.toLowerCase().startsWith("feb")
   ) {
     return true;
   }
@@ -45,12 +45,12 @@ function isPrivateIP(ip: string): boolean {
 export async function webFetch(url: string): Promise<string> {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return `Error fetching URL: Unsupported protocol ${parsed.protocol}`;
     }
 
     const hostname = parsed.hostname;
-    if (hostname.toLowerCase() === 'localhost') {
+    if (hostname.toLowerCase() === "localhost") {
       return `Error fetching URL: Access to localhost is blocked for security reasons.`;
     }
 
@@ -67,9 +67,9 @@ export async function webFetch(url: string): Promise<string> {
 
     const response = await fetch(url, {
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-          '(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
       },
     });
     if (!response.ok) {
@@ -77,11 +77,11 @@ export async function webFetch(url: string): Promise<string> {
     }
     const html = await response.text();
     const $ = cheerio.load(html);
-    $('script, style, noscript, iframe, svg, nav, footer, header').remove();
+    $("script, style, noscript, iframe, svg, nav, footer, header").remove();
     const contentHtml =
-      $('main').html() || $('article').html() || $('body').html() || html;
+      $("main").html() || $("article").html() || $("body").html() || html;
     const markdown = turndownService.turndown(contentHtml);
-    return markdown || '(Page returned empty or only non-text content)';
+    return markdown || "(Page returned empty or only non-text content)";
   } catch (err: unknown) {
     return `Error fetching URL: ${err instanceof Error ? err.message : String(err)}`;
   }

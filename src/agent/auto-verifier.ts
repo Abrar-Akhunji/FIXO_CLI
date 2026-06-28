@@ -11,13 +11,16 @@
  * boundary; everything network-, IO-, and UI-shaped stays in
  * single-agent.ts so this module remains trivially testable.
  */
-import type { AgentContext } from '../types.js';
-import type { SafetyConfig } from '../config.js';
+import type { AgentContext } from "../types.js";
+import type { SafetyConfig } from "../config.js";
 
 /** What the gate decided and why. */
 export type AutoVerifyDecision =
   | { run: true }
-  | { run: false; reason: 'disabled' | 'wrong-mode' | 'no-mutation' | 'budget-exhausted' };
+  | {
+      run: false;
+      reason: "disabled" | "wrong-mode" | "no-mutation" | "budget-exhausted";
+    };
 
 export interface AutoVerifyGateInput {
   safety: SafetyConfig;
@@ -31,25 +34,27 @@ export interface AutoVerifyGateInput {
  * Returns whether the verifier should fire this turn, along with a
  * short categorical reason for telemetry / logging.
  */
-export function decideAutoVerify(input: AutoVerifyGateInput): AutoVerifyDecision {
+export function decideAutoVerify(
+  input: AutoVerifyGateInput,
+): AutoVerifyDecision {
   if (input.safety.autoVerify === false) {
-    return { run: false, reason: 'disabled' };
+    return { run: false, reason: "disabled" };
   }
-  if (input.context.mode !== 'BUILD') {
-    return { run: false, reason: 'wrong-mode' };
+  if (input.context.mode !== "BUILD") {
+    return { run: false, reason: "wrong-mode" };
   }
   if (input.modifiedFilesCount <= 0) {
-    return { run: false, reason: 'no-mutation' };
+    return { run: false, reason: "no-mutation" };
   }
   const max = Math.max(0, input.safety.autoVerifyMaxRepairs ?? 1);
   if (input.repairsUsed >= max) {
-    return { run: false, reason: 'budget-exhausted' };
+    return { run: false, reason: "budget-exhausted" };
   }
   return { run: true };
 }
 
 /** Outcome of inspecting the test-runner string output. */
-export type VerifyOutcome = 'passing' | 'failing' | 'no-command';
+export type VerifyOutcome = "passing" | "failing" | "no-command";
 
 /**
  * Classify what runProjectTests() returned. The test runner returns
@@ -62,9 +67,9 @@ export type VerifyOutcome = 'passing' | 'failing' | 'no-command';
  *  - `failing`     → anything else (non-zero status / parse fall-through)
  */
 export function classifyVerifyOutput(output: string): VerifyOutcome {
-  if (output.includes('No test or build command detected')) return 'no-command';
-  if (output.includes('Status: 0')) return 'passing';
-  return 'failing';
+  if (output.includes("No test or build command detected")) return "no-command";
+  if (output.includes("Status: 0")) return "passing";
+  return "failing";
 }
 
 /**

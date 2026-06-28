@@ -29,8 +29,8 @@
  * to unit-test.
  */
 
-import type { ChatMessage } from '../shared/types.js';
-import { countMessagesTokens, countTokens } from './tokenizer.js';
+import type { ChatMessage } from "../shared/types.js";
+import { countMessagesTokens, countTokens } from "./tokenizer.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -38,11 +38,11 @@ import { countMessagesTokens, countTokens } from './tokenizer.js';
 
 /** Severity tiers applied in order, from cheapest to most invasive. */
 export type BudgetAction =
-  | 'none'
-  | 'prune-tool-outputs'
-  | 'drop-oldest-turns'
-  | 'truncate-tool-args'
-  | 'mark-for-compaction';
+  | "none"
+  | "prune-tool-outputs"
+  | "drop-oldest-turns"
+  | "truncate-tool-args"
+  | "mark-for-compaction";
 
 /** Full report returned by {@link ContextBudgetEnforcer.enforce}. */
 export interface BudgetReport {
@@ -116,12 +116,16 @@ export class ContextBudgetEnforcer {
    * The original `messages` array is NEVER mutated; the result is a
    * deep-enough copy that callers can adopt safely.
    */
-  enforce(messages: ReadonlyArray<ChatMessage>, options: BudgetOptions): {
+  enforce(
+    messages: ReadonlyArray<ChatMessage>,
+    options: BudgetOptions,
+  ): {
     messages: ChatMessage[];
     report: BudgetReport;
   } {
     const tailMessages = Math.max(MIN_TAIL_MESSAGES, options.tailMessages ?? 4);
-    const maxToolArgChars = options.maxToolArgChars ?? DEFAULT_MAX_TOOL_ARG_CHARS;
+    const maxToolArgChars =
+      options.maxToolArgChars ?? DEFAULT_MAX_TOOL_ARG_CHARS;
     const actions: BudgetAction[] = [];
 
     let working: ChatMessage[] = messages.map(cloneMessage);
@@ -132,7 +136,9 @@ export class ContextBudgetEnforcer {
 
     if (tokens <= options.maxTokens) {
       const markForCompaction = tokens > compactionThreshold;
-      const finalActions = markForCompaction ? (['mark-for-compaction'] as BudgetAction[]) : (['none'] as BudgetAction[]);
+      const finalActions = markForCompaction
+        ? (["mark-for-compaction"] as BudgetAction[])
+        : (["none"] as BudgetAction[]);
       return {
         messages: working,
         report: {
@@ -148,29 +154,48 @@ export class ContextBudgetEnforcer {
     // Tier 1: prune tool outputs in non-tail messages.
     working = this.pruneToolOutputs(working, tailMessages);
     const tokensAfterTier1 = this.counter.countMessages(working);
-    if (tokensAfterTier1 < tokens) actions.push('prune-tool-outputs');
+    if (tokensAfterTier1 < tokens) actions.push("prune-tool-outputs");
     tokens = tokensAfterTier1;
     if (tokens <= options.maxTokens) {
-      return finish(working, tokensBefore, tokens, actions, compactionThreshold);
+      return finish(
+        working,
+        tokensBefore,
+        tokens,
+        actions,
+        compactionThreshold,
+      );
     }
 
     // Tier 2: drop oldest turn-pairs.
     const lengthBeforeTier2 = working.length;
     working = this.dropOldestTurns(working, tailMessages);
-    if (working.length < lengthBeforeTier2) actions.push('drop-oldest-turns');
+    if (working.length < lengthBeforeTier2) actions.push("drop-oldest-turns");
     tokens = this.counter.countMessages(working);
     if (tokens <= options.maxTokens) {
-      return finish(working, tokensBefore, tokens, actions, compactionThreshold);
+      return finish(
+        working,
+        tokensBefore,
+        tokens,
+        actions,
+        compactionThreshold,
+      );
     }
 
     // Tier 3: truncate remaining tool-call arguments.
     const beforeTier3 = JSON.stringify(working);
     working = this.truncateToolArgs(working, maxToolArgChars);
     const afterTier3 = JSON.stringify(working);
-    if (afterTier3.length < beforeTier3.length) actions.push('truncate-tool-args');
+    if (afterTier3.length < beforeTier3.length)
+      actions.push("truncate-tool-args");
     tokens = this.counter.countMessages(working);
     if (tokens <= options.maxTokens) {
-      return finish(working, tokensBefore, tokens, actions, compactionThreshold);
+      return finish(
+        working,
+        tokensBefore,
+        tokens,
+        actions,
+        compactionThreshold,
+      );
     }
 
     // Tier 4: nothing else we can do without an LLM. Tell the caller to
@@ -180,7 +205,7 @@ export class ContextBudgetEnforcer {
       report: {
         tokensBefore,
         tokensAfter: tokens,
-        actions: [...actions, 'mark-for-compaction'],
+        actions: [...actions, "mark-for-compaction"],
         markForCompaction: true,
         withinBudget: false,
       },
@@ -198,10 +223,15 @@ export class ContextBudgetEnforcer {
     const keepFrom = Math.max(0, messages.length - tailMessages);
     return messages.map((m, i) => {
       if (i >= keepFrom) return m;
-      if (m.role === 'tool' && m.content && m.content.length > DEFAULT_MAX_TOOL_ARG_CHARS) {
+      if (
+        m.role === "tool" &&
+        m.content &&
+        m.content.length > DEFAULT_MAX_TOOL_ARG_CHARS
+      ) {
         return {
           ...m,
-          content: m.content.slice(0, DEFAULT_MAX_TOOL_ARG_CHARS) +
+          content:
+            m.content.slice(0, DEFAULT_MAX_TOOL_ARG_CHARS) +
             `\n\n... [pruned: ${m.content.length} → ${DEFAULT_MAX_TOOL_ARG_CHARS} chars]`,
         };
       }
@@ -221,12 +251,16 @@ export class ContextBudgetEnforcer {
     let userCount = 0;
     let dropUntil = 0;
     for (let i = 0; i < messages.length; i++) {
-      if (messages[i].role === 'user') userCount += 1;
+      if (messages[i].role === "user") userCount += 1;
       // Each "user" beyond the first marks the start of a new turn-
       // pair. If we have at least one user and dropping everything up
       // to and including the assistant that follows still leaves the
       // tail intact, we can cut.
-      if (userCount >= 1 && i + 1 < messages.length && messages[i + 1].role === 'assistant') {
+      if (
+        userCount >= 1 &&
+        i + 1 < messages.length &&
+        messages[i + 1].role === "assistant"
+      ) {
         // Proposed cut: keep everything from i+2 onward.
         const remaining = messages.length - (i + 2);
         if (remaining >= tailMessages) {
@@ -236,7 +270,9 @@ export class ContextBudgetEnforcer {
         }
       }
     }
-    return dropUntil > 0 ? messages.slice(dropUntil) : messages.slice(-tailMessages);
+    return dropUntil > 0
+      ? messages.slice(dropUntil)
+      : messages.slice(-tailMessages);
   }
 
   private truncateToolArgs(
@@ -244,7 +280,7 @@ export class ContextBudgetEnforcer {
     maxChars: number,
   ): ChatMessage[] {
     return messages.map((m) => {
-      if (m.role !== 'assistant' || !m.tool_calls) return m;
+      if (m.role !== "assistant" || !m.tool_calls) return m;
       const toolCalls = m.tool_calls.map((tc) => {
         if (!tc.function || tc.function.arguments.length <= maxChars) return tc;
         return {
@@ -285,8 +321,8 @@ function finish(
   compactionThreshold: number,
 ): { messages: ChatMessage[]; report: BudgetReport } {
   const markForCompaction = tokensAfter > compactionThreshold;
-  if (markForCompaction && !actions.includes('mark-for-compaction')) {
-    actions = [...actions, 'mark-for-compaction'];
+  if (markForCompaction && !actions.includes("mark-for-compaction")) {
+    actions = [...actions, "mark-for-compaction"];
   }
   return {
     messages,

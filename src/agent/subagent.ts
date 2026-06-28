@@ -21,16 +21,13 @@
  *     and a `jobId` is returned. The caller can poll via the
  *     shared BackgroundJobRegistry (Phase 3.1).
  */
-import { randomUUID } from 'node:crypto';
-import type { AgentContext } from '../types.js';
-import { WorkerAgent } from './worker-agent.js';
-import { recordTelemetry, telemetry } from './telemetry.js';
+import { randomUUID } from "node:crypto";
+import type { AgentContext } from "../types.js";
+import { WorkerAgent } from "./worker-agent.js";
+import { recordTelemetry, telemetry } from "./telemetry.js";
 
 export type SubagentType =
-  | 'general-purpose'
-  | 'statusline-setup'
-  | 'Explore'
-  | 'Plan';
+  "general-purpose" | "statusline-setup" | "Explore" | "Plan";
 
 export interface SubagentRequest {
   task: string;
@@ -40,7 +37,7 @@ export interface SubagentRequest {
   /** Spawn fire-and-forget and return a jobId. Default: false. */
   runInBackground?: boolean;
   /** Whether to clean up the subagent's session on exit. Default: 'none'. */
-  cleanup?: 'session' | 'none';
+  cleanup?: "session" | "none";
   /** Per-subagent tool-call cap. Default: 15 (matches WorkerAgent). */
   maxLocalToolCalls?: number;
 }
@@ -50,7 +47,11 @@ export interface SubagentResult {
   /** The subagent's final natural-language summary. */
   summary: string;
   /** Token usage (parent's bill). */
-  tokensUsed: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  tokensUsed: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
   /** Number of tool calls the subagent made. */
   toolCallCount: number;
   /** Duration in milliseconds. */
@@ -82,8 +83,6 @@ const DEFAULT_INTERNAL_OPTIONS: InternalOptions = {
   cleanHistory: true,
 };
 
-const MAX_LOCAL_TOOL_CALLS_DEFAULT = 15;
-
 /**
  * Spawn a subagent. Returns immediately when `runInBackground`
  * is true; otherwise awaits the subagent's completion and
@@ -94,7 +93,10 @@ export async function spawnSubagent(
   parentCtx: AgentContext,
   internalOpts: Partial<InternalOptions> = {},
 ): Promise<SubagentResult> {
-  const opts: InternalOptions = { ...DEFAULT_INTERNAL_OPTIONS, ...internalOpts };
+  const opts: InternalOptions = {
+    ...DEFAULT_INTERNAL_OPTIONS,
+    ...internalOpts,
+  };
   const start = Date.now();
   const id = `subagent_${randomUUID().slice(0, 8)}`;
   // The subagent inherits the parent's cwd and policy but
@@ -112,19 +114,19 @@ export async function spawnSubagent(
     policy: parentCtx.policy,
     yes: parentCtx.yes,
     // Phase 3.2 hard rule: subagents are always mutating.
-    mode: 'BUILD',
+    mode: "BUILD",
   };
   if (req.runInBackground) {
     // Fire-and-forget. The caller polls by jobId.
     void runSubagentInBackground(id, req, subagentCtx, opts, start);
     return {
       success: true,
-      summary: '(subagent running in background)',
+      summary: "(subagent running in background)",
       tokensUsed: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       toolCallCount: 0,
       durationMs: 0,
       type: req.type,
-      transcript: '',
+      transcript: "",
       jobId: id,
     };
   }
@@ -142,10 +144,10 @@ async function runSubagentInline(
     id,
     title: req.task.slice(0, 80),
     description: req.task,
-    persona: 'code' as const,
+    persona: "code" as const,
     dependencies: [],
     files: req.contextFiles ?? [],
-    status: 'running' as const,
+    status: "running" as const,
   };
   const worker = new WorkerAgent(subagentCtx.verbose);
   const subtaskBudget = 15;
@@ -188,7 +190,7 @@ async function runSubagentInline(
       toolCallCount: 0,
       durationMs: Date.now() - start,
       type: req.type,
-      transcript: '',
+      transcript: "",
     };
   }
 }
@@ -213,7 +215,7 @@ async function runSubagentInBackground(
       toolCallCount: 0,
       durationMs: Date.now() - start,
       type: req.type,
-      transcript: '',
+      transcript: "",
     });
   }
 }
@@ -221,7 +223,9 @@ async function runSubagentInBackground(
 const backgroundSubagentResults = new Map<string, SubagentResult>();
 
 /** Read the latest result for a background subagent. */
-export function getBackgroundSubagentResult(jobId: string): SubagentResult | null {
+export function getBackgroundSubagentResult(
+  jobId: string,
+): SubagentResult | null {
   return backgroundSubagentResults.get(jobId) ?? null;
 }
 
@@ -255,7 +259,7 @@ export function buildSubagentContext(
     checkCommand: undefined,
     policy: parentCtx.policy,
     yes: parentCtx.yes,
-    mode: 'BUILD',
+    mode: "BUILD",
   };
 }
 

@@ -16,7 +16,7 @@
  *     enough to GPT-4o that the context-budget enforcer will never
  *     under-count for safety.
  */
-import type { ChatContentBlock, ChatMessage } from './types.js';
+import type { ChatContentBlock, ChatMessage } from "./types.js";
 
 /**
  * Fixed per-image token estimate. Matches Anthropic's documented
@@ -35,31 +35,31 @@ export const IMAGE_TOKEN_COST = 1500;
 export function extractTextFromContent(
   content: string | ChatContentBlock[] | null | undefined,
 ): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
+  if (content == null) return "";
+  if (typeof content === "string") return content;
   const parts: string[] = [];
   for (const block of content) {
-    if (block.type === 'text') {
+    if (block.type === "text") {
       parts.push(block.text);
-    } else if (block.type === 'image') {
+    } else if (block.type === "image") {
       // Deliberately terse — the base64 payload must never leak
       // into log lines, telemetry, or loop-trap fingerprints.
       const tag =
-        block.source.kind === 'base64'
+        block.source.kind === "base64"
           ? `[image:${block.source.mediaType}]`
           : `[image:url]`;
       parts.push(tag);
     }
   }
-  return parts.join('\n');
+  return parts.join("\n");
 }
 
 /** True if the content carries at least one image block. */
 export function hasImageContent(
   content: string | ChatContentBlock[] | null | undefined,
 ): boolean {
-  if (content == null || typeof content === 'string') return false;
-  return content.some((b) => b.type === 'image');
+  if (content == null || typeof content === "string") return false;
+  return content.some((b) => b.type === "image");
 }
 
 /**
@@ -69,14 +69,16 @@ export function hasImageContent(
 export function countImageBlocks(
   content: string | ChatContentBlock[] | null | undefined,
 ): number {
-  if (content == null || typeof content === 'string') return 0;
+  if (content == null || typeof content === "string") return 0;
   let n = 0;
-  for (const b of content) if (b.type === 'image') n++;
+  for (const b of content) if (b.type === "image") n++;
   return n;
 }
 
 /** Convenience: total images across a list of messages. */
-export function countImagesInMessages(messages: ReadonlyArray<ChatMessage>): number {
+export function countImagesInMessages(
+  messages: ReadonlyArray<ChatMessage>,
+): number {
   let n = 0;
   for (const m of messages) n += countImageBlocks(m.content);
   return n;

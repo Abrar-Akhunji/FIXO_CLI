@@ -1,34 +1,34 @@
-import { execSync } from 'child_process';
-import path from 'path';
-import fs from 'fs';
-import type readline from 'readline';
-import type { ChatMessage, ChatToolDefinition } from '../shared/types.js';
-import type { AgentContext, Subtask } from '../types.js';
-import { loadIndex } from '../indexer.js';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import { AgentClient } from './agent-client.js';
-import { loadConfig } from '../config.js';
-import { executeTool, getActiveTools, type ToolCallEvent } from './tool-executor.js';
-import { MUTATING_TOOL_NAMES } from './single-agent.js';
-import { colors } from '../ui/colors.js';
-import { workspaceLockManager } from '../workspace-lock.js';
-import { logTelemetry } from './telemetry.js';
-import { checkPermission } from './permissions.js';
+import { execSync } from "child_process";
+import path from "path";
+import fs from "fs";
+import type readline from "readline";
+import type { ChatMessage } from "../shared/types.js";
+import type { AgentContext, Subtask } from "../types.js";
+import { loadIndex } from "../indexer.js";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import { AgentClient } from "./agent-client.js";
+import { loadConfig } from "../config.js";
+import { executeTool, getActiveTools } from "./tool-executor.js";
+import { MUTATING_TOOL_NAMES } from "./single-agent.js";
+import { colors } from "../ui/colors.js";
+import { workspaceLockManager } from "../workspace-lock.js";
+import { logTelemetry } from "./telemetry.js";
+import { checkPermission } from "./permissions.js";
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
   toSafetyAlertDirective,
-} from '../runtime/loop-trap.js';
-import { ContextBudgetEnforcer } from './context-budget.js';
-import { ConversationManager } from './conversation.js';
-import * as p from '@clack/prompts';
-import { FILE_WRITING_RULES_BLOCK } from './file-writing-rules.js';
+} from "../runtime/loop-trap.js";
+import { ContextBudgetEnforcer } from "./context-budget.js";
+import { ConversationManager } from "./conversation.js";
+import * as p from "@clack/prompts";
+import { FILE_WRITING_RULES_BLOCK } from "./file-writing-rules.js";
 
 function getPatchPaths(patch: string): string[] {
   const paths: string[] = [];
-  const lines = patch.split('\n');
+  const lines = patch.split("\n");
   for (const line of lines) {
-    if (line.startsWith('+++ b/') || line.startsWith('--- a/')) {
+    if (line.startsWith("+++ b/") || line.startsWith("--- a/")) {
       const p = line.slice(6).trim();
       if (p && !paths.includes(p)) paths.push(p);
     }
@@ -40,7 +40,7 @@ export async function acquireLockWithRetryAndTimeout(
   manager: any,
   paths: string[],
   agentId: string,
-  lockType: 'read' | 'write'
+  lockType: "read" | "write",
 ): Promise<boolean> {
   const backoffs = [500, 1500];
   const timeoutMs = 30000;
@@ -50,7 +50,7 @@ export async function acquireLockWithRetryAndTimeout(
   while (true) {
     let allAcquired = true;
     const acquiredSoFar: string[] = [];
-    
+
     for (const p of paths) {
       const success = manager.acquireLock(p, agentId, lockType);
       if (success) {
@@ -60,11 +60,11 @@ export async function acquireLockWithRetryAndTimeout(
         break;
       }
     }
-    
+
     if (allAcquired) {
       return true;
     }
-    
+
     for (const p of acquiredSoFar) {
       manager.releaseLock(p, agentId);
     }
@@ -72,55 +72,77 @@ export async function acquireLockWithRetryAndTimeout(
     if (Date.now() - startTime >= timeoutMs) {
       await logTelemetry({
         id: `lock-${agentId}-${Date.now()}`,
-        tool: 'lock_manager',
-        arguments: { paths, agentId, lockType, error: 'Lock wait timeout exceeded' },
-        status: 'failed'
+        tool: "lock_manager",
+        arguments: {
+          paths,
+          agentId,
+          lockType,
+          error: "Lock wait timeout exceeded",
+        },
+        status: "failed",
       });
       return false;
     }
 
     const delay = retryCount < backoffs.length ? backoffs[retryCount] : 1000;
     retryCount++;
-    
-    console.log(`\n${colors.yellow}[Lock Manager] Lock conflict for agent ${agentId} on files: ${paths.join(', ')}. Retrying in ${delay}ms...${colors.reset}`);
+
+    console.log(
+      `\n${colors.yellow}[Lock Manager] Lock conflict for agent ${agentId} on files: ${paths.join(", ")}. Retrying in ${delay}ms...${colors.reset}`,
+    );
     await logTelemetry({
       id: `lock-conflict-${agentId}-${Date.now()}`,
-      tool: 'lock_manager',
+      tool: "lock_manager",
       arguments: { paths, agentId, lockType, retryCount, delay },
-      status: 'started'
+      status: "started",
     });
-    
-    await new Promise(resolve => setTimeout(resolve, delay));
+
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 }
 
-
 export function getBranchPoint(cwd: string): string {
   try {
-    const mergeBase = execSync('git merge-base HEAD main', { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const mergeBase = execSync("git merge-base HEAD main", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
     if (mergeBase) return mergeBase;
   } catch (error: unknown) {
-    if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+    if (
+      process.env.DEBUG ||
+      process.env.VERBOSE ||
+      process.argv.includes("--verbose")
+    ) {
       const msg = error instanceof Error ? error.message : String(error);
       console.warn(`[Debug Warning] Failed to get branch point: ${msg}`);
     }
   }
-  return 'HEAD';
+  return "HEAD";
 }
 
 export function getModifiedFiles(cwd: string, branchPoint: string): string[] {
   try {
-    let diffCmd = ['diff', '--name-only', branchPoint, 'HEAD'];
-    if (branchPoint === 'HEAD') {
-      diffCmd = ['diff', '--name-only', 'HEAD'];
+    let diffCmd = ["diff", "--name-only", branchPoint, "HEAD"];
+    if (branchPoint === "HEAD") {
+      diffCmd = ["diff", "--name-only", "HEAD"];
     }
-    const files = execSync(`git ${diffCmd.join(' ')}`, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
-      .split('\n')
-      .map(f => f.trim())
+    const files = execSync(`git ${diffCmd.join(" ")}`, {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+      .split("\n")
+      .map((f) => f.trim())
       .filter(Boolean);
     return files;
   } catch (error: unknown) {
-    if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+    if (
+      process.env.DEBUG ||
+      process.env.VERBOSE ||
+      process.argv.includes("--verbose")
+    ) {
       const msg = error instanceof Error ? error.message : String(error);
       console.warn(`[Debug Warning] Failed to get modified files: ${msg}`);
     }
@@ -130,10 +152,9 @@ export function getModifiedFiles(cwd: string, branchPoint: string): string[] {
 
 export async function partitionContext(
   cwd: string,
-  persona: 'code' | 'test' | 'doc' | 'reviewer',
-  subtaskFiles: string[] = []
+  persona: "code" | "test" | "doc" | "reviewer",
+  subtaskFiles: string[] = [],
 ): Promise<{ systemPrompt: string; filesToLoad: string[] }> {
-  const guard = new WorkspaceGuard(cwd);
   const index = await loadIndex(cwd);
   const branchPoint = getBranchPoint(cwd);
   const modified = getModifiedFiles(cwd, branchPoint);
@@ -141,13 +162,13 @@ export async function partitionContext(
   const targetFiles = Array.from(new Set([...modified, ...subtaskFiles]));
 
   let filesToLoad: string[] = [];
-  let systemPrompt = '';
+  let systemPrompt = "";
 
-  if (persona === 'code') {
+  if (persona === "code") {
     const codeFiles = new Set<string>();
     for (const f of targetFiles) {
       codeFiles.add(f);
-      const indexed = index.files.find(idx => idx.path === f);
+      const indexed = index.files.find((idx) => idx.path === f);
       if (indexed && indexed.resolvedImports) {
         for (const imp of indexed.resolvedImports) {
           codeFiles.add(imp);
@@ -158,10 +179,14 @@ export async function partitionContext(
     systemPrompt = `You are the FixO Code Agent. Your job is to read and modify code files in the workspace.
 You have access to files and their dependencies. Focus only on the requested code changes.
 ${FILE_WRITING_RULES_BLOCK}`;
-  } else if (persona === 'test') {
+  } else if (persona === "test") {
     const testFiles = new Set<string>();
     for (const f of index.files) {
-      const isTest = f.path.includes('.test.') || f.path.includes('.spec.') || f.path.includes('__tests__') || f.path.includes('test/');
+      const isTest =
+        f.path.includes(".test.") ||
+        f.path.includes(".spec.") ||
+        f.path.includes("__tests__") ||
+        f.path.includes("test/");
       if (isTest) {
         testFiles.add(f.path);
         if (f.resolvedImports) {
@@ -175,43 +200,62 @@ ${FILE_WRITING_RULES_BLOCK}`;
     systemPrompt = `You are the FixO Test Agent. Your job is to run, write, or fix unit and integration tests.
 Ensure code changes are thoroughly covered by tests and all test suites pass.
 ${FILE_WRITING_RULES_BLOCK}`;
-  } else if (persona === 'doc') {
+  } else if (persona === "doc") {
     const docFiles = new Set<string>();
     for (const f of index.files) {
-      const isDoc = f.path.endsWith('.md') || f.path.includes('changelog') || f.path.includes('CHANGELOG');
+      const isDoc =
+        f.path.endsWith(".md") ||
+        f.path.includes("changelog") ||
+        f.path.includes("CHANGELOG");
       if (isDoc) {
         docFiles.add(f.path);
       } else {
         try {
-          const content = fs.readFileSync(path.join(cwd, f.path), 'utf-8');
-          if (content.includes('/**') || content.includes('//')) {
+          const content = fs.readFileSync(path.join(cwd, f.path), "utf-8");
+          if (content.includes("/**") || content.includes("//")) {
             if (targetFiles.includes(f.path)) {
               docFiles.add(f.path);
             }
           }
         } catch (error: unknown) {
-          if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+          if (
+            process.env.DEBUG ||
+            process.env.VERBOSE ||
+            process.argv.includes("--verbose")
+          ) {
             const msg = error instanceof Error ? error.message : String(error);
-            console.warn(`[Debug Warning] Failed to read file ${f.path} during doc partitioning: ${msg}`);
+            console.warn(
+              `[Debug Warning] Failed to read file ${f.path} during doc partitioning: ${msg}`,
+            );
           }
         }
       }
     }
     filesToLoad = Array.from(docFiles);
     systemPrompt = `You are the FixO Documentation Agent. Your job is to update project documentation, README markdown files, JSDoc/TSDoc comments, and API schemas.`;
-  } else if (persona === 'reviewer') {
+  } else if (persona === "reviewer") {
     filesToLoad = [];
-    let diffContent = '';
+    let diffContent = "";
     try {
-      let diffCmd = ['diff', branchPoint, 'HEAD'];
-      if (branchPoint === 'HEAD') {
-        diffCmd = ['diff', 'HEAD'];
+      let diffCmd = ["diff", branchPoint, "HEAD"];
+      if (branchPoint === "HEAD") {
+        diffCmd = ["diff", "HEAD"];
       }
-      diffContent = execSync(`git ${diffCmd.join(' ')}`, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      diffContent = execSync(`git ${diffCmd.join(" ")}`, {
+        cwd,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
     } catch (error: unknown) {
-      if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+      if (
+        process.env.DEBUG ||
+        process.env.VERBOSE ||
+        process.argv.includes("--verbose")
+      ) {
         const msg = error instanceof Error ? error.message : String(error);
-        console.warn(`[Debug Warning] Failed to run git diff in reviewer partition: ${msg}`);
+        console.warn(
+          `[Debug Warning] Failed to run git diff in reviewer partition: ${msg}`,
+        );
       }
     }
     systemPrompt = `You are the FixO Reviewer Agent. Your job is to audit code modifications.
@@ -223,7 +267,8 @@ ${diffContent}
 \`\`\``;
   }
 
-  return { systemPrompt, filesToLoad };
+  const mandatoryRule = `MANDATORY FIRST ACTION: Before reading any specific file, you MUST first run the List tool on the workspace root directory to get the actual directory structure. Only attempt to Read files that you have confirmed exist via List. Never guess file paths. Never assume standard files like README.md, package.json, or src/ exist without checking first.\n\n`;
+  return { systemPrompt: mandatoryRule + systemPrompt, filesToLoad };
 }
 
 export class WorkerAgent {
@@ -233,12 +278,11 @@ export class WorkerAgent {
   /** AbortController used to cancel the current worker task. */
   private abortController = new AbortController();
   /** Set true once the user requests cancellation. */
-  private markedForCancellation = false;
 
   constructor(verbose = false) {
     const config = loadConfig();
     this.client = new AgentClient(
-      config.freellmapi_api_key || '',
+      config.freellmapi_api_key || "",
       config.apiUrl,
       verbose,
       config.provider_mode,
@@ -249,31 +293,38 @@ export class WorkerAgent {
 
   /** Abort the current worker task. */
   abort(): void {
-    this.markedForCancellation = true;
     this.abortController.abort();
   }
 
   /** Reset the abort controller after a cancellation. */
   reset(): void {
     this.abortController = new AbortController();
-    this.markedForCancellation = false;
   }
 
   async run(
     context: AgentContext,
     subtask: Subtask,
     subtaskBudget: number,
-    rl?: readline.Interface
+    rl?: readline.Interface,
+    workspaceManifest?: string,
   ): Promise<{
     success: boolean;
     output: string;
-    tokensUsed: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    tokensUsed: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+    };
     toolCallCount: number;
     /** Phase 5.2 — absolute paths the worker wrote/renamed/deleted. */
     touchedFiles: string[];
   }> {
-    const { systemPrompt, filesToLoad } = await partitionContext(context.cwd, subtask.persona, subtask.files);
-    
+    const { systemPrompt, filesToLoad } = await partitionContext(
+      context.cwd,
+      subtask.persona,
+      subtask.files,
+    );
+
     const parts = [
       systemPrompt,
       ``,
@@ -282,23 +333,42 @@ export class WorkerAgent {
       `Description: ${subtask.description}`,
       ``,
       `## Workspace`,
-      `Working directory: ${context.cwd}`
+      `Working directory: ${context.cwd}`,
     ];
 
+    if (workspaceManifest) {
+      parts.push(
+        ``,
+        `## Workspace Manifest (Verified Files & Directories)`,
+        workspaceManifest,
+      );
+    }
+
     try {
-      const { retrieveRelevantFacts } = await import('../project-memory.js');
-      const relevantFacts = await retrieveRelevantFacts(context.cwd, `${subtask.title} ${subtask.description}`, this.client, 5);
+      const { retrieveRelevantFacts } = await import("../project-memory.js");
+      const relevantFacts = await retrieveRelevantFacts(
+        context.cwd,
+        `${subtask.title} ${subtask.description}`,
+        this.client,
+        5,
+      );
       if (relevantFacts.length > 0) {
         parts.push(
           ``,
           `## Project Memory (Relevant Facts & Guidelines)`,
-          relevantFacts.map(f => `- ${f}`).join('\n')
+          relevantFacts.map((f) => `- ${f}`).join("\n"),
         );
       }
     } catch (error: unknown) {
-      if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+      if (
+        process.env.DEBUG ||
+        process.env.VERBOSE ||
+        process.argv.includes("--verbose")
+      ) {
         const msg = error instanceof Error ? error.message : String(error);
-        console.warn(`[Debug Warning] Failed to retrieve relevant memory facts: ${msg}`);
+        console.warn(
+          `[Debug Warning] Failed to retrieve relevant memory facts: ${msg}`,
+        );
       }
     }
 
@@ -306,62 +376,74 @@ export class WorkerAgent {
     let pinnedBytes = 0;
     const MAX_PINNED_TOTAL_BYTES = 180_000;
     const MAX_PINNED_FILE_BYTES = 80_000;
-    
+
     if (filesToLoad.length > 0) {
       parts.push(``, `## Partitioned Files Context`);
       for (const filePath of filesToLoad) {
         try {
           const resolved = guard.ensureFile(filePath);
           const relPath = guard.relative(resolved);
-          if (!fs.existsSync(resolved) || guard.isBinaryFile(resolved)) continue;
-          
-          let content = fs.readFileSync(resolved, 'utf-8');
-          const fileBytes = Buffer.byteLength(content, 'utf-8');
-          
+          if (!fs.existsSync(resolved) || guard.isBinaryFile(resolved))
+            continue;
+
+          let content = fs.readFileSync(resolved, "utf-8");
+          const fileBytes = Buffer.byteLength(content, "utf-8");
+
           if (fileBytes > MAX_PINNED_FILE_BYTES) {
-            content = content.slice(0, MAX_PINNED_FILE_BYTES) + `\n\n... (truncated, file too large)`;
+            content =
+              content.slice(0, MAX_PINNED_FILE_BYTES) +
+              `\n\n... (truncated, file too large)`;
           }
-          
-          const contentBytes = Buffer.byteLength(content, 'utf-8');
+
+          const contentBytes = Buffer.byteLength(content, "utf-8");
           if (pinnedBytes + contentBytes > MAX_PINNED_TOTAL_BYTES) {
             const availableBytes = MAX_PINNED_TOTAL_BYTES - pinnedBytes;
             if (availableBytes > 100) {
-              content = content.slice(0, availableBytes) + `\n\n... (truncated, context size limit reached)`;
+              content =
+                content.slice(0, availableBytes) +
+                `\n\n... (truncated, context size limit reached)`;
               parts.push(
                 `File: \`${relPath}\``,
                 `\`\`\``,
                 content,
                 `\`\`\``,
-                ``
+                ``,
               );
-              pinnedBytes += Buffer.byteLength(content, 'utf-8');
+              pinnedBytes += Buffer.byteLength(content, "utf-8");
             }
             break;
           }
-          
-          parts.push(
-            `File: \`${relPath}\``,
-            `\`\`\``,
-            content,
-            `\`\`\``,
-            ``
-          );
+
+          parts.push(`File: \`${relPath}\``, `\`\`\``, content, `\`\`\``, ``);
           pinnedBytes += contentBytes;
         } catch (error: unknown) {
-          if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+          if (
+            process.env.DEBUG ||
+            process.env.VERBOSE ||
+            process.argv.includes("--verbose")
+          ) {
             const msg = error instanceof Error ? error.message : String(error);
-            console.warn(`[Debug Warning] Failed to load context file ${filePath}: ${msg}`);
+            console.warn(
+              `[Debug Warning] Failed to load context file ${filePath}: ${msg}`,
+            );
           }
         }
       }
     }
 
     const messages: ChatMessage[] = [
-      { role: 'system', content: parts.join('\n') },
-      { role: 'user', content: `Please accomplish this subtask: ${subtask.description}` }
+      { role: "system", content: parts.join("\n") },
+      {
+        role: "user",
+        content: `Please accomplish this subtask: ${subtask.description}`,
+      },
     ];
 
-    const tokensUsed = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    const tokensUsed = {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
     let toolCallCount = 0;
     const maxLocalToolCalls = subtaskBudget;
     /**
@@ -378,7 +460,9 @@ export class WorkerAgent {
     // skip the staged-write rollback on hard-abort and let the
     // parent session's normal cleanup handle it.
     const safety = loadConfig().preferences.safety;
-    const semanticLoopDetector = new SemanticLoopDetector(safety.semanticLoopTrap);
+    const semanticLoopDetector = new SemanticLoopDetector(
+      safety.semanticLoopTrap,
+    );
     let pendingSafetyDirective: string | null = null;
 
     /**
@@ -386,13 +470,13 @@ export class WorkerAgent {
      * of the messages array.
      */
     const injectSafetyDirective = (directive: string): void => {
-      if (messages.length === 0 || messages[0]?.role !== 'system') {
-        messages.unshift({ role: 'system', content: directive });
+      if (messages.length === 0 || messages[0]?.role !== "system") {
+        messages.unshift({ role: "system", content: directive });
         return;
       }
       const first = messages[0]!;
       messages[0] = {
-        role: 'system',
+        role: "system",
         content: `${directive}\n\n${first.content}`,
       };
     };
@@ -400,7 +484,7 @@ export class WorkerAgent {
     while (toolCallCount < maxLocalToolCalls) {
       // Check for user cancellation before each LLM call
       if (this.abortController.signal.aborted) {
-        throw new Error('Worker task cancelled by user.');
+        throw new Error("Worker task cancelled by user.");
       }
 
       // Enforce context budget locally for the worker agent to prevent context drift
@@ -408,10 +492,20 @@ export class WorkerAgent {
       // Determine context limit based on model (ConversationManager helper handles this)
       const mockConversation = new ConversationManager();
       mockConversation.setContextLimit(context.model);
-      const maxContextTokens = Math.max(10_000, mockConversation.getContextLimit());
-      const enforcedResult = enforcer.enforce(messages, { maxTokens: maxContextTokens });
-      if (!enforcedResult.report.withinBudget && enforcedResult.report.actions.includes('drop-oldest-turns')) {
-        console.log(`${colors.yellow}⚠  [Worker] Hard-truncating context to fit within ${maxContextTokens} tokens.${colors.reset}`);
+      const maxContextTokens = Math.max(
+        10_000,
+        mockConversation.getContextLimit(),
+      );
+      const enforcedResult = enforcer.enforce(messages, {
+        maxTokens: maxContextTokens,
+      });
+      if (
+        !enforcedResult.report.withinBudget &&
+        enforcedResult.report.actions.includes("drop-oldest-turns")
+      ) {
+        console.log(
+          `${colors.yellow}⚠  [Worker] Hard-truncating context to fit within ${maxContextTokens} tokens.${colors.reset}`,
+        );
       }
       // Reassign to the truncated messages
       messages.length = 0;
@@ -423,13 +517,13 @@ export class WorkerAgent {
       try {
         result = await this.client.chat(messages, context.model, {
           tools: getActiveTools(context.mode),
-          tool_choice: 'auto',
-          agent_task_type: 'mutation',
-          required_capabilities: ['tool-calling', 'coding'],
+          tool_choice: "auto",
+          agent_task_type: "mutation",
+          required_capabilities: ["tool-calling", "coding"],
           signal: this.abortController.signal,
         });
       } finally {
-        spinner.stop('🤖 Worker thought completed');
+        spinner.stop("🤖 Worker thought completed");
       }
 
       if (result.usage) {
@@ -441,7 +535,7 @@ export class WorkerAgent {
       if (!result.tool_calls || result.tool_calls.length === 0) {
         return {
           success: true,
-          output: result.content || 'Completed subtask successfully.',
+          output: result.content || "Completed subtask successfully.",
           tokensUsed,
           toolCallCount,
           touchedFiles: Array.from(touchedFilesSet),
@@ -449,9 +543,9 @@ export class WorkerAgent {
       }
 
       messages.push({
-        role: 'assistant',
+        role: "assistant",
         content: result.content,
-        tool_calls: result.tool_calls
+        tool_calls: result.tool_calls,
       });
 
       for (const toolCall of result.tool_calls) {
@@ -459,7 +553,7 @@ export class WorkerAgent {
         try {
           parsedArgs = JSON.parse(toolCall.function.arguments);
         } catch {
-          parsedArgs = { error: 'Failed to parse tool arguments' };
+          parsedArgs = { error: "Failed to parse tool arguments" };
         }
 
         // Pillar 2 — semantic loop detection. Records the tool
@@ -474,14 +568,14 @@ export class WorkerAgent {
             parsedArgs,
             context.cwd,
           );
-          if (verdict.state === 'warn') {
+          if (verdict.state === "warn") {
             pendingSafetyDirective = toSafetyAlertDirective(verdict);
             console.log(
               `${colors.yellow}⚠  [Worker] Semantic loop warning: ` +
-              `${verdict.target} accessed ${verdict.count}× ` +
-              `in the last ${verdict.windowSize} turns.${colors.reset}`,
+                `${verdict.target} accessed ${verdict.count}× ` +
+                `in the last ${verdict.windowSize} turns.${colors.reset}`,
             );
-          } else if (verdict.state === 'hard-abort') {
+          } else if (verdict.state === "hard-abort") {
             throw new SemanticLoopAbortedError(
               verdict.target,
               verdict.count,
@@ -502,99 +596,160 @@ export class WorkerAgent {
           id: toolCallId,
           tool: toolCall.function.name,
           arguments: parsedArgs,
-          status: 'started'
+          status: "started",
         });
 
-        const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl, context);
-        let event: ToolCallEvent;
-        if (!allowed) {
+        const checkFixo = (val: any): boolean => {
+          if (typeof val === "string") {
+            const normalized = val.replace(/\\/g, "/");
+            return normalized
+              .split("/")
+              .some((s) => s === ".fixo" || s.startsWith(".fixo"));
+          }
+          if (typeof val === "object" && val !== null) {
+            return Object.values(val).some(checkFixo);
+          }
+          return false;
+        };
+
+        let event: any = null;
+        let allowed = false;
+        let isFixoBlocked = false;
+
+        if (checkFixo(parsedArgs)) {
+          isFixoBlocked = true;
           event = {
             tool: toolCall.function.name,
             args: parsedArgs,
-            result: `Error: User denied permission to execute ${toolCall.function.name}.`,
-            isWrite: false
+            result:
+              "Access denied: .fixo/ is an internal system directory and cannot be read by worker agents.",
+            isWrite: false,
           };
           await logTelemetry({
             id: toolCallId,
             tool: toolCall.function.name,
             arguments: parsedArgs,
-            status: 'failed',
-            error: 'User denied permission'
+            status: "failed",
+            error: "Access denied to .fixo/ internal directory",
           });
         } else {
-          // Resolve lock paths
-          const lockPaths: string[] = [];
-          if (parsedArgs.path) {
-            lockPaths.push(guard.resolve(parsedArgs.path));
-          } else if (parsedArgs.from || parsedArgs.to) {
-            if (parsedArgs.from) lockPaths.push(guard.resolve(parsedArgs.from));
-            if (parsedArgs.to) lockPaths.push(guard.resolve(parsedArgs.to));
-          } else if (parsedArgs.patch) {
-            const patchPaths = getPatchPaths(parsedArgs.patch);
-            for (const p of patchPaths) {
-              lockPaths.push(guard.resolve(p));
-            }
-          }
+          allowed = await this.askPermission(
+            toolCall.function.name,
+            parsedArgs,
+            rl,
+            context,
+          );
+        }
 
-          const isWriteTool = ['write_file', 'apply_patch', 'replace_range', 'insert_after', 'rename_file', 'delete_file'].includes(toolCall.function.name);
-          const lockType = isWriteTool ? 'write' : 'read';
-
-          let locked = true;
-          if (lockPaths.length > 0) {
-            locked = await acquireLockWithRetryAndTimeout(workspaceLockManager, lockPaths, subtask.id, lockType);
-          }
-
-          if (!locked) {
-            console.error(`\n${colors.red}[Lock Manager] Failed to acquire lock for agent ${subtask.id} on files: ${lockPaths.join(', ')}. Mark subtask as failed.${colors.reset}`);
-            
-            await logTelemetry({
-              id: toolCallId,
+        if (!isFixoBlocked) {
+          if (!allowed) {
+            event = {
               tool: toolCall.function.name,
-              arguments: parsedArgs,
-              status: 'failed',
-              error: `Lock timeout: failed to acquire ${lockType} lock.`
-            });
-
-            return {
-              success: false,
-              output: `Lock timeout: failed to acquire ${lockType} lock on ${lockPaths.join(', ')}.`,
-              tokensUsed,
-              toolCallCount,
-              touchedFiles: Array.from(touchedFilesSet),
+              args: parsedArgs,
+              result: `Error: User denied permission to execute ${toolCall.function.name}.`,
+              isWrite: false,
             };
-          }
-
-          // Budget decrement handled naturally by maxLocalToolCalls limit
-
-          try {
-            event = await executeTool(
-              toolCall.function.name,
-              parsedArgs,
-              context.cwd,
-              this.verbose,
-              { policy: context.policy, allowWithoutPrompt: context.yes, client: this.client, model: context.model }
-            );
-
             await logTelemetry({
               id: toolCallId,
               tool: toolCall.function.name,
               arguments: parsedArgs,
-              status: 'completed',
-              newContent: event.result
+              status: "failed",
+              error: "User denied permission",
             });
-          } catch (err: any) {
-            await logTelemetry({
-              id: toolCallId,
-              tool: toolCall.function.name,
-              arguments: parsedArgs,
-              status: 'failed',
-              error: err.message || String(err)
-            });
-            throw err;
-          } finally {
+          } else {
+            // Resolve lock paths
+            const lockPaths: string[] = [];
+            if (parsedArgs.path) {
+              lockPaths.push(guard.resolve(parsedArgs.path));
+            } else if (parsedArgs.from || parsedArgs.to) {
+              if (parsedArgs.from)
+                lockPaths.push(guard.resolve(parsedArgs.from));
+              if (parsedArgs.to) lockPaths.push(guard.resolve(parsedArgs.to));
+            } else if (parsedArgs.patch) {
+              const patchPaths = getPatchPaths(parsedArgs.patch);
+              for (const p of patchPaths) {
+                lockPaths.push(guard.resolve(p));
+              }
+            }
+
+            const isWriteTool = [
+              "write_file",
+              "apply_patch",
+              "replace_range",
+              "insert_after",
+              "rename_file",
+              "delete_file",
+            ].includes(toolCall.function.name);
+            const lockType = isWriteTool ? "write" : "read";
+
+            let locked = true;
             if (lockPaths.length > 0) {
-              for (const p of lockPaths) {
-                workspaceLockManager.releaseLock(p, subtask.id);
+              locked = await acquireLockWithRetryAndTimeout(
+                workspaceLockManager,
+                lockPaths,
+                subtask.id,
+                lockType,
+              );
+            }
+
+            if (!locked) {
+              console.error(
+                `\n${colors.red}[Lock Manager] Failed to acquire lock for agent ${subtask.id} on files: ${lockPaths.join(", ")}. Mark subtask as failed.${colors.reset}`,
+              );
+
+              await logTelemetry({
+                id: toolCallId,
+                tool: toolCall.function.name,
+                arguments: parsedArgs,
+                status: "failed",
+                error: `Lock timeout: failed to acquire ${lockType} lock.`,
+              });
+
+              return {
+                success: false,
+                output: `Lock timeout: failed to acquire ${lockType} lock on ${lockPaths.join(", ")}.`,
+                tokensUsed,
+                toolCallCount,
+                touchedFiles: Array.from(touchedFilesSet),
+              };
+            }
+
+            // Budget decrement handled naturally by maxLocalToolCalls limit
+            try {
+              event = await executeTool(
+                toolCall.function.name,
+                parsedArgs,
+                context.cwd,
+                this.verbose,
+                {
+                  policy: context.policy,
+                  allowWithoutPrompt: context.yes,
+                  client: this.client,
+                  model: context.model,
+                },
+              );
+
+              await logTelemetry({
+                id: toolCallId,
+                tool: toolCall.function.name,
+                arguments: parsedArgs,
+                status: "completed",
+                newContent: event.result,
+              });
+            } catch (err: any) {
+              await logTelemetry({
+                id: toolCallId,
+                tool: toolCall.function.name,
+                arguments: parsedArgs,
+                status: "failed",
+                error: err.message || String(err),
+              });
+              throw err;
+            } finally {
+              if (lockPaths.length > 0) {
+                for (const p of lockPaths) {
+                  workspaceLockManager.releaseLock(p, subtask.id);
+                }
               }
             }
           }
@@ -609,9 +764,9 @@ export class WorkerAgent {
         }
 
         messages.push({
-          role: 'tool',
+          role: "tool",
           tool_call_id: toolCall.id,
-          content: event.result
+          content: event.result,
         });
 
         toolCallCount++;
@@ -631,21 +786,27 @@ export class WorkerAgent {
     name: string,
     args: Record<string, string>,
     rl?: readline.Interface,
-    context?: AgentContext
+    context?: AgentContext,
   ): Promise<boolean> {
-    const action = name === 'run_command'
-      ? 'command'
-      : name === 'read_file' || name === 'search_code' || name === 'list_dir'
-        ? 'read'
-        : name === 'delete_file'
-          ? 'delete'
-          : 'write';
+    const action =
+      name === "run_command"
+        ? "command"
+        : name === "read_file" || name === "search_code" || name === "list_dir"
+          ? "read"
+          : name === "delete_file"
+            ? "delete"
+            : "write";
 
     let isOutsideWorkspace = false;
     let resolvedOutsidePath: string | undefined;
     if (MUTATING_TOOL_NAMES.has(name) && context?.cwd) {
       const guard = new WorkspaceGuard(context.cwd);
-      const targetPath = args.path || args.to || args.file || args.target || (name === 'run_command' && args.cwd);
+      const targetPath =
+        args.path ||
+        args.to ||
+        args.file ||
+        args.target ||
+        (name === "run_command" && args.cwd);
       if (targetPath) {
         const resolved = path.resolve(context.cwd, targetPath);
         if (!guard.isInside(resolved)) {
@@ -657,11 +818,16 @@ export class WorkerAgent {
 
     if (!isOutsideWorkspace && this.allowAll) return true;
 
-    const check = checkPermission(name, args as Record<string, unknown>, context?.cwd ?? process.cwd(), context?.policy ?? 'shell-confirm');
-    if (check.decision === 'deny') return false;
+    const check = checkPermission(
+      name,
+      args as Record<string, unknown>,
+      context?.cwd ?? process.cwd(),
+      context?.policy ?? "shell-confirm",
+    );
+    if (check.decision === "deny") return false;
     if (!isOutsideWorkspace && context?.yes) return true;
-    if (!isOutsideWorkspace && check.decision === 'allow') return true;
-    if (action === 'read') return true;
+    if (!isOutsideWorkspace && check.decision === "allow") return true;
+    if (action === "read") return true;
 
     if (!rl) return false; // If needs confirmation but no interactive RL, deny.
 
@@ -672,14 +838,27 @@ export class WorkerAgent {
       }
       rl.question(promptMsg, (answer) => {
         const cleanAnswer = answer.toLowerCase().trim();
-        const isApproved = cleanAnswer === 'all' || cleanAnswer === 'a' || cleanAnswer.startsWith('y') || cleanAnswer === '';
-        
-        if (isApproved && isOutsideWorkspace && resolvedOutsidePath && context) {
-          context.allowedOutsidePaths = context.allowedOutsidePaths || new Set();
+        const isApproved =
+          cleanAnswer === "all" ||
+          cleanAnswer === "a" ||
+          cleanAnswer.startsWith("y") ||
+          cleanAnswer === "";
+
+        if (
+          isApproved &&
+          isOutsideWorkspace &&
+          resolvedOutsidePath &&
+          context
+        ) {
+          context.allowedOutsidePaths =
+            context.allowedOutsidePaths || new Set();
           context.allowedOutsidePaths.add(resolvedOutsidePath);
         }
-        
-        if (!isOutsideWorkspace && (cleanAnswer === 'all' || cleanAnswer === 'a')) {
+
+        if (
+          !isOutsideWorkspace &&
+          (cleanAnswer === "all" || cleanAnswer === "a")
+        ) {
           this.allowAll = true;
         }
         resolve(isApproved);

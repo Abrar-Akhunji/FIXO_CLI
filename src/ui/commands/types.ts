@@ -1,12 +1,12 @@
-import * as readline from 'readline';
-import { type FreeLLMConfig } from '../../config.js';
-import { type ProjectConfig } from '../../types.js';
-import { type ConversationManager } from '../../agent/conversation.js';
-import { type SingleAgent } from '../../agent/single-agent.js';
-import { type GitManager } from '../../git/git-manager.js';
-import { type WorkspaceGuard } from '../../workspace-guard.js';
-import { type SessionStats } from '../prompt.js';
-import { type ChatContentBlock } from '../../shared/types.js';
+import * as readline from "readline";
+import { type FreeLLMConfig } from "../../config.js";
+import { type ProjectConfig } from "../../types.js";
+import { type ConversationManager } from "../../agent/conversation.js";
+import { type SingleAgent } from "../../agent/single-agent.js";
+import { type GitManager } from "../../git/git-manager.js";
+import { type WorkspaceGuard } from "../../workspace-guard.js";
+import { type SessionStats } from "../prompt.js";
+import { type ChatContentBlock } from "../../shared/types.js";
 
 export interface CommandState {
   currentModel: string;
@@ -33,11 +33,11 @@ export interface CommandContext {
   git: GitManager;
   guard: WorkspaceGuard;
   rl: readline.Interface;
-  
+
   handleInput: (input: string) => Promise<void>;
   clearSuggestions: () => void;
   refreshModelsForProvider: (name: string) => Promise<void>;
-  
+
   printStats?: (stats: SessionStats) => void;
   listRuns?: (cwd: string) => void;
   showRun?: (cwd: string, id: string) => void;

@@ -17,7 +17,7 @@
 const ANSI_PATTERN = /\x1b\[[0-9;]*[a-zA-Z]/g;
 
 export function stripAnsi(value: string): string {
-  return value.replace(ANSI_PATTERN, '');
+  return value.replace(ANSI_PATTERN, "");
 }
 
 /**
@@ -31,7 +31,7 @@ export function stripAnsi(value: string): string {
  * another tool that doesn't care about colour.
  */
 export function redactAnsi(value: string): string {
-  return value.replace(/\x1b/g, '\\x1b');
+  return value.replace(/\x1b/g, "\\x1b");
 }
 
 /* ──────────────────────── Pattern catalogue ──────────────────────── */
@@ -123,7 +123,7 @@ export const SCRUB_PATTERNS: ReadonlyArray<RegExp> = [
 export function scrubForLlm(value: string): string {
   let scrubbed = stripAnsi(value);
   for (const pattern of SCRUB_PATTERNS) {
-    scrubbed = scrubbed.replace(pattern, '[REDACTED]');
+    scrubbed = scrubbed.replace(pattern, "[REDACTED]");
   }
   return scrubbed;
 }
@@ -147,7 +147,9 @@ export function redactSecrets(value: string): string {
  * processes (npm install, test runners) never inherit a leaked
  * key.
  */
-export function redactedEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function redactedEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
   const blocked = [
     /^freellmapi_/i,
     /^fixo_/i,
@@ -166,7 +168,7 @@ export function redactedEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
   ];
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
-    if (blocked.some(pattern => pattern.test(key))) continue;
+    if (blocked.some((pattern) => pattern.test(key))) continue;
     env[key] = value;
   }
   return env;

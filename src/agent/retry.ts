@@ -16,7 +16,7 @@
  *     misbehaving observer can never break the retry chain).
  */
 
-export type JitterStrategy = 'full' | 'equal' | 'none';
+export type JitterStrategy = "full" | "equal" | "none";
 
 export interface RetryPolicy {
   /** Maximum number of attempts (1 = no retry). */
@@ -59,7 +59,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxAttempts: 5,
   baseDelayMs: 1_500,
   maxDelayMs: 30_000,
-  jitter: 'full',
+  jitter: "full",
   isRetryable: () => true,
 };
 
@@ -78,12 +78,12 @@ export const DEFAULT_RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([
 export function defaultIsRetryable(err: unknown): boolean {
   if (err instanceof Error) {
     const name = err.name;
-    if (name === 'AbortError' || /abort/i.test(err.message)) {
+    if (name === "AbortError" || /abort/i.test(err.message)) {
       return false;
     }
-    if (name === 'HttpError' && 'status' in err) {
+    if (name === "HttpError" && "status" in err) {
       const status = (err as { status: unknown }).status;
-      if (typeof status === 'number') {
+      if (typeof status === "number") {
         return DEFAULT_RETRYABLE_STATUS_CODES.has(status);
       }
     }
@@ -91,11 +91,11 @@ export function defaultIsRetryable(err: unknown): boolean {
       return true;
     }
     if (
-      err.message.includes('ECONNREFUSED') ||
-      err.message.includes('ECONNRESET') ||
-      err.message.includes('ETIMEDOUT') ||
-      err.message.includes('fetch failed') ||
-      err.message.includes('socket hang up')
+      err.message.includes("ECONNREFUSED") ||
+      err.message.includes("ECONNRESET") ||
+      err.message.includes("ETIMEDOUT") ||
+      err.message.includes("fetch failed") ||
+      err.message.includes("socket hang up")
     ) {
       return true;
     }
@@ -111,7 +111,10 @@ export function defaultIsRetryable(err: unknown): boolean {
  * The internal timer is cleared synchronously when the signal fires,
  * so no Node.js timer handle leaks.
  */
-export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function abortableSleep(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortError(signal.reason));
@@ -127,20 +130,20 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
       reject(abortError(signal?.reason));
     };
     const cleanup = (): void => {
-      signal?.removeEventListener('abort', onAbort);
+      signal?.removeEventListener("abort", onAbort);
     };
-    signal?.addEventListener('abort', onAbort, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
 function abortError(reason: unknown): Error {
   if (reason instanceof Error) {
     const err = new Error(`Aborted: ${reason.message}`);
-    err.name = 'AbortError';
+    err.name = "AbortError";
     return err;
   }
-  const err = new Error('Aborted');
-  err.name = 'AbortError';
+  const err = new Error("Aborted");
+  err.name = "AbortError";
   return err;
 }
 
@@ -162,14 +165,14 @@ export function computeBackoffMs(
   }
   const exp = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt));
   switch (jitter) {
-    case 'none':
+    case "none":
       return Math.floor(exp);
-    case 'equal': {
+    case "equal": {
       // Half deterministic, half random.
       const half = exp / 2;
       return Math.floor(half + Math.random() * half);
     }
-    case 'full':
+    case "full":
     default: {
       // 0 .. exp
       return Math.floor(Math.random() * exp);
@@ -231,11 +234,14 @@ function clampRetryAfterMs(ms: number): number {
  */
 export async function withRetry<T>(
   fn: (signal: AbortSignal) => Promise<T>,
-  policy: RetryPolicy = { ...DEFAULT_RETRY_POLICY, isRetryable: defaultIsRetryable },
+  policy: RetryPolicy = {
+    ...DEFAULT_RETRY_POLICY,
+    isRetryable: defaultIsRetryable,
+  },
   externalSignal?: AbortSignal,
 ): Promise<T> {
   if (policy.maxAttempts < 1) {
-    throw new Error('RetryPolicy.maxAttempts must be >= 1');
+    throw new Error("RetryPolicy.maxAttempts must be >= 1");
   }
 
   // Combined signal: aborts when either source fires.
@@ -245,7 +251,7 @@ export async function withRetry<T>(
     if (externalSignal.aborted) {
       controller.abort();
     } else {
-      externalSignal.addEventListener('abort', forwardAbort, { once: true });
+      externalSignal.addEventListener("abort", forwardAbort, { once: true });
     }
   }
 
@@ -297,10 +303,10 @@ export async function withRetry<T>(
     }
 
     // Unreachable: the loop above either returns or throws.
-    throw lastError ?? new Error('Retry loop exited unexpectedly');
+    throw lastError ?? new Error("Retry loop exited unexpectedly");
   } finally {
     if (externalSignal) {
-      externalSignal.removeEventListener('abort', forwardAbort);
+      externalSignal.removeEventListener("abort", forwardAbort);
     }
   }
 }
@@ -312,15 +318,19 @@ export async function withRetry<T>(
  * numeric `Retry-After: N` snippet.
  */
 function extractRetryAfterFromError(err: unknown): number | null {
-  if (!err || typeof err !== 'object') return null;
+  if (!err || typeof err !== "object") return null;
   const obj = err as { headers?: unknown; message?: unknown };
-  if (obj.headers && typeof obj.headers === 'object') {
-    const headers = obj.headers as Record<string, string | string[] | undefined>;
-    const raw = headers['retry-after'] ?? headers['Retry-After'];
-    if (typeof raw === 'string') return parseRetryAfter(raw);
-    if (Array.isArray(raw) && typeof raw[0] === 'string') return parseRetryAfter(raw[0]);
+  if (obj.headers && typeof obj.headers === "object") {
+    const headers = obj.headers as Record<
+      string,
+      string | string[] | undefined
+    >;
+    const raw = headers["retry-after"] ?? headers["Retry-After"];
+    if (typeof raw === "string") return parseRetryAfter(raw);
+    if (Array.isArray(raw) && typeof raw[0] === "string")
+      return parseRetryAfter(raw[0]);
   }
-  if (typeof obj.message === 'string') {
+  if (typeof obj.message === "string") {
     const m = /retry-after\s*[:=]\s*(\d+)/i.exec(obj.message);
     if (m && m[1]) {
       const seconds = Number(m[1]);

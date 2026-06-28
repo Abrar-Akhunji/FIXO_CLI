@@ -2,42 +2,62 @@
  * Tool definitions and executor for the single-agent tool-calling loop.
  * Provides: read_file, write_file, run_command, search_code, list_dir
  */
-import { TOOL_DEFINITIONS } from './tool-definitions.js';
+import { TOOL_DEFINITIONS } from "./tool-definitions.js";
 export { TOOL_DEFINITIONS };
-import fs from 'fs';
-import path from 'path';
-import { spawnSync } from 'child_process';
-import { randomBytes } from 'node:crypto';
-import type { ChatToolDefinition } from '../shared/types.js';
-import { colors } from '../ui/colors.js';
+import fs from "fs";
+import path from "path";
+import { spawnSync } from "child_process";
+import { randomBytes } from "node:crypto";
+import type { ChatToolDefinition } from "../shared/types.js";
+import { colors } from "../ui/colors.js";
 import {
   renderToolCall,
   startInlineToolSpinner,
   type InlineSpinnerHandle,
   type ToolCallRender,
-} from '../ui/render-primitives.js';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import type { TaskSession } from '../runtime/task-session.js';
-import { classifyCommand, type PolicyProfile, type RiskLevel } from '../runtime/policy.js';
-import { checkPermission, type PermissionCheckResult } from './permissions.js';
-import { redactedEnv, redactSecrets } from '../runtime/redaction.js';
-import { runSandboxed, SandboxUnavailableError } from '../runtime/os-sandbox.js';
-import { McpManager } from './mcp-manager.js';
-import { estimateReadCost, shouldDeferRead, formatPredictiveGateDirective, DEFAULT_PREDICTIVE_BUDGET_PCT } from './predictive-gate.js';
-import type { AgentClient } from './agent-client.js';
-import { createBranch, commitChanges, pushBranch, createPullRequest } from '../git/git-ops.js';
-import { GitManager } from '../git/git-manager.js';
-import { pathToFileURL } from 'url';
-import * as p from '@clack/prompts';
-import { loadConfig, saveConfig, type SafetyConfig } from '../config.js';
-import { AtomicStagingManager } from '../runtime/staging.js';
-import { LspPreSaveGate, makeLspProvider } from '../lsp/lsp-pre-save.js';
-import { syntaxHealthCheck, formatSyntaxVerdict } from '../lsp/syntax-fallback.js';
-import { PlatformPathLockedError } from '../workspace-guard.js';
+} from "../ui/render-primitives.js";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import type { TaskSession } from "../runtime/task-session.js";
+import {
+  classifyCommand,
+  type PolicyProfile,
+  type RiskLevel,
+} from "../runtime/policy.js";
+import { checkPermission, type PermissionCheckResult } from "./permissions.js";
+import { redactedEnv, redactSecrets } from "../runtime/redaction.js";
+import {
+  runSandboxed,
+  SandboxUnavailableError,
+} from "../runtime/os-sandbox.js";
+import { McpManager } from "./mcp-manager.js";
+import {
+  estimateReadCost,
+  shouldDeferRead,
+  formatPredictiveGateDirective,
+  DEFAULT_PREDICTIVE_BUDGET_PCT,
+} from "./predictive-gate.js";
+import type { AgentClient } from "./agent-client.js";
+import {
+  createBranch,
+  commitChanges,
+  pushBranch,
+  createPullRequest,
+} from "../git/git-ops.js";
+import { GitManager } from "../git/git-manager.js";
+import { pathToFileURL } from "url";
+import * as p from "@clack/prompts";
+import { loadConfig, saveConfig, type SafetyConfig } from "../config.js";
+import { AtomicStagingManager } from "../runtime/staging.js";
+import { LspPreSaveGate, makeLspProvider } from "../lsp/lsp-pre-save.js";
+import {
+  syntaxHealthCheck,
+  formatSyntaxVerdict,
+} from "../lsp/syntax-fallback.js";
+import { PlatformPathLockedError } from "../workspace-guard.js";
 
-import { McpBridgeManager } from './mcp-bridge.js';
-import { LspManager } from '../lsp/lsp-manager.js';
-import { webFetch, webSearch } from './web.js';
+import { McpBridgeManager } from "./mcp-bridge.js";
+import { LspManager } from "../lsp/lsp-manager.js";
+import { webFetch, webSearch } from "./web.js";
 import {
   loadTodoList,
   saveTodoList,
@@ -47,19 +67,21 @@ import {
   clearDoneItems,
   renderTodoList,
   summariseTodoList,
-  type TodoList,
   type TodoStatus,
-} from '../context/todo.js';
-import { recordTelemetry, telemetry } from './telemetry.js';
-import { applyModifiedArgs, fireHooks } from './hooks.js';
-import { BackgroundJobRegistry, type JobSnapshot } from '../runtime/background-jobs.js';
+} from "../context/todo.js";
+import { recordTelemetry, telemetry } from "./telemetry.js";
+import { applyModifiedArgs, fireHooks } from "./hooks.js";
+import {
+  BackgroundJobRegistry,
+  type JobSnapshot,
+} from "../runtime/background-jobs.js";
 import {
   ParserFactory,
   languageIdFromExtension,
   type ImportInfo,
   type SymbolInfo,
-} from './parser-adapter.js';
-import { getRunInventory } from '../runtime/run-inventory.js';
+} from "./parser-adapter.js";
+import { getRunInventory } from "../runtime/run-inventory.js";
 
 export const mcpManager = new McpManager();
 export const mcpBridgeManager = new McpBridgeManager();
@@ -83,13 +105,24 @@ export async function stopLspManager(): Promise<void> {
 export interface LoadedPlugin {
   path: string;
   tools: ChatToolDefinition[];
-  execute: (name: string, args: Record<string, any>, context: any) => Promise<string>;
+  execute: (
+    name: string,
+    args: Record<string, any>,
+    context: any,
+  ) => Promise<string>;
 }
 
 export const loadedPlugins: LoadedPlugin[] = [];
 
-export async function initializePlugins(cwd: string, projectConfig?: any): Promise<void> {
-  if (!projectConfig || !projectConfig.plugins || !Array.isArray(projectConfig.plugins)) {
+export async function initializePlugins(
+  cwd: string,
+  projectConfig?: any,
+): Promise<void> {
+  if (
+    !projectConfig ||
+    !projectConfig.plugins ||
+    !Array.isArray(projectConfig.plugins)
+  ) {
     return;
   }
 
@@ -104,9 +137,12 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
   for (const pluginPath of projectConfig.plugins) {
     try {
       const resolvedPath = guard.resolve(pluginPath);
-      const isTrusted = trusted.includes(pluginPath) || trusted.includes(resolvedPath);
+      const isTrusted =
+        trusted.includes(pluginPath) || trusted.includes(resolvedPath);
       if (!isTrusted) {
-        console.error(`\n${colors.red}[Plugin Loader] Error: Plugin "${pluginPath}" is listed in "plugins" but is not in the "trustedPlugins" allowlist inside .freellmapi.yml. Skipping.${colors.reset}`);
+        console.error(
+          `\n${colors.red}[Plugin Loader] Error: Plugin "${pluginPath}" is listed in "plugins" but is not in the "trustedPlugins" allowlist inside .freellmapi.yml. Skipping.${colors.reset}`,
+        );
         continue;
       }
 
@@ -115,8 +151,10 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
       const tools = (mod.tools || []) as ChatToolDefinition[];
       const execute = mod.execute;
 
-      if (typeof execute !== 'function') {
-        console.error(`\n${colors.red}[Plugin Loader] Error: Plugin "${pluginPath}" does not export an "execute" function. Skipping.${colors.reset}`);
+      if (typeof execute !== "function") {
+        console.error(
+          `\n${colors.red}[Plugin Loader] Error: Plugin "${pluginPath}" does not export an "execute" function. Skipping.${colors.reset}`,
+        );
         continue;
       }
 
@@ -124,14 +162,26 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
       const isApproved = globalConfig.approvedPlugins.includes(approvedKey);
 
       if (!isApproved) {
-        console.log(`\n${colors.yellow}╔════════════════════════════════════════════════════════════════╗`);
-        console.log(`║                  PLUGIN SECURITY VERIFICATION                  ║`);
-        console.log(`╚════════════════════════════════════════════════════════════════╝`);
-        console.log(`A new plugin is requesting to be loaded for this workspace:`);
+        console.log(
+          `\n${colors.yellow}╔════════════════════════════════════════════════════════════════╗`,
+        );
+        console.log(
+          `║                  PLUGIN SECURITY VERIFICATION                  ║`,
+        );
+        console.log(
+          `╚════════════════════════════════════════════════════════════════╝`,
+        );
+        console.log(
+          `A new plugin is requesting to be loaded for this workspace:`,
+        );
         console.log(`- Path: ${colors.cyan}${pluginPath}${colors.reset}`);
         console.log(`- Resolved: ${colors.cyan}${resolvedPath}${colors.reset}`);
-        console.log(`- Registers tools: ${colors.green}${tools.map(t => t.function.name).join(', ') || '(none)'}${colors.reset}`);
-        console.log(`\n${colors.yellow}WARNING: Plugins run with full access to the user shell and can make network calls or exfiltrate credentials.${colors.reset}`);
+        console.log(
+          `- Registers tools: ${colors.green}${tools.map((t) => t.function.name).join(", ") || "(none)"}${colors.reset}`,
+        );
+        console.log(
+          `\n${colors.yellow}WARNING: Plugins run with full access to the user shell and can make network calls or exfiltrate credentials.${colors.reset}`,
+        );
 
         const confirmed = await p.confirm({
           message: `Do you trust and want to load this plugin?`,
@@ -139,13 +189,17 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
         });
 
         if (p.isCancel(confirmed) || !confirmed) {
-          console.log(`[Plugin Loader] Load cancelled for "${pluginPath}". Skipping.`);
+          console.log(
+            `[Plugin Loader] Load cancelled for "${pluginPath}". Skipping.`,
+          );
           continue;
         }
 
         globalConfig.approvedPlugins.push(approvedKey);
         saveConfig(globalConfig);
-        console.log(`${colors.green}✓ Plugin approved and saved to ~/.fixocli/config.json${colors.reset}`);
+        console.log(
+          `${colors.green}✓ Plugin approved and saved to ~/.fixocli/config.json${colors.reset}`,
+        );
       }
 
       loadedPlugins.push({
@@ -153,9 +207,10 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
         tools,
         execute,
       });
-
     } catch (err) {
-      console.error(`\n${colors.red}[Plugin Loader] Failed to load plugin "${pluginPath}": ${err instanceof Error ? err.message : String(err)}${colors.reset}`);
+      console.error(
+        `\n${colors.red}[Plugin Loader] Failed to load plugin "${pluginPath}": ${err instanceof Error ? err.message : String(err)}${colors.reset}`,
+      );
     }
   }
 }
@@ -170,20 +225,20 @@ export async function initializePlugins(cwd: string, projectConfig?: any): Promi
  * production paths.
  */
 export const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'write_file',
-  'apply_patch',
-  'replace_range',
-  'insert_after',
-  'rename_file',
-  'delete_file',
-  'create_branch',
-  'commit_changes',
-  'push_branch',
-  'create_pull_request',
-  'run_command',
-  'str_replace',
-  'todo_write',
-  'run_command_async',
+  "write_file",
+  "apply_patch",
+  "replace_range",
+  "insert_after",
+  "rename_file",
+  "delete_file",
+  "create_branch",
+  "commit_changes",
+  "push_branch",
+  "create_pull_request",
+  "run_command",
+  "str_replace",
+  "todo_write",
+  "run_command_async",
 ]);
 
 /**
@@ -201,22 +256,43 @@ export const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
  *     mutate the workspace.
  */
 export function getActiveTools(mode?: string): ChatToolDefinition[] {
-  const pluginTools = loadedPlugins.flatMap(p => p.tools);
-  let tools = [...TOOL_DEFINITIONS, ...mcpManager.getTools(), ...mcpBridgeManager.getTools(), ...pluginTools];
+  const pluginTools = loadedPlugins.flatMap((p) => p.tools);
+  let tools = [
+    ...TOOL_DEFINITIONS,
+    ...mcpManager.getTools(),
+    ...mcpBridgeManager.getTools(),
+    ...pluginTools,
+  ];
 
-  if (mode === 'EXPLORE') {
-    const allowed = ['read_file', 'list_dir', 'search_code', 'lsp_goto_definition', 'lsp_find_references', 'lsp_hover'];
-    tools = tools.filter(t => allowed.includes(t.function.name));
-  } else if (mode === 'SCOUT') {
-    const allowed = ['web_fetch', 'web_search'];
-    tools = tools.filter(t => allowed.includes(t.function.name));
-  } else if (mode === 'PLAN') {
-    const readOnly = ['read_file', 'list_dir', 'search_code', 'lsp_goto_definition', 'lsp_find_references', 'lsp_hover', 'web_fetch', 'web_search'];
-    tools = tools.filter(t => readOnly.includes(t.function.name));
-  } else if (mode === 'READ_ONLY') {
+  if (mode === "EXPLORE") {
+    const allowed = [
+      "read_file",
+      "list_dir",
+      "search_code",
+      "lsp_goto_definition",
+      "lsp_find_references",
+      "lsp_hover",
+    ];
+    tools = tools.filter((t) => allowed.includes(t.function.name));
+  } else if (mode === "SCOUT") {
+    const allowed = ["web_fetch", "web_search"];
+    tools = tools.filter((t) => allowed.includes(t.function.name));
+  } else if (mode === "PLAN") {
+    const readOnly = [
+      "read_file",
+      "list_dir",
+      "search_code",
+      "lsp_goto_definition",
+      "lsp_find_references",
+      "lsp_hover",
+      "web_fetch",
+      "web_search",
+    ];
+    tools = tools.filter((t) => readOnly.includes(t.function.name));
+  } else if (mode === "READ_ONLY") {
     // Pillar 5 — strip every mutation tool. The agent sees
     // only read + search + LSP navigation.
-    tools = tools.filter(t => !MUTATION_TOOL_NAMES.has(t.function.name));
+    tools = tools.filter((t) => !MUTATION_TOOL_NAMES.has(t.function.name));
   }
 
   return tools;
@@ -228,7 +304,7 @@ export function getActiveTools(mode?: string): ChatToolDefinition[] {
  * mutation tools are not even visible to the model. This is
  * the dynamic-tool-masking layer of Pillar 5.
  */
-export function classifyExecutionRole(task: string): 'BUILD' | 'READ_ONLY' {
+export function classifyExecutionRole(task: string): "BUILD" | "READ_ONLY" {
   const lower = task.toLowerCase();
   // Read-only keywords — the agent must answer a question or
   // describe something, not modify files.
@@ -244,11 +320,10 @@ export function classifyExecutionRole(task: string): 'BUILD' | 'READ_ONLY' {
     /\b(read[\s-]only)\b/,
   ];
   for (const pattern of readOnlyPatterns) {
-    if (pattern.test(lower)) return 'READ_ONLY';
+    if (pattern.test(lower)) return "READ_ONLY";
   }
-  return 'BUILD';
+  return "BUILD";
 }
-
 
 /* ──────────────────────── Tool Executor ──────────────────────── */
 
@@ -280,7 +355,7 @@ export interface ToolExecutionOptions {
    * run under read-only modes. Optional — when omitted, mutating
    * tools default to allowing execution.
    */
-  mode?: 'PLAN' | 'BUILD' | 'EXPLORE' | 'SCOUT';
+  mode?: "PLAN" | "BUILD" | "EXPLORE" | "SCOUT";
   /** Paths outside the workspace that have been temporarily whitelisted by user prompt. */
   allowedOutsidePaths?: Set<string>;
   /**
@@ -313,7 +388,8 @@ export function getOrCreateRunId(): string {
   // Use crypto.randomBytes for collision-free staging namespace IDs.
   // Math.random() has a 1-in-2^30 collision chance; crypto.randomBytes
   // is cryptographically secure and eliminates any collision risk.
-  cachedRunId = randomBytes(6).toString('hex') + Date.now().toString(36).slice(-6);
+  cachedRunId =
+    randomBytes(6).toString("hex") + Date.now().toString(36).slice(-6);
   return cachedRunId;
 }
 
@@ -333,7 +409,10 @@ let cachedLspGate: LspPreSaveGate | null = null;
  * no-op when no language server is installed on `PATH`, matching
  * the existing `LspManager` behaviour.
  */
-export function getOrCreateLspGate(cwd: string, safety: SafetyConfig): LspPreSaveGate {
+export function getOrCreateLspGate(
+  cwd: string,
+  safety: SafetyConfig,
+): LspPreSaveGate {
   if (cachedLspGate) return cachedLspGate;
   cachedLspGate = new LspPreSaveGate({
     mode: safety.lspPreSave,
@@ -347,13 +426,13 @@ export function resetLspGate(): void {
   cachedLspGate = null;
 }
 
-type GateAction = 'read' | 'write' | 'delete' | 'command';
+type GateAction = "read" | "write" | "delete" | "command";
 
 function riskOf(action: GateAction, detail: string): RiskLevel {
-  if (action === 'command') return classifyCommand(detail);
-  if (action === 'delete') return 'high';
-  if (action === 'write') return 'medium';
-  return 'low';
+  if (action === "command") return classifyCommand(detail);
+  if (action === "delete") return "high";
+  if (action === "write") return "medium";
+  return "low";
 }
 
 interface GateOutcome {
@@ -361,7 +440,7 @@ interface GateOutcome {
   needsConfirmation: boolean;
   reason: string;
   risk: RiskLevel;
-  source: PermissionCheckResult['source'];
+  source: PermissionCheckResult["source"];
   matchedRule: string | null;
 }
 
@@ -375,7 +454,7 @@ function evaluateToolGate(
 ): GateOutcome {
   const check = checkPermission(toolName, args, cwd, policy);
   const risk = riskOf(action, detail);
-  if (check.decision === 'deny') {
+  if (check.decision === "deny") {
     return {
       allowed: false,
       needsConfirmation: false,
@@ -387,7 +466,7 @@ function evaluateToolGate(
   }
   return {
     allowed: true,
-    needsConfirmation: check.decision === 'ask',
+    needsConfirmation: check.decision === "ask",
     reason: check.reason,
     risk,
     source: check.source,
@@ -413,7 +492,7 @@ async function applyAtomicWrite(
   session: TaskSession | undefined,
 ): Promise<{ result: string; staged: boolean; created: boolean }> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', true);
+  const resolved = guard.resolve(filePath, "file", true);
   const existed = fs.existsSync(resolved);
 
   if (!safety?.atomicStaging) {
@@ -423,10 +502,12 @@ async function applyAtomicWrite(
     if (!fs.existsSync(parentDir)) {
       fs.mkdirSync(parentDir, { recursive: true });
     }
-    fs.writeFileSync(resolved, content, 'utf-8');
+    fs.writeFileSync(resolved, content, "utf-8");
     session?.noteChange(resolved);
     return {
-      result: existed ? `File updated: ${filePath}` : `File created: ${filePath}`,
+      result: existed
+        ? `File updated: ${filePath}`
+        : `File created: ${filePath}`,
       staged: false,
       created: !existed,
     };
@@ -454,17 +535,20 @@ async function applyAtomicWrite(
     // (unclosed `try` block, dangling `catch` keyword, etc.).
     syntaxHealthCheck: async (e, content) => {
       const lower = e.targetPath.toLowerCase();
-      const isJs = lower.endsWith('.js') || lower.endsWith('.cjs') || lower.endsWith('.mjs');
-      const isTs = lower.endsWith('.ts') || lower.endsWith('.tsx');
+      const isJs =
+        lower.endsWith(".js") ||
+        lower.endsWith(".cjs") ||
+        lower.endsWith(".mjs");
+      const isTs = lower.endsWith(".ts") || lower.endsWith(".tsx");
       if (!isJs && !isTs) return;
       const verdict = syntaxHealthCheck(content);
-      if (verdict.state === 'ok') return;
+      if (verdict.state === "ok") return;
       const e2 = new Error(
         `Structural syntax check failed for ${path.basename(e.targetPath)}: ` +
-        `${formatSyntaxVerdict(verdict)} ` +
-        `The staged write was rejected to protect the target file.`,
+          `${formatSyntaxVerdict(verdict)} ` +
+          `The staged write was rejected to protect the target file.`,
       );
-      (e2 as Error & { code?: string }).code = 'FIXO_STRUCTURAL_SYNTAX';
+      (e2 as Error & { code?: string }).code = "FIXO_STRUCTURAL_SYNTAX";
       throw e2;
     },
   });
@@ -485,15 +569,21 @@ async function applyAtomicWrite(
 async function askUnsafeCommandPermission(
   command: string,
   reason: string,
-  allowWithoutPrompt?: boolean
+  allowWithoutPrompt?: boolean,
 ): Promise<boolean> {
   if (allowWithoutPrompt) {
-    console.log(`\n${colors.yellow}⚠ Security Warning: Executing potentially unsafe command: ${colors.bold}${command}${colors.reset}\nReason: ${reason}`);
+    console.log(
+      `\n${colors.yellow}⚠ Security Warning: Executing potentially unsafe command: ${colors.bold}${command}${colors.reset}\nReason: ${reason}`,
+    );
     return true;
   }
-  
-  console.log(`\n${colors.red}${colors.bold}⚠ SECURITY WARNING:${colors.reset}`);
-  console.log(`The agent is attempting to execute a command that violates safety sandboxing:`);
+
+  console.log(
+    `\n${colors.red}${colors.bold}⚠ SECURITY WARNING:${colors.reset}`,
+  );
+  console.log(
+    `The agent is attempting to execute a command that violates safety sandboxing:`,
+  );
   console.log(`- Command: ${colors.yellow}${command}${colors.reset}`);
   console.log(`- Danger: ${colors.red}${reason}${colors.reset}\n`);
 
@@ -519,13 +609,13 @@ export async function executeTool(
   const event: ToolCallEvent = {
     tool: name,
     args,
-    result: '',
+    result: "",
     isWrite: false,
   };
 
   // Check for user cancellation before starting any tool work
   if (options.signal?.aborted) {
-    event.result = 'Error: Task cancelled by user.';
+    event.result = "Error: Task cancelled by user.";
     return event;
   }
 
@@ -541,16 +631,28 @@ export async function executeTool(
   };
 
   try {
-    const policy = options.policy ?? options.session?.policy ?? 'shell-confirm';
+    const policy = options.policy ?? options.session?.policy ?? "shell-confirm";
 
     // Auto-init git repo on first mutating tool call (Finding C)
     if (MUTATION_TOOL_NAMES.has(name)) {
       const git = new GitManager(cwd);
       if (!git.isGitRepo()) {
         try {
-          spawnSync('git', ['init'], { cwd, encoding: 'utf-8', stdio: 'ignore' });
-          spawnSync('git', ['add', '.'], { cwd, encoding: 'utf-8', stdio: 'ignore' });
-          spawnSync('git', ['commit', '-m', 'chore: initial checkpoint by fixo'], { cwd, encoding: 'utf-8', stdio: 'ignore' });
+          spawnSync("git", ["init"], {
+            cwd,
+            encoding: "utf-8",
+            stdio: "ignore",
+          });
+          spawnSync("git", ["add", "."], {
+            cwd,
+            encoding: "utf-8",
+            stdio: "ignore",
+          });
+          spawnSync(
+            "git",
+            ["commit", "-m", "chore: initial checkpoint by fixo"],
+            { cwd, encoding: "utf-8", stdio: "ignore" },
+          );
         } catch (e) {
           // Ignore if git fails (e.g. no user.name, empty directory, or git not installed)
         }
@@ -561,143 +663,305 @@ export async function executeTool(
     // Run any user-defined pre-tool hooks. A `deny` decision
     // short-circuits the call; a `modify` decision replaces
     // args after a `WorkspaceGuard` re-check.
-    const sessionId = options.session?.id ?? 'no-session';
-    const preHook = fireHooks(cwd, 'PreToolUse', {
+    const sessionId = options.session?.id ?? "no-session";
+    const preHook = fireHooks(cwd, "PreToolUse", {
       tool: name,
       args: args as Record<string, unknown>,
       sessionId,
     });
-    if (preHook.fired && preHook.decision === 'deny') {
-      const reason = preHook.reason ?? 'pre-tool hook denied';
-      event.result = `Error: hook denied (${preHook.hookId ?? 'unknown'}): ${reason}`;
-      options.session?.record('tool_denied', { tool: name, reason, args });
-      renderToolCall({ kind: 'error', name, detail: `hook denied: ${reason}` });
+    if (preHook.fired && preHook.decision === "deny") {
+      const reason = preHook.reason ?? "pre-tool hook denied";
+      event.result = `Error: hook denied (${preHook.hookId ?? "unknown"}): ${reason}`;
+      options.session?.record("tool_denied", { tool: name, reason, args });
+      renderToolCall({ kind: "error", name, detail: `hook denied: ${reason}` });
       return event;
     }
-    if (preHook.fired && preHook.decision === 'modify' && preHook.modifiedArgs) {
+    if (
+      preHook.fired &&
+      preHook.decision === "modify" &&
+      preHook.modifiedArgs
+    ) {
       const applied = applyModifiedArgs(
         cwd,
         args as Record<string, unknown>,
         preHook.modifiedArgs,
       );
       if (!applied.ok) {
-        const reason = applied.reason ?? 'pre-hook modify rejected';
+        const reason = applied.reason ?? "pre-hook modify rejected";
         event.result = `Error: hook modify rejected: ${reason}`;
-        options.session?.record('tool_denied', { tool: name, reason, args });
-        renderToolCall({ kind: 'error', name, detail: `hook modify rejected: ${reason}` });
+        options.session?.record("tool_denied", { tool: name, reason, args });
+        renderToolCall({
+          kind: "error",
+          name,
+          detail: `hook modify rejected: ${reason}`,
+        });
         return event;
       }
       for (const [k, v] of Object.entries(applied.args)) {
-        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+        if (
+          typeof v === "string" ||
+          typeof v === "number" ||
+          typeof v === "boolean"
+        ) {
           args[k] = String(v);
         }
       }
     }
 
-    const plugin = loadedPlugins.find(p => p.tools.some(t => t.function.name === name));
+    const plugin = loadedPlugins.find((p) =>
+      p.tools.some((t) => t.function.name === name),
+    );
     if (plugin) {
-      if (options.signal?.aborted) { event.result = 'Error: Task cancelled by user.'; return event; }
-      const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
-      const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
-      if (!decision.allowed) {
-        event.result = `Error: ${decision.reason}`;
-        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
+      if (options.signal?.aborted) {
+        event.result = "Error: Task cancelled by user.";
         return event;
       }
-      options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
+      const action: GateAction =
+        name.includes("read") ||
+        name.includes("get") ||
+        name.includes("list") ||
+        name.includes("view")
+          ? "read"
+          : "write";
+      const decision = evaluateToolGate(
+        name,
+        args as Record<string, unknown>,
+        cwd,
+        policy,
+        action,
+        name,
+      );
+      if (!decision.allowed) {
+        event.result = `Error: ${decision.reason}`;
+        options.session?.record("tool_denied", {
+          tool: name,
+          reason: decision.reason,
+          args,
+          matchedRule: decision.matchedRule,
+          source: decision.source,
+        });
+        return event;
+      }
+      options.session?.record("tool_started", {
+        tool: name,
+        args,
+        risk: decision.risk,
+        matchedRule: decision.matchedRule,
+        source: decision.source,
+      });
       console.log(`  ${colors.dim}🔌 Plugin: ${name}${colors.reset}`);
       try {
-        event.result = await plugin.execute(name, args, { cwd, verbose, policy, options });
-        event.isWrite = action === 'write';
+        event.result = await plugin.execute(name, args, {
+          cwd,
+          verbose,
+          policy,
+          options,
+        });
+        event.isWrite = action === "write";
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         event.result = `Error: ${msg}`;
-        renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
+        renderToolCall({ kind: "error", name, detail: truncate(msg, 80) });
       }
-      options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
+      options.session?.record("tool_finished", {
+        tool: name,
+        result: truncate(event.result, 2000),
+        isWrite: event.isWrite,
+      });
       return event;
     }
 
     if (mcpManager.hasTool(name)) {
-      const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
-      const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
+      const action: GateAction =
+        name.includes("read") ||
+        name.includes("get") ||
+        name.includes("list") ||
+        name.includes("view")
+          ? "read"
+          : "write";
+      const decision = evaluateToolGate(
+        name,
+        args as Record<string, unknown>,
+        cwd,
+        policy,
+        action,
+        name,
+      );
       if (!decision.allowed) {
         event.result = `Error: ${decision.reason}`;
-        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
+        options.session?.record("tool_denied", {
+          tool: name,
+          reason: decision.reason,
+          args,
+          matchedRule: decision.matchedRule,
+          source: decision.source,
+        });
         return event;
       }
-      options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
+      options.session?.record("tool_started", {
+        tool: name,
+        args,
+        risk: decision.risk,
+        matchedRule: decision.matchedRule,
+        source: decision.source,
+      });
       console.log(`  ${colors.dim}🔌 MCP: ${name}${colors.reset}`);
       try {
         event.result = await mcpManager.executeTool(name, args);
-        event.isWrite = action === 'write';
+        event.isWrite = action === "write";
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         event.result = `Error: ${msg}`;
-        renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
+        renderToolCall({ kind: "error", name, detail: truncate(msg, 80) });
       }
-      options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
+      options.session?.record("tool_finished", {
+        tool: name,
+        result: truncate(event.result, 2000),
+        isWrite: event.isWrite,
+      });
       return event;
     }
 
     if (mcpBridgeManager.hasTool(name)) {
-      const action: GateAction = name.includes('read') || name.includes('get') || name.includes('list') || name.includes('view') ? 'read' : 'write';
-      const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, name);
+      const action: GateAction =
+        name.includes("read") ||
+        name.includes("get") ||
+        name.includes("list") ||
+        name.includes("view")
+          ? "read"
+          : "write";
+      const decision = evaluateToolGate(
+        name,
+        args as Record<string, unknown>,
+        cwd,
+        policy,
+        action,
+        name,
+      );
       if (!decision.allowed) {
         event.result = `Error: ${decision.reason}`;
-        options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
+        options.session?.record("tool_denied", {
+          tool: name,
+          reason: decision.reason,
+          args,
+          matchedRule: decision.matchedRule,
+          source: decision.source,
+        });
         return event;
       }
-      options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
+      options.session?.record("tool_started", {
+        tool: name,
+        args,
+        risk: decision.risk,
+        matchedRule: decision.matchedRule,
+        source: decision.source,
+      });
       console.log(`  ${colors.dim}🔌 Local MCP: ${name}${colors.reset}`);
       try {
         event.result = await mcpBridgeManager.executeTool(name, args);
-        event.isWrite = action === 'write';
+        event.isWrite = action === "write";
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         event.result = `Error: ${msg}`;
-        renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
+        renderToolCall({ kind: "error", name, detail: truncate(msg, 80) });
       }
-      options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
+      options.session?.record("tool_finished", {
+        tool: name,
+        result: truncate(event.result, 2000),
+        isWrite: event.isWrite,
+      });
       return event;
     }
 
-    const action: GateAction = name === 'run_command'
-      ? 'command'
-      : name === 'read_file' || name === 'search_code' || name === 'list_dir' || name === 'web_fetch' || name === 'web_search'
-        ? 'read'
-        : name === 'delete_file'
-          ? 'delete'
-          : 'write';
-    const policyTargetRaw = name === 'web_fetch' ? args.url : name === 'web_search' ? args.query : (args.command ?? args.path ?? '');
-    const policyTarget = typeof policyTargetRaw === 'string' ? policyTargetRaw : String(policyTargetRaw ?? '');
-    const decision = evaluateToolGate(name, args as Record<string, unknown>, cwd, policy, action, policyTarget);
+    const action: GateAction =
+      name === "run_command"
+        ? "command"
+        : name === "read_file" ||
+            name === "search_code" ||
+            name === "list_dir" ||
+            name === "web_fetch" ||
+            name === "web_search"
+          ? "read"
+          : name === "delete_file"
+            ? "delete"
+            : "write";
+    const policyTargetRaw =
+      name === "web_fetch"
+        ? args.url
+        : name === "web_search"
+          ? args.query
+          : (args.command ?? args.path ?? "");
+    const policyTarget =
+      typeof policyTargetRaw === "string"
+        ? policyTargetRaw
+        : String(policyTargetRaw ?? "");
+    const decision = evaluateToolGate(
+      name,
+      args as Record<string, unknown>,
+      cwd,
+      policy,
+      action,
+      policyTarget,
+    );
     if (!decision.allowed) {
       event.result = `Error: ${decision.reason}`;
-      options.session?.record('tool_denied', { tool: name, reason: decision.reason, args, matchedRule: decision.matchedRule, source: decision.source });
+      options.session?.record("tool_denied", {
+        tool: name,
+        reason: decision.reason,
+        args,
+        matchedRule: decision.matchedRule,
+        source: decision.source,
+      });
       return event;
     }
-    options.session?.record('tool_started', { tool: name, args, risk: decision.risk, matchedRule: decision.matchedRule, source: decision.source });
+    options.session?.record("tool_started", {
+      tool: name,
+      args,
+      risk: decision.risk,
+      matchedRule: decision.matchedRule,
+      source: decision.source,
+    });
 
     switch (name) {
-      case 'read_file': {
-        if (options.signal?.aborted) { event.result = 'Error: Task cancelled by user.'; return event; }
+      case "read_file": {
+        if (options.signal?.aborted) {
+          event.result = "Error: Task cancelled by user.";
+          return event;
+        }
         const guard = new WorkspaceGuard(cwd, options?.allowedOutsidePaths);
-        const resolved = guard.resolve(args.path, 'file', false);
-        setSpinner({ kind: 'read', name: 'Read', detail: shortenPath(args.path, cwd) });
-        const budgetPct = options.safety?.predictiveBudgetPct ?? DEFAULT_PREDICTIVE_BUDGET_PCT;
+        const resolved = guard.resolve(args.path, "file", false);
+        setSpinner({
+          kind: "read",
+          name: "Read",
+          detail: shortenPath(args.path, cwd),
+        });
+        const budgetPct =
+          options.safety?.predictiveBudgetPct ?? DEFAULT_PREDICTIVE_BUDGET_PCT;
         // Skip the predictive gate when it is explicitly disabled
         // (>=1.0) or when no model is configured (we cannot map
         // model → context window without one).
         if (budgetPct < 1 && options.model) {
           const estimate = estimateReadCost(resolved, options.model);
           const convoTokens = options.getConversationTokens?.() ?? 0;
-          const deferDecision = shouldDeferRead(estimate, convoTokens, options.model, budgetPct);
+          const deferDecision = shouldDeferRead(
+            estimate,
+            convoTokens,
+            options.model,
+            budgetPct,
+          );
           if (deferDecision.defer) {
-            event.result = formatPredictiveGateDirective(args.path, estimate, deferDecision);
+            event.result = formatPredictiveGateDirective(
+              args.path,
+              estimate,
+              deferDecision,
+            );
             event.affectedPath = resolved;
-            setSpinner({ kind: 'read', name: 'Read', detail: `${shortenPath(args.path, cwd)} (deferred — predictive gate)` });
-            options.session?.record('predictive_gate_fired', {
+            setSpinner({
+              kind: "read",
+              name: "Read",
+              detail: `${shortenPath(args.path, cwd)} (deferred — predictive gate)`,
+            });
+            options.session?.record("predictive_gate_fired", {
               path: args.path,
               projectedTokens: estimate.projectedTokens,
               projectedTotal: deferDecision.projectedTotal,
@@ -717,41 +981,85 @@ export async function executeTool(
         break;
       }
 
-      case 'extract_symbols':
-        setSpinner({ kind: 'read', name: 'Symbols', detail: shortenPath(args.path, cwd) });
-        event.result = await executeExtractSymbols(args.path, cwd, options.session);
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+      case "extract_symbols":
+        setSpinner({
+          kind: "read",
+          name: "Symbols",
+          detail: shortenPath(args.path, cwd),
+        });
+        event.result = await executeExtractSymbols(
+          args.path,
+          cwd,
+          options.session,
+        );
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'extract_imports':
-        setSpinner({ kind: 'read', name: 'Imports', detail: shortenPath(args.path, cwd) });
-        event.result = await executeExtractImports(args.path, cwd, options.session);
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+      case "extract_imports":
+        setSpinner({
+          kind: "read",
+          name: "Imports",
+          detail: shortenPath(args.path, cwd),
+        });
+        event.result = await executeExtractImports(
+          args.path,
+          cwd,
+          options.session,
+        );
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'write_file':
-        setSpinner({ kind: 'write', name: 'Write', detail: shortenPath(args.path, cwd) });
-        event.result = await executeWriteFile(args.path, args.content, cwd, options);
+      case "write_file":
+        setSpinner({
+          kind: "write",
+          name: "Write",
+          detail: shortenPath(args.path, cwd),
+        });
+        event.result = await executeWriteFile(
+          args.path,
+          args.content,
+          cwd,
+          options,
+        );
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'run_command':
-        setSpinner({ kind: 'bash', name: 'Run', detail: truncate(args.command, 60) });
-        let safetyResult = { safe: true, reason: '' };
+      case "run_command":
+        setSpinner({
+          kind: "bash",
+          name: "Run",
+          detail: truncate(args.command, 60),
+        });
+        let safetyResult = { safe: true, reason: "" };
         try {
-          const { isCommandSafe } = await import('./command-parser.js');
+          const { isCommandSafe } = await import("./command-parser.js");
           const safety = await isCommandSafe(args.command, cwd);
           if (!safety.safe) {
-            safetyResult = { safe: false, reason: safety.reason || 'Unsafe command detected' };
+            safetyResult = {
+              safe: false,
+              reason: safety.reason || "Unsafe command detected",
+            };
           }
         } catch (err: any) {
           if (verbose) {
-            console.error('Failed to run AST command safety check, failing closed for security:', err.message);
+            console.error(
+              "Failed to run AST command safety check, failing closed for security:",
+              err.message,
+            );
           }
           safetyResult = {
             safe: false,
-            reason: `Error: AST command safety check failed and regex fallback is disabled for security reasons: ${err.message}`
+            reason: `Error: AST command safety check failed and regex fallback is disabled for security reasons: ${err.message}`,
           };
         }
 
@@ -759,7 +1067,7 @@ export async function executeTool(
           const allowed = await askUnsafeCommandPermission(
             args.command,
             safetyResult.reason,
-            options.allowWithoutPrompt
+            options.allowWithoutPrompt,
           );
           if (!allowed) {
             event.result = `Error: Security block - Execution denied for unsafe command: ${safetyResult.reason}`;
@@ -775,162 +1083,321 @@ export async function executeTool(
         );
         break;
 
-      case 'search_code':
-        setSpinner({ kind: 'search', name: 'Search', detail: `"${truncate(args.query, 40)}" in ${args.path ?? '.'}` });
-        event.result = executeSearchCode(args.query, args.path, args.file_pattern, cwd);
+      case "search_code": {
+        try {
+          const query = args.query;
+          if (query === undefined || query === null) {
+            event.result = "No matches found for the given query.";
+            break;
+          }
+          const queryStr = String(query);
+          setSpinner({
+            kind: "search",
+            name: "Search",
+            detail: `"${truncate(queryStr, 40)}" in ${args.path ?? "."}`,
+          });
+          event.result = executeSearchCode(
+            queryStr,
+            args.path,
+            args.file_pattern,
+            cwd,
+          );
+        } catch (err: any) {
+          event.result = `search_code error: ${err.message || String(err)}. Try a different query or use List/Read instead.`;
+        }
         break;
+      }
 
-      case 'list_dir':
-        setSpinner({ kind: 'read', name: 'List', detail: args.path ?? '.' });
+      case "list_dir":
+        setSpinner({ kind: "read", name: "List", detail: args.path ?? "." });
         event.result = executeListDir(args.path, cwd);
         break;
 
-      case 'delete_file':
-        setSpinner({ kind: 'write', name: 'Delete', detail: shortenPath(args.path, cwd) });
+      case "delete_file":
+        setSpinner({
+          kind: "write",
+          name: "Delete",
+          detail: shortenPath(args.path, cwd),
+        });
         event.result = executeDeleteFile(args.path, cwd, options.session);
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'apply_patch':
-        setSpinner({ kind: 'write', name: 'Patch', detail: 'unified diff' });
+      case "apply_patch":
+        setSpinner({ kind: "write", name: "Patch", detail: "unified diff" });
         event.result = await executeApplyPatch(args.patch, cwd, options);
         event.isWrite = true;
         break;
 
-      case 'replace_range':
-        setSpinner({ kind: 'write', name: 'Replace', detail: shortenPath(args.path, cwd) });
-        event.result = await executeReplaceRange(args.path, Number(args.startLine), Number(args.endLine), args.content, cwd, options);
+      case "replace_range":
+        setSpinner({
+          kind: "write",
+          name: "Replace",
+          detail: shortenPath(args.path, cwd),
+        });
+        event.result = await executeReplaceRange(
+          args.path,
+          Number(args.startLine),
+          Number(args.endLine),
+          args.content,
+          cwd,
+          options,
+        );
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'insert_after':
-        setSpinner({ kind: 'write', name: 'Insert', detail: shortenPath(args.path, cwd) });
-        event.result = await executeInsertAfter(args.path, args.anchor, args.content, cwd, options);
+      case "insert_after":
+        setSpinner({
+          kind: "write",
+          name: "Insert",
+          detail: shortenPath(args.path, cwd),
+        });
+        event.result = await executeInsertAfter(
+          args.path,
+          args.anchor,
+          args.content,
+          cwd,
+          options,
+        );
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'rename_file':
-        setSpinner({ kind: 'write', name: 'Rename', detail: `${args.from} -> ${args.to}` });
-        event.result = await executeRenameFile(args.from, args.to, cwd, options);
+      case "rename_file":
+        setSpinner({
+          kind: "write",
+          name: "Rename",
+          detail: `${args.from} -> ${args.to}`,
+        });
+        event.result = await executeRenameFile(
+          args.from,
+          args.to,
+          cwd,
+          options,
+        );
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.to, 'file');
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.to, "file");
         break;
 
-      case 'create_branch':
-        setSpinner({ kind: 'write', name: 'Branch', detail: args.branchName });
+      case "create_branch":
+        setSpinner({ kind: "write", name: "Branch", detail: args.branchName });
         event.result = createBranch(cwd, args.branchName);
         event.isWrite = true;
         break;
 
-      case 'commit_changes':
-        setSpinner({ kind: 'write', name: 'Commit', detail: truncate(args.message, 60) });
+      case "commit_changes":
+        setSpinner({
+          kind: "write",
+          name: "Commit",
+          detail: truncate(args.message, 60),
+        });
         event.result = commitChanges(cwd, args.message);
         event.isWrite = true;
         break;
 
-      case 'push_branch':
-        setSpinner({ kind: 'write', name: 'Push', detail: args.remote || 'origin' });
-        event.result = pushBranch(cwd, args.remote || 'origin');
+      case "push_branch":
+        setSpinner({
+          kind: "write",
+          name: "Push",
+          detail: args.remote || "origin",
+        });
+        event.result = pushBranch(cwd, args.remote || "origin");
         event.isWrite = true;
         break;
 
-      case 'create_pull_request':
-        setSpinner({ kind: 'write', name: 'PR', detail: `base: ${args.baseBranch || 'main'}` });
+      case "create_pull_request":
+        setSpinner({
+          kind: "write",
+          name: "PR",
+          detail: `base: ${args.baseBranch || "main"}`,
+        });
         if (!options.client) {
-          throw new Error('Agent client is required to generate pull request description');
+          throw new Error(
+            "Agent client is required to generate pull request description",
+          );
         }
-        event.result = await createPullRequest(cwd, options.client, options.model || 'auto', args.baseBranch || 'main');
+        event.result = await createPullRequest(
+          cwd,
+          options.client,
+          options.model || "auto",
+          args.baseBranch || "main",
+        );
         event.isWrite = true;
         break;
 
-      case 'lsp_goto_definition': {
+      case "lsp_goto_definition": {
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        setSpinner({ kind: 'read', name: 'Definition', detail: `${fileBasename}:${line}:${char}` });
+        setSpinner({
+          kind: "read",
+          name: "Definition",
+          detail: `${fileBasename}:${line}:${char}`,
+        });
 
         const manager = getLspManager(cwd);
-        const resolvedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        const resolvedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         const def = await manager.gotoDefinition(resolvedPath, line, char);
         event.result = JSON.stringify(def || null, null, 2);
         break;
       }
 
-      case 'lsp_find_references': {
+      case "lsp_find_references": {
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        setSpinner({ kind: 'read', name: 'References', detail: `${fileBasename}:${line}:${char}` });
+        setSpinner({
+          kind: "read",
+          name: "References",
+          detail: `${fileBasename}:${line}:${char}`,
+        });
 
         const manager = getLspManager(cwd);
-        const resolvedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        const resolvedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         const refs = await manager.findReferences(resolvedPath, line, char);
         event.result = JSON.stringify(refs || null, null, 2);
         break;
       }
 
-      case 'lsp_hover': {
+      case "lsp_hover": {
         const line = Number(args.line);
         const char = Number(args.character);
         const fileBasename = path.basename(args.path);
-        setSpinner({ kind: 'read', name: 'Hover', detail: `${fileBasename}:${line}:${char}` });
+        setSpinner({
+          kind: "read",
+          name: "Hover",
+          detail: `${fileBasename}:${line}:${char}`,
+        });
 
         const manager = getLspManager(cwd);
-        const resolvedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        const resolvedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         const hoverRes = await manager.hover(resolvedPath, line, char);
         event.result = JSON.stringify(hoverRes || null, null, 2);
         break;
       }
 
-      case 'web_fetch':
-        setSpinner({ kind: 'search', name: 'Fetch', detail: args.url });
+      case "web_fetch":
+        setSpinner({ kind: "search", name: "Fetch", detail: args.url });
         event.result = await webFetch(args.url);
         break;
 
-      case 'web_search':
-        setSpinner({ kind: 'search', name: 'Search', detail: truncate(args.query, 40) });
+      case "web_search":
+        setSpinner({
+          kind: "search",
+          name: "Search",
+          detail: truncate(args.query, 40),
+        });
         event.result = await webSearch(args.query);
         break;
 
-      case 'str_replace':
-        setSpinner({ kind: 'write', name: 'Surgical', detail: shortenPath(args.path, cwd) });
-        event.result = await executeStrReplace(args as unknown as StrReplaceArgs, cwd, options);
+      case "str_replace":
+        setSpinner({
+          kind: "write",
+          name: "Surgical",
+          detail: shortenPath(args.path, cwd),
+        });
+        event.result = await executeStrReplace(
+          args as unknown as StrReplaceArgs,
+          cwd,
+          options,
+        );
         event.isWrite = true;
-        event.affectedPath = new WorkspaceGuard(cwd, options?.allowedOutsidePaths).resolve(args.path, 'file');
+        event.affectedPath = new WorkspaceGuard(
+          cwd,
+          options?.allowedOutsidePaths,
+        ).resolve(args.path, "file");
         break;
 
-      case 'glob_files':
-        setSpinner({ kind: 'search', name: 'Glob', detail: truncate(args.pattern, 60) });
-        event.result = await executeGlobFiles(args as unknown as GlobArgs, cwd, options);
+      case "glob_files":
+        setSpinner({
+          kind: "search",
+          name: "Glob",
+          detail: truncate(args.pattern, 60),
+        });
+        event.result = await executeGlobFiles(
+          args as unknown as GlobArgs,
+          cwd,
+          options,
+        );
         break;
 
-      case 'todo_read':
-        setSpinner({ kind: 'search', name: 'Todo', detail: 'read' });
+      case "todo_read":
+        setSpinner({ kind: "search", name: "Todo", detail: "read" });
         event.result = executeTodoRead(cwd);
         break;
 
-      case 'todo_write':
-        setSpinner({ kind: 'write', name: 'Todo', detail: String((args as { op?: string }).op ?? 'add') });
-        event.result = await executeTodoWrite(args as unknown as TodoWriteArgs, cwd, options);
+      case "todo_write":
+        setSpinner({
+          kind: "write",
+          name: "Todo",
+          detail: String((args as { op?: string }).op ?? "add"),
+        });
+        event.result = await executeTodoWrite(
+          args as unknown as TodoWriteArgs,
+          cwd,
+          options,
+        );
         event.isWrite = true;
         break;
 
-      case 'run_command_async':
-        setSpinner({ kind: 'bash', name: 'Async', detail: truncate(args.cmd, 30) });
-        event.result = await executeRunCommandAsync(args as unknown as RunCommandAsyncArgs, cwd, options);
+      case "run_command_async":
+        setSpinner({
+          kind: "bash",
+          name: "Async",
+          detail: truncate(args.cmd, 30),
+        });
+        event.result = await executeRunCommandAsync(
+          args as unknown as RunCommandAsyncArgs,
+          cwd,
+          options,
+        );
         break;
 
-      case 'poll_command_status':
-        setSpinner({ kind: 'bash', name: 'Poll', detail: String((args as { jobId?: string }).jobId ?? '?') });
-        event.result = executePollCommandStatus(args as unknown as PollCommandStatusArgs, cwd);
+      case "poll_command_status":
+        setSpinner({
+          kind: "bash",
+          name: "Poll",
+          detail: String((args as { jobId?: string }).jobId ?? "?"),
+        });
+        event.result = executePollCommandStatus(
+          args as unknown as PollCommandStatusArgs,
+          cwd,
+        );
         break;
 
-      case 'kill_command':
-        setSpinner({ kind: 'bash', name: 'Kill', detail: String((args as { jobId?: string }).jobId ?? '?') });
-        event.result = executeKillCommand(args as unknown as KillCommandArgs, cwd);
+      case "kill_command":
+        setSpinner({
+          kind: "bash",
+          name: "Kill",
+          detail: String((args as { jobId?: string }).jobId ?? "?"),
+        });
+        event.result = executeKillCommand(
+          args as unknown as KillCommandArgs,
+          cwd,
+        );
         break;
 
       default:
@@ -943,7 +1410,7 @@ export async function executeTool(
       (inlineSpinner as InlineSpinnerHandle).fail(truncate(msg, 80));
       inlineSpinner = null;
     } else {
-      renderToolCall({ kind: 'error', name, detail: truncate(msg, 80) });
+      renderToolCall({ kind: "error", name, detail: truncate(msg, 80) });
     }
   }
 
@@ -954,30 +1421,38 @@ export async function executeTool(
   if (inlineSpinner) {
     const handle = inlineSpinner as InlineSpinnerHandle;
     const elapsedMs = Date.now() - toolStartedAt;
-    const elapsedStr = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
-    const failed = typeof event.result === 'string' && event.result.startsWith('Error:');
+    const elapsedStr =
+      elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
+    const failed =
+      typeof event.result === "string" && event.result.startsWith("Error:");
     if (failed) {
-      handle.fail(`${truncate(event.result.replace(/^Error:\s*/, ''), 60)} (${elapsedStr})`);
+      handle.fail(
+        `${truncate(event.result.replace(/^Error:\s*/, ""), 60)} (${elapsedStr})`,
+      );
     } else {
       handle.succeed(`done (${elapsedStr})`);
     }
     inlineSpinner = null;
   }
 
-  options.session?.record('tool_finished', { tool: name, result: truncate(event.result, 2000), isWrite: event.isWrite });
+  options.session?.record("tool_finished", {
+    tool: name,
+    result: truncate(event.result, 2000),
+    isWrite: event.isWrite,
+  });
 
   // ──── PostToolUse hooks (§3.4) ────
   // Fire any user-defined post-tool hooks. The tool has
   // already executed; we only emit telemetry + honour a
   // `deny` decision by appending a marker to the result so
   // the caller knows the post-hook flagged it.
-  const postHook = fireHooks(cwd, 'PostToolUse', {
+  const postHook = fireHooks(cwd, "PostToolUse", {
     tool: name,
     args: args as Record<string, unknown>,
-    sessionId: options.session?.id ?? 'no-session',
+    sessionId: options.session?.id ?? "no-session",
   });
-  if (postHook.fired && postHook.decision === 'deny') {
-    const reason = postHook.reason ?? 'post-tool hook denied';
+  if (postHook.fired && postHook.decision === "deny") {
+    const reason = postHook.reason ?? "post-tool hook denied";
     event.result = `${event.result}\n[post-hook denied: ${reason}]`;
   }
 
@@ -994,7 +1469,7 @@ function executeReadFile(
   largeFileGateLines: number = 350,
 ): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', false);
+  const resolved = guard.resolve(filePath, "file", false);
 
   if (!fs.existsSync(resolved)) {
     return `Error: File not found: ${filePath}`;
@@ -1003,12 +1478,12 @@ function executeReadFile(
   const baseName = path.basename(resolved).toLowerCase();
   const lowerPath = resolved.toLowerCase();
   if (
-    baseName === '.env' ||
-    baseName.startsWith('.env.') ||
-    baseName === 'id_rsa' ||
-    baseName === 'providers.json' ||
-    lowerPath.includes('/.ssh/') ||
-    lowerPath.endsWith('.pem')
+    baseName === ".env" ||
+    baseName.startsWith(".env.") ||
+    baseName === "id_rsa" ||
+    baseName === "providers.json" ||
+    lowerPath.includes("/.ssh/") ||
+    lowerPath.endsWith(".pem")
   ) {
     return `Error: Access to sensitive file "${filePath}" is blocked for security reasons.`;
   }
@@ -1047,7 +1522,7 @@ function executeReadFile(
     );
   }
 
-  const content = fs.readFileSync(resolved, 'utf-8');
+  const content = fs.readFileSync(resolved, "utf-8");
   session?.noteRead(resolved);
   return content;
 }
@@ -1059,7 +1534,7 @@ function executeReadFile(
 function countLines(filePath: string): number {
   let count = 0;
   let lastCharWasNewline = true;
-  const stream = fs.openSync(filePath, 'r');
+  const stream = fs.openSync(filePath, "r");
   try {
     const buf = Buffer.allocUnsafe(64 * 1024);
     let bytesRead = 0;
@@ -1115,14 +1590,14 @@ async function executeExtractSymbols(
   session?: TaskSession,
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', true);
+  const resolved = guard.resolve(filePath, "file", true);
   if (!fs.existsSync(resolved)) {
     return `Error: File not found: ${filePath}`;
   }
   if (guard.isBinaryFile(resolved)) {
     return `Error: File appears to be binary: ${filePath}`;
   }
-  const content = fs.readFileSync(resolved, 'utf-8');
+  const content = fs.readFileSync(resolved, "utf-8");
   const language = resolveLanguageId(resolved);
   const parser = await ParserFactory.getParser();
   const symbols: SymbolInfo[] = parser.extractSymbols(content, language);
@@ -1131,9 +1606,10 @@ async function executeExtractSymbols(
     return `No symbols detected in '${filePath}' (language=${language}).`;
   }
   const lines = symbols.map(
-    (s) => `- [${s.kind}${s.exported ? ', exported' : ''}] ${s.name} (line ${s.line})`,
+    (s) =>
+      `- [${s.kind}${s.exported ? ", exported" : ""}] ${s.name} (line ${s.line})`,
   );
-  return `Symbols in '${filePath}' (${symbols.length}):\n${lines.join('\n')}`;
+  return `Symbols in '${filePath}' (${symbols.length}):\n${lines.join("\n")}`;
 }
 
 async function executeExtractImports(
@@ -1142,14 +1618,14 @@ async function executeExtractImports(
   session?: TaskSession,
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', true);
+  const resolved = guard.resolve(filePath, "file", true);
   if (!fs.existsSync(resolved)) {
     return `Error: File not found: ${filePath}`;
   }
   if (guard.isBinaryFile(resolved)) {
     return `Error: File appears to be binary: ${filePath}`;
   }
-  const content = fs.readFileSync(resolved, 'utf-8');
+  const content = fs.readFileSync(resolved, "utf-8");
   const language = resolveLanguageId(resolved);
   const parser = await ParserFactory.getParser();
   const imports: ImportInfo[] = parser.extractImports(content, language);
@@ -1158,11 +1634,11 @@ async function executeExtractImports(
     return `No imports detected in '${filePath}' (language=${language}).`;
   }
   const lines = imports.map((i) => {
-    const tag = i.isTypeOnly ? ' [type-only]' : '';
-    const syms = i.symbols.length > 0 ? ` {${i.symbols.join(', ')}}` : '';
+    const tag = i.isTypeOnly ? " [type-only]" : "";
+    const syms = i.symbols.length > 0 ? ` {${i.symbols.join(", ")}}` : "";
     return `- '${i.source}'${tag}${syms} (line ${i.line})`;
   });
-  return `Imports in '${filePath}' (${imports.length}):\n${lines.join('\n')}`;
+  return `Imports in '${filePath}' (${imports.length}):\n${lines.join("\n")}`;
 }
 
 function executeWriteFile(
@@ -1172,19 +1648,21 @@ function executeWriteFile(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', false);
+  const resolved = guard.resolve(filePath, "file", false);
 
   const baseName = path.basename(resolved).toLowerCase();
   const lowerPath = resolved.toLowerCase();
   if (
-    baseName === '.env' ||
-    baseName.startsWith('.env.') ||
-    baseName === 'id_rsa' ||
-    baseName === 'providers.json' ||
-    lowerPath.includes('/.ssh/') ||
-    lowerPath.endsWith('.pem')
+    baseName === ".env" ||
+    baseName.startsWith(".env.") ||
+    baseName === "id_rsa" ||
+    baseName === "providers.json" ||
+    lowerPath.includes("/.ssh/") ||
+    lowerPath.endsWith(".pem")
   ) {
-    return Promise.resolve(`Error: Access to sensitive file "${filePath}" is blocked for security reasons.`);
+    return Promise.resolve(
+      `Error: Access to sensitive file "${filePath}" is blocked for security reasons.`,
+    );
   }
   // Pillar 5 / Protection 1 — refuse to mutate the platform's
   // own runtime. This is the guard that prevents an autonomous
@@ -1199,35 +1677,52 @@ function executeWriteFile(
     throw err;
   }
   const mutation = options.session?.canMutate(resolved);
-  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  if (mutation && !mutation.ok)
+    return Promise.resolve(`Error: ${mutation.reason}`);
   options.session?.captureBefore(resolved);
   const existed = fs.existsSync(resolved);
 
-  return applyAtomicWrite(cwd, filePath, content, options.safety, options.session)
-    .then(() => {
-      if (!existed) return `File created: ${filePath}`;
-      // Existing file — print the diff for the user.
-      try {
-        const relativePath = guard.relative(resolved);
-        const result = spawnSync('git', ['diff', '--color=always', '--', relativePath], { cwd, encoding: 'utf-8' });
-        if (result.status === 0 && result.stdout) {
-          const diffOutput = result.stdout.trim();
-          if (diffOutput) {
-            console.log(`\n${colors.cyan}--- File Changes Diff ---${colors.reset}`);
-            const lines = diffOutput.split('\n');
-            if (lines.length > 50) {
-              console.log(lines.slice(0, 48).join('\n') + `\n${colors.yellow}... (diff truncated)${colors.reset}`);
-            } else {
-              console.log(diffOutput);
-            }
-            console.log(`${colors.cyan}-------------------------${colors.reset}\n`);
+  return applyAtomicWrite(
+    cwd,
+    filePath,
+    content,
+    options.safety,
+    options.session,
+  ).then(() => {
+    if (!existed) return `File created: ${filePath}`;
+    // Existing file — print the diff for the user.
+    try {
+      const relativePath = guard.relative(resolved);
+      const result = spawnSync(
+        "git",
+        ["diff", "--color=always", "--", relativePath],
+        { cwd, encoding: "utf-8" },
+      );
+      if (result.status === 0 && result.stdout) {
+        const diffOutput = result.stdout.trim();
+        if (diffOutput) {
+          console.log(
+            `\n${colors.cyan}--- File Changes Diff ---${colors.reset}`,
+          );
+          const lines = diffOutput.split("\n");
+          if (lines.length > 50) {
+            console.log(
+              lines.slice(0, 48).join("\n") +
+                `\n${colors.yellow}... (diff truncated)${colors.reset}`,
+            );
+          } else {
+            console.log(diffOutput);
           }
+          console.log(
+            `${colors.cyan}-------------------------${colors.reset}\n`,
+          );
         }
-      } catch {
-        // Fail-safe diff printing
       }
-      return `File updated: ${filePath}`;
-    });
+    } catch {
+      // Fail-safe diff printing
+    }
+    return `File updated: ${filePath}`;
+  });
 }
 
 function executeRunCommand(
@@ -1235,13 +1730,13 @@ function executeRunCommand(
   requestedCwd: string,
   workspaceRoot: string,
   session?: TaskSession,
-  sandboxMode?: import('../config.js').SandboxMode,
+  sandboxMode?: import("../config.js").SandboxMode,
 ): string {
   const guard = new WorkspaceGuard(workspaceRoot);
-  const commandCwd = guard.resolve(requestedCwd, 'command cwd', false);
+  const commandCwd = guard.resolve(requestedCwd, "command cwd", false);
   try {
     let result;
-    if (sandboxMode === 'os-sandbox') {
+    if (sandboxMode === "os-sandbox") {
       // Opt-in OS-level sandbox. The regex command-parser layer that
       // ran upstream is left in place — this is defence in depth.
       // If the platform binary is missing we surface a structured
@@ -1265,101 +1760,140 @@ function executeRunCommand(
       result = spawnSync(command, {
         shell: true,
         cwd: commandCwd,
-        encoding: 'utf-8',
+        encoding: "utf-8",
         timeout: 60_000, // 60 second timeout
         maxBuffer: 1024 * 1024, // 1MB max output
         env: redactedEnv(),
       });
     }
-    const output = redactSecrets([result.stdout ?? '', result.stderr ?? ''].filter(Boolean).join('\n'));
+    const output = redactSecrets(
+      [result.stdout ?? "", result.stderr ?? ""].filter(Boolean).join("\n"),
+    );
     const status = result.status ?? 0;
-    session?.record('command_finished', { command, cwd: guard.relative(commandCwd), status, output: truncate(output, 4000) });
+    session?.record("command_finished", {
+      command,
+      cwd: guard.relative(commandCwd),
+      status,
+      output: truncate(output, 4000),
+    });
     return output || `(command completed with code ${status})`;
   } catch (error: unknown) {
-    const err = error as { stdout?: string; stderr?: string; status?: number | string };
-    const stdout = err.stdout ?? '';
-    const stderr = err.stderr ?? '';
-    const code = err.status ?? 'unknown';
-    return redactSecrets(`Command exited with code ${code}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`.trim());
+    const err = error as {
+      stdout?: string;
+      stderr?: string;
+      status?: number | string;
+    };
+    const stdout = err.stdout ?? "";
+    const stderr = err.stderr ?? "";
+    const code = err.status ?? "unknown";
+    return redactSecrets(
+      `Command exited with code ${code}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`.trim(),
+    );
   }
 }
 
 function executeSearchCode(
-  query: string,
+  query: string | undefined | null,
   searchPath: string | undefined,
   filePattern: string | undefined,
   cwd: string,
 ): string {
-  const guard = new WorkspaceGuard(cwd);
-  const targetDir = searchPath ? guard.resolve(searchPath, 'search path', false) : cwd;
-
-  // Try ripgrep first
-  let hasRg = false;
   try {
-    const which = spawnSync('which', ['rg'], { encoding: 'utf-8' });
-    if (which.status === 0 && which.stdout.trim()) {
-      hasRg = true;
+    if (!query || query?.length === 0) {
+      return `No matches found for query '${query}'. Try different search terms or use the List tool to explore the directory structure instead.`;
     }
-  } catch (error: unknown) {
-    if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.warn(`[Debug Warning] Failed to determine if ripgrep (rg) is installed: ${msg}`);
+    const guard = new WorkspaceGuard(cwd);
+    const targetDir = searchPath
+      ? guard.resolve(searchPath, "search path", false)
+      : cwd;
+
+    // Try ripgrep first
+    let hasRg = false;
+    try {
+      const which = spawnSync("which", ["rg"], { encoding: "utf-8" });
+      if (which?.status === 0 && which?.stdout && which?.stdout?.trim?.()) {
+        hasRg = true;
+      }
+    } catch (error: unknown) {
+      if (
+        process.env.DEBUG ||
+        process.env.VERBOSE ||
+        process.argv.includes("--verbose")
+      ) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[Debug Warning] Failed to determine if ripgrep (rg) is installed: ${msg}`,
+        );
+      }
     }
+
+    let output = "";
+    if (hasRg) {
+      const args = ["-n", "--no-heading", "--color", "never", query];
+      if (filePattern) {
+        args.push("-g", filePattern);
+      }
+      args.push(targetDir);
+
+      const result = spawnSync("rg", args, {
+        encoding: "utf-8",
+        cwd,
+        maxBuffer: 512 * 1024,
+        timeout: 15000,
+      });
+      output = result?.stdout ?? "";
+    } else {
+      // Fallback to grep
+      const args = ["-rn", query];
+      if (filePattern) {
+        args.push(`--include=${filePattern}`);
+      }
+      args.push(targetDir);
+
+      const result = spawnSync("grep", args, {
+        encoding: "utf-8",
+        cwd,
+        maxBuffer: 512 * 1024,
+        timeout: 15000,
+      });
+      output = result?.stdout ?? "";
+    }
+
+    if (!output || !output?.trim?.() || output?.length === 0) {
+      return `No matches found for query '${query}'. Try different search terms or use the List tool to explore the directory structure instead.`;
+    }
+
+    // Make paths relative to workspace and limit to 50 results
+    const lines = output
+      ?.trim?.()
+      ?.split?.("\n")
+      ?.slice?.(0, 50)
+      ?.map?.((line) => {
+        if (cwd && line?.startsWith?.(cwd)) {
+          return line?.slice?.((cwd?.length ?? 0) + 1);
+        }
+        return line;
+      });
+
+    if (!lines || lines?.length === 0) {
+      return `No matches found for query '${query}'. Try different search terms or use the List tool to explore the directory structure instead.`;
+    }
+
+    return (
+      lines?.join?.("\n") ??
+      `No matches found for query '${query}'. Try different search terms or use the List tool to explore the directory structure instead.`
+    );
+  } catch (error: any) {
+    return `search_code encountered an error: ${error?.message || String(error)}. Try a different query or use List/Read tools instead.`;
   }
-
-  let output = '';
-  if (hasRg) {
-    const args = ['-n', '--no-heading', '--color', 'never', query];
-    if (filePattern) {
-      args.push('-g', filePattern);
-    }
-    args.push(targetDir);
-
-    const result = spawnSync('rg', args, {
-      encoding: 'utf-8',
-      cwd,
-      maxBuffer: 512 * 1024,
-      timeout: 15000,
-    });
-    output = result.stdout ?? '';
-  } else {
-    // Fallback to grep
-    const args = ['-rn', query];
-    if (filePattern) {
-      args.push(`--include=${filePattern}`);
-    }
-    args.push(targetDir);
-
-    const result = spawnSync('grep', args, {
-      encoding: 'utf-8',
-      cwd,
-      maxBuffer: 512 * 1024,
-      timeout: 15000,
-    });
-    output = result.stdout ?? '';
-  }
-
-  if (!output.trim()) {
-    return `No matches found for "${query}"`;
-  }
-
-  // Make paths relative to workspace and limit to 50 results
-  const lines = output.trim().split('\n').slice(0, 50).map((line) => {
-    if (line.startsWith(cwd)) {
-      return line.slice(cwd.length + 1);
-    }
-    return line;
-  });
-
-  return lines.join('\n');
 }
 
 function executeListDir(dirPath: string | undefined, cwd: string): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = dirPath ? guard.resolve(dirPath, 'directory', false) : cwd;
+  const resolved = dirPath ? guard.resolve(dirPath, "directory", false) : cwd;
 
   if (!fs.existsSync(resolved)) {
-    return `Error: Directory not found: ${dirPath ?? '.'}`;
+    return `Error: Directory not found: ${dirPath ?? "."}`;
   }
 
   const stat = fs.statSync(resolved);
@@ -1377,8 +1911,8 @@ function executeListDir(dirPath: string | undefined, cwd: string): string {
 
   // Filter and sort
   const filtered = entries
-    .filter((e) => !e.name.startsWith('.') || e.name === '.env.example')
-    .filter((e) => e.name !== 'node_modules')
+    .filter((e) => !e.name.startsWith(".") || e.name === ".env.example")
+    .filter((e) => e.name !== "node_modules")
     .sort((a, b) => {
       if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
       return a.name.localeCompare(b.name);
@@ -1390,39 +1924,36 @@ function executeListDir(dirPath: string | undefined, cwd: string): string {
     if (entry.isDirectory()) {
       lines.push(`📁 ${entry.name}/`);
     } else {
-      let size = '';
+      let size = "";
       try {
         const s = inv.fileStats(path.join(resolved, entry.name));
         size = formatSize(s.size);
       } catch {
         // Ignore
       }
-      lines.push(`   ${entry.name}${size ? `  (${size})` : ''}`);
+      lines.push(`   ${entry.name}${size ? `  (${size})` : ""}`);
     }
   }
 
-  return lines.join('\n') || '(empty directory)';
+  return lines.join("\n") || "(empty directory)";
 }
 
 /* ──────────────────────── Helpers ──────────────────────── */
 
-function resolvePath(filePath: string, cwd: string): string {
-  if (path.isAbsolute(filePath)) return filePath;
-  return path.resolve(cwd, filePath);
-}
-
 function shortenPath(filePath: string, cwd: string): string {
   try {
     const guard = new WorkspaceGuard(cwd);
-    return guard.relative(guard.resolve(filePath, 'path', false));
+    return guard.relative(guard.resolve(filePath, "path", false));
   } catch {
     return filePath;
   }
 }
 
-function truncate(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen - 1) + '…';
+function truncate(text: string | undefined | null, maxLen: number): string {
+  if (!text) return "";
+  const str = String(text);
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen - 1) + "…";
 }
 
 function formatSize(bytes: number): string {
@@ -1431,9 +1962,13 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-function executeDeleteFile(filePath: string, cwd: string, session?: TaskSession): string {
+function executeDeleteFile(
+  filePath: string,
+  cwd: string,
+  session?: TaskSession,
+): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', true);
+  const resolved = guard.resolve(filePath, "file", true);
   const mutation = session?.canMutate(resolved);
   if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
   session?.captureBefore(resolved);
@@ -1455,14 +1990,14 @@ function executeApplyPatch(
   cwd: string,
   options: ToolExecutionOptions = {},
 ): Promise<string> {
-  if (!patch?.trim()) return Promise.resolve('Error: patch is required.');
+  if (!patch?.trim()) return Promise.resolve("Error: patch is required.");
   const guard = new WorkspaceGuard(cwd);
   // Pillar 5 — refuse to apply patches that target platform
   // runtime files. The `git apply` invocation would otherwise
   // succeed in corrupting our own source.
   for (const file of filesFromPatch(patch)) {
     try {
-      const resolved = guard.resolve(file, 'patch target', true);
+      const resolved = guard.resolve(file, "patch target", true);
       guard.assertNotPlatformPath(resolved);
     } catch (err: unknown) {
       if (err instanceof PlatformPathLockedError) {
@@ -1475,20 +2010,29 @@ function executeApplyPatch(
     }
   }
   for (const file of filesFromPatch(patch)) {
-    try { options.session?.captureBefore(file); } catch { /* best effort */ }
+    try {
+      options.session?.captureBefore(file);
+    } catch {
+      /* best effort */
+    }
   }
-  const result = spawnSync('git', ['apply', '--whitespace=nowarn', '-'], {
+  const result = spawnSync("git", ["apply", "--whitespace=nowarn", "-"], {
     cwd,
     input: patch,
-    encoding: 'utf-8',
+    encoding: "utf-8",
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status !== 0) return Promise.resolve(`Patch failed:\n${result.stderr || result.stdout}`);
+  if (result.status !== 0)
+    return Promise.resolve(`Patch failed:\n${result.stderr || result.stdout}`);
   for (const file of filesFromPatch(patch)) {
-    try { options.session?.noteChange(file); } catch { /* best effort */ }
+    try {
+      options.session?.noteChange(file);
+    } catch {
+      /* best effort */
+    }
   }
-  return Promise.resolve('Patch applied.');
+  return Promise.resolve("Patch applied.");
 }
 
 function executeReplaceRange(
@@ -1500,24 +2044,39 @@ function executeReplaceRange(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', false);
+  const resolved = guard.resolve(filePath, "file", false);
   try {
     guard.assertNotPlatformPath(resolved);
   } catch (err: unknown) {
-    if (err instanceof PlatformPathLockedError) return Promise.resolve(err.message);
+    if (err instanceof PlatformPathLockedError)
+      return Promise.resolve(err.message);
     throw err;
   }
   const mutation = options.session?.canMutate(resolved);
-  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  if (mutation && !mutation.ok)
+    return Promise.resolve(`Error: ${mutation.reason}`);
   options.session?.captureBefore(resolved);
-  const original = fs.readFileSync(resolved, 'utf-8');
-  const lines = original.split('\n');
-  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length) {
-    return Promise.resolve(`Error: invalid line range ${startLine}-${endLine}.`);
+  const original = fs.readFileSync(resolved, "utf-8");
+  const lines = original.split("\n");
+  if (
+    !Number.isInteger(startLine) ||
+    !Number.isInteger(endLine) ||
+    startLine < 1 ||
+    endLine < startLine ||
+    endLine > lines.length
+  ) {
+    return Promise.resolve(
+      `Error: invalid line range ${startLine}-${endLine}.`,
+    );
   }
-  lines.splice(startLine - 1, endLine - startLine + 1, ...content.split('\n'));
-  return applyAtomicWrite(cwd, filePath, lines.join('\n'), options.safety, options.session)
-    .then(() => `Replaced ${filePath}:${startLine}-${endLine}.`);
+  lines.splice(startLine - 1, endLine - startLine + 1, ...content.split("\n"));
+  return applyAtomicWrite(
+    cwd,
+    filePath,
+    lines.join("\n"),
+    options.safety,
+    options.session,
+  ).then(() => `Replaced ${filePath}:${startLine}-${endLine}.`);
 }
 
 function executeInsertAfter(
@@ -1528,23 +2087,31 @@ function executeInsertAfter(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, 'file', false);
+  const resolved = guard.resolve(filePath, "file", false);
   try {
     guard.assertNotPlatformPath(resolved);
   } catch (err: unknown) {
-    if (err instanceof PlatformPathLockedError) return Promise.resolve(err.message);
+    if (err instanceof PlatformPathLockedError)
+      return Promise.resolve(err.message);
     throw err;
   }
   const mutation = options.session?.canMutate(resolved);
-  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  if (mutation && !mutation.ok)
+    return Promise.resolve(`Error: ${mutation.reason}`);
   options.session?.captureBefore(resolved);
-  const original = fs.readFileSync(resolved, 'utf-8');
+  const original = fs.readFileSync(resolved, "utf-8");
   const idx = original.indexOf(anchor);
-  if (idx === -1) return Promise.resolve(`Error: anchor not found in ${filePath}.`);
+  if (idx === -1)
+    return Promise.resolve(`Error: anchor not found in ${filePath}.`);
   const insertAt = idx + anchor.length;
   const next = original.slice(0, insertAt) + content + original.slice(insertAt);
-  return applyAtomicWrite(cwd, filePath, next, options.safety, options.session)
-    .then(() => `Inserted content in ${filePath}.`);
+  return applyAtomicWrite(
+    cwd,
+    filePath,
+    next,
+    options.safety,
+    options.session,
+  ).then(() => `Inserted content in ${filePath}.`);
 }
 
 function executeRenameFile(
@@ -1554,17 +2121,19 @@ function executeRenameFile(
   options: ToolExecutionOptions = {},
 ): Promise<string> {
   const guard = new WorkspaceGuard(cwd);
-  const source = guard.resolve(from, 'source file', true);
-  const target = guard.resolve(to, 'target file', true);
+  const source = guard.resolve(from, "source file", true);
+  const target = guard.resolve(to, "target file", true);
   try {
     guard.assertNotPlatformPath(source);
     guard.assertNotPlatformPath(target);
   } catch (err: unknown) {
-    if (err instanceof PlatformPathLockedError) return Promise.resolve(err.message);
+    if (err instanceof PlatformPathLockedError)
+      return Promise.resolve(err.message);
     throw err;
   }
   const mutation = options.session?.canMutate(source);
-  if (mutation && !mutation.ok) return Promise.resolve(`Error: ${mutation.reason}`);
+  if (mutation && !mutation.ok)
+    return Promise.resolve(`Error: ${mutation.reason}`);
   options.session?.captureBefore(source);
   options.session?.captureBefore(target);
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -1576,11 +2145,11 @@ function executeRenameFile(
 
 function filesFromPatch(patch: string): string[] {
   const files = new Set<string>();
-  for (const line of patch.split('\n')) {
-    if (line.startsWith('+++ b/')) files.add(line.slice(6));
-    else if (line.startsWith('--- a/')) files.add(line.slice(6));
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("+++ b/")) files.add(line.slice(6));
+    else if (line.startsWith("--- a/")) files.add(line.slice(6));
   }
-  return Array.from(files).filter(file => file !== '/dev/null');
+  return Array.from(files).filter((file) => file !== "/dev/null");
 }
 
 /* ──────────────────── Strict Generic Tool Specification (Phase 1) ──────────────────── */
@@ -1617,7 +2186,7 @@ export interface ToolSpecification<
   readonly name: string;
   readonly description: string;
   readonly parameters: {
-    readonly type: 'object';
+    readonly type: "object";
     readonly properties: Record<string, any>;
     readonly required: string[];
   };
@@ -1665,21 +2234,21 @@ export interface GlobArgs {
  */
 export class SurgicalReplaceError extends Error {
   public readonly code:
-    | 'old_string_not_found'
-    | 'old_string_ambiguous'
-    | 'plan_mode_rejected'
-    | 'platform_path_locked'
-    | 'workspace_escape'
-    | 'binary_file'
-    | 'invalid_args';
+    | "old_string_not_found"
+    | "old_string_ambiguous"
+    | "plan_mode_rejected"
+    | "platform_path_locked"
+    | "workspace_escape"
+    | "binary_file"
+    | "invalid_args";
   public readonly details: Readonly<Record<string, unknown>>;
   constructor(
     message: string,
-    code: SurgicalReplaceError['code'],
+    code: SurgicalReplaceError["code"],
     details: Readonly<Record<string, unknown>> = {},
   ) {
     super(message);
-    this.name = 'SurgicalReplaceError';
+    this.name = "SurgicalReplaceError";
     this.code = code;
     this.details = details;
   }
@@ -1690,15 +2259,16 @@ export class SurgicalReplaceError extends Error {
  * failure (workspace escape, invalid pattern, etc.).
  */
 export class GlobFilesError extends Error {
-  public readonly code: 'invalid_pattern' | 'workspace_escape' | 'traversal_failed';
+  public readonly code:
+    "invalid_pattern" | "workspace_escape" | "traversal_failed";
   public readonly details: Readonly<Record<string, unknown>>;
   constructor(
     message: string,
-    code: GlobFilesError['code'],
+    code: GlobFilesError["code"],
     details: Readonly<Record<string, unknown>> = {},
   ) {
     super(message);
-    this.name = 'GlobFilesError';
+    this.name = "GlobFilesError";
     this.code = code;
     this.details = details;
   }
@@ -1708,7 +2278,7 @@ export class GlobFilesError extends Error {
 
 export interface TodoWriteArgs {
   /** Mutation kind. */
-  op: 'add' | 'set_status' | 'remove' | 'clear_done';
+  op: "add" | "set_status" | "remove" | "clear_done";
   /** Required for `add`. */
   content?: string;
   /** Required for `set_status` and `remove`. */
@@ -1720,15 +2290,16 @@ export interface TodoWriteArgs {
 }
 
 export class TodoWriteError extends Error {
-  public readonly code: 'plan_mode_rejected' | 'invalid_args' | 'not_found' | 'io_failure';
+  public readonly code:
+    "plan_mode_rejected" | "invalid_args" | "not_found" | "io_failure";
   public readonly details: Readonly<Record<string, unknown>>;
   constructor(
     message: string,
-    code: TodoWriteError['code'],
+    code: TodoWriteError["code"],
     details: Readonly<Record<string, unknown>> = {},
   ) {
     super(message);
-    this.name = 'TodoWriteError';
+    this.name = "TodoWriteError";
     this.code = code;
     this.details = details;
   }
@@ -1749,10 +2320,10 @@ export function executeTodoRead(cwd: string): string {
 /* ──────────────────── todo_write implementation ──────────────────── */
 
 const VALID_TODO_STATUSES: ReadonlySet<TodoStatus> = new Set<TodoStatus>([
-  'pending',
-  'in_progress',
-  'done',
-  'cancelled',
+  "pending",
+  "in_progress",
+  "done",
+  "cancelled",
 ]);
 
 /**
@@ -1766,79 +2337,113 @@ export async function executeTodoWrite(
   cwd: string,
   options: ToolExecutionOptions = {},
 ): Promise<string> {
-  if (options.mode === 'PLAN') {
+  if (options.mode === "PLAN") {
     return `Error: todo_write: rejected in PLAN mode (no on-disk mutations).`;
   }
   const op = args.op;
-  if (op !== 'add' && op !== 'set_status' && op !== 'remove' && op !== 'clear_done') {
+  if (
+    op !== "add" &&
+    op !== "set_status" &&
+    op !== "remove" &&
+    op !== "clear_done"
+  ) {
     throw new TodoWriteError(
       `todo_write: unknown op "${String(op)}"`,
-      'invalid_args',
+      "invalid_args",
       { op: String(op) },
     );
   }
   let list = loadTodoList(cwd);
   switch (op) {
-    case 'add': {
-      if (typeof args.content !== 'string' || args.content.trim().length === 0) {
-        throw new TodoWriteError('todo_write: "content" is required for op=add', 'invalid_args');
+    case "add": {
+      if (
+        typeof args.content !== "string" ||
+        args.content.trim().length === 0
+      ) {
+        throw new TodoWriteError(
+          'todo_write: "content" is required for op=add',
+          "invalid_args",
+        );
       }
-      list = addItem(list, { content: args.content, blockedBy: args.blockedBy });
+      list = addItem(list, {
+        content: args.content,
+        blockedBy: args.blockedBy,
+      });
       break;
     }
-    case 'set_status': {
-      if (typeof args.id !== 'string' || args.id.length === 0) {
-        throw new TodoWriteError('todo_write: "id" is required for op=set_status', 'invalid_args');
+    case "set_status": {
+      if (typeof args.id !== "string" || args.id.length === 0) {
+        throw new TodoWriteError(
+          'todo_write: "id" is required for op=set_status',
+          "invalid_args",
+        );
       }
       if (!args.status || !VALID_TODO_STATUSES.has(args.status)) {
         throw new TodoWriteError(
           `todo_write: "status" must be one of pending|in_progress|done|cancelled (got "${String(args.status)}")`,
-          'invalid_args',
+          "invalid_args",
         );
       }
       const exists = list.items.some((it) => it.id === args.id);
       if (!exists) {
-        const content = typeof args.content === 'string' && args.content.trim().length > 0 ? args.content : `Task ${args.id}`;
+        const content =
+          typeof args.content === "string" && args.content.trim().length > 0
+            ? args.content
+            : `Task ${args.id}`;
         list = addItem(list, { content, blockedBy: args.blockedBy });
         const newId = list.items[list.items.length - 1].id;
         list = setItemStatus(list, { id: newId, status: args.status });
         const save = saveTodoList(cwd, list);
         if (!save.ok) {
-          throw new TodoWriteError(`todo_write: failed to persist: ${save.error ?? 'unknown'}`, 'io_failure', { path: save.path });
+          throw new TodoWriteError(
+            `todo_write: failed to persist: ${save.error ?? "unknown"}`,
+            "io_failure",
+            { path: save.path },
+          );
         }
         return `Successfully appended new item with auto-assigned ID: ${newId}`;
       }
       list = setItemStatus(list, { id: args.id, status: args.status });
       break;
     }
-    case 'remove': {
-      if (typeof args.id !== 'string' || args.id.length === 0) {
-        throw new TodoWriteError('todo_write: "id" is required for op=remove', 'invalid_args');
+    case "remove": {
+      if (typeof args.id !== "string" || args.id.length === 0) {
+        throw new TodoWriteError(
+          'todo_write: "id" is required for op=remove',
+          "invalid_args",
+        );
       }
       const exists = list.items.some((it) => it.id === args.id);
       if (!exists) {
-        throw new TodoWriteError(`todo_write: item id "${args.id}" not found`, 'not_found');
+        throw new TodoWriteError(
+          `todo_write: item id "${args.id}" not found`,
+          "not_found",
+        );
       }
       list = removeItem(list, { id: args.id });
       break;
     }
-    case 'clear_done': {
+    case "clear_done": {
       list = clearDoneItems(list);
       break;
     }
   }
   const save = saveTodoList(cwd, list);
   if (!save.ok) {
-    throw new TodoWriteError(`todo_write: failed to persist: ${save.error ?? 'unknown'}`, 'io_failure', {
-      path: save.path,
-    });
+    throw new TodoWriteError(
+      `todo_write: failed to persist: ${save.error ?? "unknown"}`,
+      "io_failure",
+      {
+        path: save.path,
+      },
+    );
   }
   const summary = summariseTodoList(list);
   recordTelemetry(
     telemetry.todoMutation({
       op,
       items: list.items.length,
-      id: typeof args.id === 'string' ? args.id : undefined,
+      id: typeof args.id === "string" ? args.id : undefined,
     }),
   );
   // Echo the rendered list back so the LLM can confirm
@@ -1848,13 +2453,6 @@ export async function executeTodoWrite(
 
 /* ──────────────────── run_command_async / poll_command_status / kill_command ────────── */
 
-/**
- * Process-global registry of background jobs. Lazily created on
- * the first call to `getBackgroundJobRegistry` so the tool
- * dispatch is hot-path-friendly and test-friendly (tests inject
- * a custom registry via {@link setBackgroundJobRegistry}).
- */
-const globalBackgroundRegistry: BackgroundJobRegistry | null = null;
 const backgroundRegistries = new Map<string, BackgroundJobRegistry>();
 
 export function getBackgroundJobRegistry(cwd: string): BackgroundJobRegistry {
@@ -1867,7 +2465,10 @@ export function getBackgroundJobRegistry(cwd: string): BackgroundJobRegistry {
 }
 
 /** Test-only: inject a custom registry. */
-export function setBackgroundJobRegistry(cwd: string, reg: BackgroundJobRegistry | null): void {
+export function setBackgroundJobRegistry(
+  cwd: string,
+  reg: BackgroundJobRegistry | null,
+): void {
   if (reg === null) {
     const existing = backgroundRegistries.get(cwd);
     if (existing) existing.shutdown();
@@ -1896,10 +2497,11 @@ export interface KillCommandArgs {
 }
 
 export class BackgroundCommandError extends Error {
-  public readonly code: 'plan_mode_rejected' | 'invalid_args' | 'spawn_failed' | 'no_such_job';
-  constructor(message: string, code: BackgroundCommandError['code']) {
+  public readonly code:
+    "plan_mode_rejected" | "invalid_args" | "spawn_failed" | "no_such_job";
+  constructor(message: string, code: BackgroundCommandError["code"]) {
     super(message);
-    this.name = 'BackgroundCommandError';
+    this.name = "BackgroundCommandError";
     this.code = code;
   }
 }
@@ -1915,13 +2517,18 @@ export async function executeRunCommandAsync(
   cwd: string,
   options: ToolExecutionOptions = {},
 ): Promise<string> {
-  if (options.mode === 'PLAN') {
+  if (options.mode === "PLAN") {
     return `Error: run_command_async: rejected in PLAN mode.`;
   }
-  if (typeof args.cmd !== 'string' || args.cmd.trim().length === 0) {
-    throw new BackgroundCommandError('run_command_async: "cmd" is required', 'invalid_args');
+  if (typeof args.cmd !== "string" || args.cmd.trim().length === 0) {
+    throw new BackgroundCommandError(
+      'run_command_async: "cmd" is required',
+      "invalid_args",
+    );
   }
-  const cmdArgs = Array.isArray(args.args) ? args.args.filter((a) => typeof a === 'string') : [];
+  const cmdArgs = Array.isArray(args.args)
+    ? args.args.filter((a) => typeof a === "string")
+    : [];
   const reg = getBackgroundJobRegistry(cwd);
   const result = await reg.register({
     cmd: args.cmd,
@@ -1930,15 +2537,15 @@ export async function executeRunCommandAsync(
   });
   if (!result.ok) {
     throw new BackgroundCommandError(
-      `run_command_async: ${result.error ?? 'unknown'}`,
-      'spawn_failed',
+      `run_command_async: ${result.error ?? "unknown"}`,
+      "spawn_failed",
     );
   }
   return JSON.stringify({
     ok: true,
     jobId: result.jobId,
     pid: result.pid,
-    note: 'poll_command_status to retrieve output; kill_command to terminate',
+    note: "poll_command_status to retrieve output; kill_command to terminate",
   });
 }
 
@@ -1946,8 +2553,11 @@ export function executePollCommandStatus(
   args: PollCommandStatusArgs,
   cwd: string,
 ): string {
-  if (typeof args.jobId !== 'string' || args.jobId.length === 0) {
-    throw new BackgroundCommandError('poll_command_status: "jobId" is required', 'invalid_args');
+  if (typeof args.jobId !== "string" || args.jobId.length === 0) {
+    throw new BackgroundCommandError(
+      'poll_command_status: "jobId" is required',
+      "invalid_args",
+    );
   }
   const reg = getBackgroundJobRegistry(cwd);
   const snap = reg.poll({
@@ -1958,25 +2568,25 @@ export function executePollCommandStatus(
   if (!snap) {
     throw new BackgroundCommandError(
       `poll_command_status: no such job "${args.jobId}"`,
-      'no_such_job',
+      "no_such_job",
     );
   }
   return JSON.stringify(snap, null, 2);
 }
 
-export function executeKillCommand(
-  args: KillCommandArgs,
-  cwd: string,
-): string {
-  if (typeof args.jobId !== 'string' || args.jobId.length === 0) {
-    throw new BackgroundCommandError('kill_command: "jobId" is required', 'invalid_args');
+export function executeKillCommand(args: KillCommandArgs, cwd: string): string {
+  if (typeof args.jobId !== "string" || args.jobId.length === 0) {
+    throw new BackgroundCommandError(
+      'kill_command: "jobId" is required',
+      "invalid_args",
+    );
   }
   const reg = getBackgroundJobRegistry(cwd);
   const out = reg.kill(args.jobId);
   if (!out.ok) {
     throw new BackgroundCommandError(
-      `kill_command: ${out.error ?? 'unknown'}`,
-      'no_such_job',
+      `kill_command: ${out.error ?? "unknown"}`,
+      "no_such_job",
     );
   }
   return JSON.stringify({ ok: true, jobId: args.jobId });
@@ -2013,17 +2623,20 @@ export function listAllBackgroundJobs(cwd: string): JobSnapshot[] {
 /* ──────────────────── str_replace implementation ──────────────────── */
 
 function escapeRegExp(string: string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function findFuzzyMatches(haystack: string, needle: string): { start: number, end: number, match: string }[] {
+function findFuzzyMatches(
+  haystack: string,
+  needle: string,
+): { start: number; end: number; match: string }[] {
   const tokens = needle.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return [];
 
-  const pattern = tokens.map(escapeRegExp).join('\\s+');
-  const regex = new RegExp(pattern, 'g');
-  
-  const matches: { start: number, end: number, match: string }[] = [];
+  const pattern = tokens.map(escapeRegExp).join("\\s+");
+  const regex = new RegExp(pattern, "g");
+
+  const matches: { start: number; end: number; match: string }[] = [];
   let match;
   while ((match = regex.exec(haystack)) !== null) {
     matches.push({
@@ -2036,9 +2649,9 @@ function findFuzzyMatches(haystack: string, needle: string): { start: number, en
 }
 
 function adaptNewStringForFuzzy(oldString: string, newString: string): string {
-  const oldLeading = oldString.match(/^\s*/)?.[0] || '';
-  const oldTrailing = oldString.match(/\s*$/)?.[0] || '';
-  
+  const oldLeading = oldString.match(/^\s*/)?.[0] || "";
+  const oldTrailing = oldString.match(/\s*$/)?.[0] || "";
+
   let adapted = newString;
   if (oldLeading && adapted.startsWith(oldLeading)) {
     adapted = adapted.substring(oldLeading.length);
@@ -2106,21 +2719,21 @@ export async function executeStrReplace(
   const guard = new WorkspaceGuard(cwd, options?.allowedOutsidePaths);
 
   // Validate the input.
-  if (typeof args.path !== 'string' || args.path.length === 0) {
+  if (typeof args.path !== "string" || args.path.length === 0) {
     return `Error: str_replace: "path" is required.`;
   }
-  if (typeof args.oldString !== 'string') {
+  if (typeof args.oldString !== "string") {
     return `Error: str_replace: "oldString" is required.`;
   }
-  if (typeof args.newString !== 'string') {
+  if (typeof args.newString !== "string") {
     return `Error: str_replace: "newString" is required.`;
   }
 
   // Pillar 1 — refuse in PLAN mode.
-  if (options.mode === 'PLAN') {
+  if (options.mode === "PLAN") {
     const err = new SurgicalReplaceError(
       `str_replace is not allowed in PLAN mode (read-only). Switch to BUILD mode and retry.`,
-      'plan_mode_rejected',
+      "plan_mode_rejected",
       { mode: options.mode },
     );
     return `Error: ${err.message}`;
@@ -2129,7 +2742,7 @@ export async function executeStrReplace(
   // Workspace boundary check.
   let resolved: string;
   try {
-    resolved = guard.resolve(args.path, 'str_replace target', true);
+    resolved = guard.resolve(args.path, "str_replace target", true);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `Error: str_replace: ${msg}`;
@@ -2152,55 +2765,66 @@ export async function executeStrReplace(
   }
 
   // Load the current content.
-  const content = fs.readFileSync(resolved, 'utf-8');
+  const content = fs.readFileSync(resolved, "utf-8");
   const exactOccurrences = countOccurrences(content, args.oldString);
   const replaceAll = args.replaceAll === true;
   const expectUnique = !replaceAll && args.expectUnique !== false;
-  
-  let fuzzyMatches: { start: number, end: number, match: string }[] = [];
+
+  let fuzzyMatches: { start: number; end: number; match: string }[] = [];
   if (exactOccurrences === 0) {
     fuzzyMatches = findFuzzyMatches(content, args.oldString);
   }
-  
-  const occurrences = exactOccurrences > 0 ? exactOccurrences : fuzzyMatches.length;
+
+  const occurrences =
+    exactOccurrences > 0 ? exactOccurrences : fuzzyMatches.length;
 
   if (occurrences === 0) {
     return `Error: str_replace: oldString not found in ${args.path}. (No exact or fuzzy match found)`;
   }
   if (occurrences > 1 && expectUnique) {
-    const matchType = exactOccurrences > 0 ? 'exact' : 'fuzzy';
-    return `Error: str_replace: oldString appears ${occurrences} times (${matchType} matches) in ${args.path}. ` +
-      `Pass replaceAll=true or expectUnique=false to proceed.`;
+    const matchType = exactOccurrences > 0 ? "exact" : "fuzzy";
+    return (
+      `Error: str_replace: oldString appears ${occurrences} times (${matchType} matches) in ${args.path}. ` +
+      `Pass replaceAll=true or expectUnique=false to proceed.`
+    );
   }
 
   let newContent = content;
-  let wasFuzzy = false;
+
   if (exactOccurrences > 0) {
-    newContent = applyReplacement(content, args.oldString, args.newString, replaceAll);
+    newContent = applyReplacement(
+      content,
+      args.oldString,
+      args.newString,
+      replaceAll,
+    );
   } else {
-    wasFuzzy = true;
     const matchesToReplace = replaceAll ? fuzzyMatches : [fuzzyMatches[0]];
-    const adaptedNewString = adaptNewStringForFuzzy(args.oldString, args.newString);
+    const adaptedNewString = adaptNewStringForFuzzy(
+      args.oldString,
+      args.newString,
+    );
     // Iterate backwards so replacement doesn't shift earlier indices
     for (let i = matchesToReplace.length - 1; i >= 0; i--) {
       const match = matchesToReplace[i];
-      newContent = newContent.substring(0, match.start) + adaptedNewString + newContent.substring(match.end);
+      newContent =
+        newContent.substring(0, match.start) +
+        adaptedNewString +
+        newContent.substring(match.end);
     }
   }
-  
-  const bytes = Buffer.byteLength(newContent, 'utf-8');
 
   // Pillar 3 — LSP pre-save compilation gate. The gate's
   // `enforce` throws on `block`-mode failures; we surface the
   // diagnostics to the LLM as a structured error.
-  if (options.safety?.lspPreSave && options.safety.lspPreSave !== 'off') {
+  if (options.safety?.lspPreSave && options.safety.lspPreSave !== "off") {
     try {
       const gate = getOrCreateLspGate(cwd, options.safety);
       const synthetic = {
-        id: 'surgical-' + Date.now().toString(36),
+        id: "surgical-" + Date.now().toString(36),
         targetPath: resolved,
-        pendingPath: '<surgical>',
-        metaPath: '<surgical>',
+        pendingPath: "<surgical>",
+        metaPath: "<surgical>",
         createdAt: Date.now(),
         mode: 0o644,
       } as const;
@@ -2218,18 +2842,18 @@ export async function executeStrReplace(
     const mgr = new AtomicStagingManager(cwd, getOrCreateRunId());
     const result = await mgr.applySurgicalReplace(resolved, newContent, {
       runId: mgr.runId,
-      reason: 'str_replace',
-      actorId: options.session?.id ?? 'tool-executor',
+      reason: "str_replace",
+      actorId: options.session?.id ?? "tool-executor",
     });
 
     // Telemetry.
     try {
-      const { recordTelemetry, telemetry } = await import('./telemetry.js');
+      const { recordTelemetry, telemetry } = await import("./telemetry.js");
       recordTelemetry(
         telemetry.surgicalEdit({
           path: args.path,
           occurrences: replaceAll ? occurrences : 1,
-          mode: options.safety?.lspPreSave ?? 'off',
+          mode: options.safety?.lspPreSave ?? "off",
           bytes: result.bytes,
         }),
       );
@@ -2242,7 +2866,7 @@ export async function executeStrReplace(
       ok: true,
       path: args.path,
       occurrences: replaceAll ? occurrences : 1,
-      mode: options.safety?.lspPreSave ?? 'off',
+      mode: options.safety?.lspPreSave ?? "off",
       bytes: result.bytes,
     });
   } catch (err) {
@@ -2256,11 +2880,11 @@ export async function executeStrReplace(
 const GLOB_DEFAULT_MAX_RESULTS = 1000;
 const GLOB_HARD_MAX_RESULTS = 5000;
 const GLOB_DEFAULT_SKIP_DIRS: ReadonlyArray<string> = [
-  'node_modules',
-  '.git',
-  'dist',
-  '.fixo',
-  '.fixocli',
+  "node_modules",
+  ".git",
+  "dist",
+  ".fixo",
+  ".fixocli",
 ];
 
 /**
@@ -2270,7 +2894,7 @@ const GLOB_DEFAULT_SKIP_DIRS: ReadonlyArray<string> = [
 function splitIgnoreSpec(spec: string | undefined): string[] {
   if (!spec) return [];
   return spec
-    .split(',')
+    .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
@@ -2289,14 +2913,14 @@ export async function executeGlobFiles(
   cwd: string,
   _options: ToolExecutionOptions = {},
 ): Promise<string> {
-  if (typeof args.pattern !== 'string' || args.pattern.length === 0) {
+  if (typeof args.pattern !== "string" || args.pattern.length === 0) {
     return `Error: glob_files: "pattern" is required.`;
   }
 
   const guard = new WorkspaceGuard(cwd, _options?.allowedOutsidePaths);
   let scope: string;
   try {
-    scope = args.cwd ? guard.resolve(args.cwd, 'glob scope', false) : cwd;
+    scope = args.cwd ? guard.resolve(args.cwd, "glob scope", false) : cwd;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `Error: glob_files: ${msg}`;
@@ -2335,7 +2959,7 @@ export async function executeGlobFiles(
 
   // Telemetry.
   try {
-    const { recordTelemetry, telemetry } = await import('./telemetry.js');
+    const { recordTelemetry, telemetry } = await import("./telemetry.js");
     recordTelemetry(
       telemetry.glob({
         pattern: args.pattern,
@@ -2348,7 +2972,12 @@ export async function executeGlobFiles(
   }
 
   if (returned.length === 0) {
-    return JSON.stringify({ pattern: args.pattern, matches: [], total: 0, truncated: false });
+    return JSON.stringify({
+      pattern: args.pattern,
+      matches: [],
+      total: 0,
+      truncated: false,
+    });
   }
 
   return JSON.stringify({
@@ -2375,7 +3004,14 @@ interface CollectOptions {
  * and hidden-file policy.
  */
 async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
-  const { pattern, scope, skipDirs, includeHidden, followSymlinks, maxResults } = opts;
+  const {
+    pattern,
+    scope,
+    skipDirs,
+    includeHidden,
+    followSymlinks,
+    maxResults,
+  } = opts;
   const results: string[] = [];
 
   // Try native fs.promises.glob first.
@@ -2386,7 +3022,7 @@ async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
     ) => Promise<unknown>;
   };
 
-  if (typeof fsPromises.glob === 'function') {
+  if (typeof fsPromises.glob === "function") {
     const exclude = Array.from(skipDirs).map((d) => `**/${d}/**`);
     const out = (await fsPromises.glob(pattern, {
       cwd: scope,
@@ -2395,14 +3031,15 @@ async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
     })) as unknown;
     if (Array.isArray(out)) {
       for (const entry of out) {
-        if (typeof entry !== 'string') continue;
+        if (typeof entry !== "string") continue;
         const absolute = path.resolve(scope, entry);
         if (results.length >= maxResults) break;
         // The native glob does not surface whether symlinks were
         // followed; perform a defensive lstat and skip dotfiles if
         // the user did not opt in.
         try {
-          if (!includeHidden && path.basename(absolute).startsWith('.')) continue;
+          if (!includeHidden && path.basename(absolute).startsWith("."))
+            continue;
         } catch {
           continue;
         }
@@ -2425,7 +3062,7 @@ async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
     }
     for (const entry of entries) {
       if (results.length >= maxResults) return;
-      if (!includeHidden && entry.name.startsWith('.')) continue;
+      if (!includeHidden && entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (skipDirs.has(entry.name)) continue;
@@ -2439,7 +3076,7 @@ async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
         }
         await walk(full);
       } else if (entry.isFile()) {
-        if (!includeHidden && entry.name.startsWith('.')) continue;
+        if (!includeHidden && entry.name.startsWith(".")) continue;
         if (skipDirs.has(entry.name)) continue;
         if (!followSymlinks) {
           try {
@@ -2473,9 +3110,9 @@ async function collectGlobMatches(opts: CollectOptions): Promise<string[]> {
  */
 function compileGlob(pattern: string): (relPath: string) => boolean {
   // Normalise separators.
-  const normalised = pattern.replace(/\\/g, '/');
+  const normalised = pattern.replace(/\\/g, "/");
   const re = globToRegExp(normalised);
-  return (rel: string) => re.test(rel.replace(/\\/g, '/'));
+  return (rel: string) => re.test(rel.replace(/\\/g, "/"));
 }
 
 /**
@@ -2483,32 +3120,32 @@ function compileGlob(pattern: string): (relPath: string) => boolean {
  * small subset documented on {@link compileGlob}.
  */
 function globToRegExp(pattern: string): RegExp {
-  let body = '';
+  let body = "";
   let i = 0;
   while (i < pattern.length) {
     const ch = pattern[i];
-    if (ch === '*') {
-      if (pattern[i + 1] === '*') {
-        body += '.*';
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        body += ".*";
         i += 2;
         // Consume an optional following slash so `**/foo` works.
-        if (pattern[i] === '/') i += 1;
+        if (pattern[i] === "/") i += 1;
       } else {
-        body += '[^/]*';
+        body += "[^/]*";
         i += 1;
       }
-    } else if (ch === '?') {
-      body += '[^/]';
+    } else if (ch === "?") {
+      body += "[^/]";
       i += 1;
-    } else if ('\\^$.|+()[]{}'.includes(ch)) {
-      body += '\\' + ch;
+    } else if ("\\^$.|+()[]{}".includes(ch)) {
+      body += "\\" + ch;
       i += 1;
     } else {
       body += ch;
       i += 1;
     }
   }
-  return new RegExp('^' + body + '$');
+  return new RegExp("^" + body + "$");
 }
 
 /* ──────────────────── Tool Specification Registry ──────────────────── */
@@ -2523,12 +3160,16 @@ function globToRegExp(pattern: string): RegExp {
  * for compatibility with the existing switch dispatch. Strongly-typed
  * callers can cast at the call site.
  */
-const toolRegistry = new Map<string, ToolSpecification<Record<string, any>, string>>();
+const toolRegistry = new Map<
+  string,
+  ToolSpecification<Record<string, any>, string>
+>();
 
 /** Register a typed tool specification. Throws on duplicate. */
-export function registerTool<TArgs extends Record<string, any>, TResult = string>(
-  spec: ToolSpecification<TArgs, TResult>,
-): void {
+export function registerTool<
+  TArgs extends Record<string, any>,
+  TResult = string,
+>(spec: ToolSpecification<TArgs, TResult>): void {
   if (toolRegistry.has(spec.name)) {
     throw new Error(`Tool "${spec.name}" is already registered.`);
   }
@@ -2553,22 +3194,22 @@ export function listRegisteredToolNames(): string[] {
 /* ──────────────────── Built-in Typed Registrations ──────────────────── */
 
 registerTool<StrReplaceArgs>({
-  name: 'str_replace',
+  name: "str_replace",
   description:
-    'Use this tool by default for any in-place edit to an existing file. Performs a surgical, atomic replacement of oldString with newString. By default, oldString must be unique within the file (expectUnique=true) — non-unique matches are rejected with a clear error so the caller can narrow the snippet. Pass replaceAll=true to substitute every occurrence. Rejected in PLAN mode. Refused for platform-locked paths. Goes through the same atomic staging pipeline as write_file and the LSP pre-save gate before any disk mutation.',
+    "Use this tool by default for any in-place edit to an existing file. Performs a surgical, atomic replacement of oldString with newString. By default, oldString must be unique within the file (expectUnique=true) — non-unique matches are rejected with a clear error so the caller can narrow the snippet. Pass replaceAll=true to substitute every occurrence. Rejected in PLAN mode. Refused for platform-locked paths. Goes through the same atomic staging pipeline as write_file and the LSP pre-save gate before any disk mutation.",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
-      path: { type: 'string', description: 'The file path to edit.' },
-      oldString: { type: 'string', description: 'The substring to replace.' },
-      newString: { type: 'string', description: 'The replacement content.' },
-      replaceAll: { type: 'boolean', description: 'Replace every occurrence.' },
+      path: { type: "string", description: "The file path to edit." },
+      oldString: { type: "string", description: "The substring to replace." },
+      newString: { type: "string", description: "The replacement content." },
+      replaceAll: { type: "boolean", description: "Replace every occurrence." },
       expectUnique: {
-        type: 'boolean',
-        description: 'Abort when oldString is not unique.',
+        type: "boolean",
+        description: "Abort when oldString is not unique.",
       },
     },
-    required: ['path', 'oldString', 'newString'],
+    required: ["path", "oldString", "newString"],
   },
   async execute(args, ctx) {
     return executeStrReplace(args, ctx.cwd, ctx.options);
@@ -2576,20 +3217,32 @@ registerTool<StrReplaceArgs>({
 });
 
 registerTool<GlobArgs>({
-  name: 'glob_files',
+  name: "glob_files",
   description:
-    'High-performance filesystem pattern matcher. Returns paths matching the given glob pattern, relative to the workspace root. Built on Node 22+ native fs.promises.glob. By default, common build/VCS directories (node_modules, .git, dist, .fixo, .fixocli) are excluded. Symlinks are not followed and hidden files are excluded unless explicitly enabled. Capped at maxResults (default 1000, hard cap 5000).',
+    "High-performance filesystem pattern matcher. Returns paths matching the given glob pattern, relative to the workspace root. Built on Node 22+ native fs.promises.glob. By default, common build/VCS directories (node_modules, .git, dist, .fixo, .fixocli) are excluded. Symlinks are not followed and hidden files are excluded unless explicitly enabled. Capped at maxResults (default 1000, hard cap 5000).",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
-      pattern: { type: 'string', description: 'Glob pattern, e.g. "src/**/*.ts"' },
-      cwd: { type: 'string', description: 'Optional scope directory.' },
-      ignore: { type: 'string', description: 'Optional extra ignore patterns.' },
-      maxResults: { type: 'integer', description: 'Cap on returned matches.' },
-      includeHidden: { type: 'boolean', description: 'Include dotfile entries.' },
-      followSymlinks: { type: 'boolean', description: 'Follow symbolic links.' },
+      pattern: {
+        type: "string",
+        description: 'Glob pattern, e.g. "src/**/*.ts"',
+      },
+      cwd: { type: "string", description: "Optional scope directory." },
+      ignore: {
+        type: "string",
+        description: "Optional extra ignore patterns.",
+      },
+      maxResults: { type: "integer", description: "Cap on returned matches." },
+      includeHidden: {
+        type: "boolean",
+        description: "Include dotfile entries.",
+      },
+      followSymlinks: {
+        type: "boolean",
+        description: "Follow symbolic links.",
+      },
     },
-    required: ['pattern'],
+    required: ["pattern"],
   },
   async execute(args, ctx) {
     return executeGlobFiles(args, ctx.cwd, ctx.options);
@@ -2597,11 +3250,11 @@ registerTool<GlobArgs>({
 });
 
 registerTool({
-  name: 'todo_read',
+  name: "todo_read",
   description:
-    'Read the current project todo list from <cwd>/.fixo/todo_list.json. Returns a human-readable rendering of all items, grouped into Open and Completed. Missing or unreadable files yield an empty list — this is by design so the agent can always inspect todo state.',
+    "Read the current project todo list from <cwd>/.fixo/todo_list.json. Returns a human-readable rendering of all items, grouped into Open and Completed. Missing or unreadable files yield an empty list — this is by design so the agent can always inspect todo state.",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {},
     required: [],
   },
@@ -2611,19 +3264,28 @@ registerTool({
 });
 
 registerTool<TodoWriteArgs>({
-  name: 'todo_write',
+  name: "todo_write",
   description:
-    'Mutate the project todo list. Operations: add (content+blockedBy optional), set_status (id+status), remove (id), clear_done. Persisted atomically to <cwd>/.fixo/todo_list.json. Rejected in PLAN mode. Status values: pending | in_progress | done | cancelled.',
+    "Mutate the project todo list. Operations: add (content+blockedBy optional), set_status (id+status), remove (id), clear_done. Persisted atomically to <cwd>/.fixo/todo_list.json. Rejected in PLAN mode. Status values: pending | in_progress | done | cancelled.",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
-      op: { type: 'string', enum: ['add', 'set_status', 'remove', 'clear_done'] },
-      content: { type: 'string', description: 'Item content (op=add only).' },
-      id: { type: 'string', description: 'Item id (op=set_status, op=remove).' },
-      status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'cancelled'] },
-      blockedBy: { type: 'string', description: 'Optional blocker (op=add).' },
+      op: {
+        type: "string",
+        enum: ["add", "set_status", "remove", "clear_done"],
+      },
+      content: { type: "string", description: "Item content (op=add only)." },
+      id: {
+        type: "string",
+        description: "Item id (op=set_status, op=remove).",
+      },
+      status: {
+        type: "string",
+        enum: ["pending", "in_progress", "done", "cancelled"],
+      },
+      blockedBy: { type: "string", description: "Optional blocker (op=add)." },
     },
-    required: ['op'],
+    required: ["op"],
   },
   async execute(args, ctx) {
     return executeTodoWrite(args, ctx.cwd, ctx.options);
@@ -2631,17 +3293,17 @@ registerTool<TodoWriteArgs>({
 });
 
 registerTool<RunCommandAsyncArgs>({
-  name: 'run_command_async',
+  name: "run_command_async",
   description:
-    'Spawn a long-running command in the background. Returns a jobId. Streams cap at 64 KiB; tail buffers survive a crash via the .fixo/jobs/<jobId>.json snapshot. Rejected in PLAN mode. Workspace-escape and sensitive-file commands are blocked at spawn time.',
+    "Spawn a long-running command in the background. Returns a jobId. Streams cap at 64 KiB; tail buffers survive a crash via the .fixo/jobs/<jobId>.json snapshot. Rejected in PLAN mode. Workspace-escape and sensitive-file commands are blocked at spawn time.",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
-      cmd: { type: 'string', description: 'The binary to spawn.' },
-      args: { type: 'array', items: { type: 'string' } },
-      cwd: { type: 'string' },
+      cmd: { type: "string", description: "The binary to spawn." },
+      args: { type: "array", items: { type: "string" } },
+      cwd: { type: "string" },
     },
-    required: ['cmd'],
+    required: ["cmd"],
   },
   async execute(args, ctx) {
     return executeRunCommandAsync(args, ctx.cwd, ctx.options);
@@ -2649,17 +3311,17 @@ registerTool<RunCommandAsyncArgs>({
 });
 
 registerTool<PollCommandStatusArgs>({
-  name: 'poll_command_status',
+  name: "poll_command_status",
   description:
-    'Read a snapshot of a background job. Honours tailLines (last N lines per stream) and sinceBytes (return only the bytes after this offset on stdout/stderr).',
+    "Read a snapshot of a background job. Honours tailLines (last N lines per stream) and sinceBytes (return only the bytes after this offset on stdout/stderr).",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
-      jobId: { type: 'string' },
-      tailLines: { type: 'integer' },
-      sinceBytes: { type: 'integer' },
+      jobId: { type: "string" },
+      tailLines: { type: "integer" },
+      sinceBytes: { type: "integer" },
     },
-    required: ['jobId'],
+    required: ["jobId"],
   },
   async execute(args, ctx) {
     return executePollCommandStatus(args, ctx.cwd);
@@ -2667,14 +3329,14 @@ registerTool<PollCommandStatusArgs>({
 });
 
 registerTool<KillCommandArgs>({
-  name: 'kill_command',
-  description: 'SIGTERM a background job by jobId.',
+  name: "kill_command",
+  description: "SIGTERM a background job by jobId.",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
-      jobId: { type: 'string' },
+      jobId: { type: "string" },
     },
-    required: ['jobId'],
+    required: ["jobId"],
   },
   async execute(args, ctx) {
     return executeKillCommand(args, ctx.cwd);

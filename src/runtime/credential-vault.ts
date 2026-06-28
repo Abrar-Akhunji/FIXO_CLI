@@ -42,7 +42,9 @@ export interface ProviderCredential {
 /** Callback that receives a key. */
 export type KeyCallback<T> = (key: string) => Promise<T> | T;
 /** Callback that receives a full credential. */
-export type CredentialCallback<T> = (cred: ProviderCredential) => Promise<T> | T;
+export type CredentialCallback<T> = (
+  cred: ProviderCredential,
+) => Promise<T> | T;
 
 /** Options for the vault. */
 export interface ProviderKeyVaultOptions {
@@ -61,7 +63,7 @@ export class ProviderNotInVaultError extends Error {
   public readonly providerName: string;
   constructor(providerName: string) {
     super(`ProviderKeyVault: no credential for "${providerName}"`);
-    this.name = 'ProviderNotInVaultError';
+    this.name = "ProviderNotInVaultError";
     this.providerName = providerName;
   }
 }
@@ -69,8 +71,10 @@ export class ProviderNotInVaultError extends Error {
 /** Thrown when ingest() is called with an empty / blank key. */
 export class EmptyKeyRejectedError extends Error {
   constructor(providerName: string) {
-    super(`ProviderKeyVault: refused to ingest empty key for "${providerName}"`);
-    this.name = 'EmptyKeyRejectedError';
+    super(
+      `ProviderKeyVault: refused to ingest empty key for "${providerName}"`,
+    );
+    this.name = "EmptyKeyRejectedError";
   }
 }
 
@@ -102,7 +106,7 @@ export class ProviderKeyVault {
     displayName?: string,
   ): void {
     if (!providerName) {
-      throw new Error('ProviderKeyVault.ingest: providerName is required');
+      throw new Error("ProviderKeyVault.ingest: providerName is required");
     }
     if (this.#rejectEmpty && (!apiKey || !apiKey.trim())) {
       throw new EmptyKeyRejectedError(providerName);
@@ -177,7 +181,7 @@ export class ProviderKeyVault {
     const result = fn(cred.apiKey);
     if (result instanceof Promise) {
       throw new Error(
-        'ProviderKeyVault.withApiKeySync: callback returned a Promise; use withApiKey() instead',
+        "ProviderKeyVault.withApiKeySync: callback returned a Promise; use withApiKey() instead",
       );
     }
     return result;

@@ -9,9 +9,9 @@
  * a bottom rule, and an approval prompt.
  */
 
-import { C, visLen } from './colors.js';
+import { C } from "./colors.js";
 
-export type PlanStepState = 'pending' | 'active' | 'done' | 'failed';
+export type PlanStepState = "pending" | "active" | "done" | "failed";
 
 export interface PlanStep {
   /** Display text for the step, e.g. `Analyze src/auth/provider.ts with ReadFile`. */
@@ -20,10 +20,10 @@ export interface PlanStep {
 }
 
 const DOT_BY_STATE: Record<PlanStepState, { glyph: string; color: string }> = {
-  pending: { glyph: '○', color: C.SNOW4 },
-  active:  { glyph: '◉', color: C.LAVA },
-  done:    { glyph: '✓', color: C.GREEN },
-  failed:  { glyph: '✗', color: C.RED },
+  pending: { glyph: "○", color: C.SNOW4 },
+  active: { glyph: "◉", color: C.LAVA },
+  done: { glyph: "✓", color: C.GREEN },
+  failed: { glyph: "✗", color: C.RED },
 };
 
 function frameWidth(): number {
@@ -32,7 +32,7 @@ function frameWidth(): number {
 
 function safeWriteLine(s: string): void {
   try {
-    process.stdout.write(s + '\n');
+    process.stdout.write(s + "\n");
   } catch {
     // stdout may be closed during teardown
   }
@@ -53,22 +53,28 @@ function safeWrite(s: string): void {
  */
 export function renderPlan(steps: ReadonlyArray<PlanStep>): void {
   const w = frameWidth();
-  const title = 'PLAN';
-  safeWriteLine('');
-  safeWriteLine(`  ${C.SNOW4}${title}${C.RESET}  ${C.VOID4_FG}${'─'.repeat(Math.max(0, w - title.length - 4))}${C.RESET}`);
-  safeWriteLine('');
+  const title = "PLAN";
+  safeWriteLine("");
+  safeWriteLine(
+    `  ${C.SNOW4}${title}${C.RESET}  ${C.VOID4_FG}${"─".repeat(Math.max(0, w - title.length - 4))}${C.RESET}`,
+  );
+  safeWriteLine("");
 
   steps.forEach((step, i) => {
-    const num = `${i + 1}`.padStart(2, ' ');
+    const num = `${i + 1}`.padStart(2, " ");
     const meta = DOT_BY_STATE[step.state];
-    const textColor = step.state === 'pending' ? C.SNOW2 : C.SNOW;
-    safeWriteLine(`    ${C.SNOW4}${num}${C.RESET}  ${meta.color}${meta.glyph}${C.RESET}  ${textColor}${step.text}${C.RESET}`);
+    const textColor = step.state === "pending" ? C.SNOW2 : C.SNOW;
+    safeWriteLine(
+      `    ${C.SNOW4}${num}${C.RESET}  ${meta.color}${meta.glyph}${C.RESET}  ${textColor}${step.text}${C.RESET}`,
+    );
   });
 
-  safeWriteLine('');
-  safeWriteLine(`  ${C.VOID4_FG}${'─'.repeat(w)}${C.RESET}`);
-  safeWriteLine('');
-  safeWriteLine(`  ${C.SNOW3}Approve plan?${C.RESET} ${C.LAVA}[Y/n]${C.RESET}  ${C.LAVA}›${C.RESET} `);
+  safeWriteLine("");
+  safeWriteLine(`  ${C.VOID4_FG}${"─".repeat(w)}${C.RESET}`);
+  safeWriteLine("");
+  safeWriteLine(
+    `  ${C.SNOW3}Approve plan?${C.RESET} ${C.LAVA}[Y/n]${C.RESET}  ${C.LAVA}›${C.RESET} `,
+  );
 }
 
 /**
@@ -79,9 +85,9 @@ export function renderPlan(steps: ReadonlyArray<PlanStep>): void {
  * print it on the current line or after a clear.
  */
 export function renderStepUpdate(step: PlanStep, index: number): string {
-  const num = `${index + 1}`.padStart(2, ' ');
+  const num = `${index + 1}`.padStart(2, " ");
   const meta = DOT_BY_STATE[step.state];
-  const textColor = step.state === 'pending' ? C.SNOW2 : C.SNOW;
+  const textColor = step.state === "pending" ? C.SNOW2 : C.SNOW;
   return `    ${C.SNOW4}${num}${C.RESET}  ${meta.color}${meta.glyph}${C.RESET}  ${textColor}${step.text}${C.RESET}`;
 }
 
@@ -90,5 +96,7 @@ export function renderStepUpdate(step: PlanStep, index: number): string {
  * for plan confirmation outside the `renderPlan` flow.
  */
 export function renderApprovalPrompt(): void {
-  safeWrite(`  ${C.SNOW3}Approve plan?${C.RESET} ${C.LAVA}[Y/n]${C.RESET}  ${C.LAVA}›${C.RESET} `);
+  safeWrite(
+    `  ${C.SNOW3}Approve plan?${C.RESET} ${C.LAVA}[Y/n]${C.RESET}  ${C.LAVA}›${C.RESET} `,
+  );
 }

@@ -18,27 +18,65 @@
  * Adds Rust as a first-class language for the first time (the old
  * regex-only path did not extract Rust symbols at all).
  */
-import fs from 'fs';
-import path from 'path';
-import { ParserFactory, languageIdFromExtension, type ParserAdapter, type LanguageId } from './parser-adapter.js';
+import fs from "fs";
+import path from "path";
+import {
+  ParserFactory,
+  languageIdFromExtension,
+  type ParserAdapter,
+  type LanguageId,
+} from "./parser-adapter.js";
 
 /* ──────────────────────── Config ──────────────────────── */
 
 const IGNORE_DIRS = new Set([
-  'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
-  '__pycache__', '.pytest_cache', 'coverage', '.turbo',
-  '.vercel', '.output', '.cache', '.parcel-cache', 'vendor',
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  "__pycache__",
+  ".pytest_cache",
+  "coverage",
+  ".turbo",
+  ".vercel",
+  ".output",
+  ".cache",
+  ".parcel-cache",
+  "vendor",
 ]);
 
 const IGNORE_FILES = new Set([
-  '.DS_Store', 'Thumbs.db', 'package-lock.json', 'yarn.lock',
-  'pnpm-lock.yaml', 'bun.lockb', '.env', '.env.local',
+  ".DS_Store",
+  "Thumbs.db",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "bun.lockb",
+  ".env",
+  ".env.local",
 ]);
 
 const CODE_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs',
-  '.java', '.kt', '.swift', '.rb', '.php', '.c', '.cpp',
-  '.h', '.cs', '.vue', '.svelte',
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".py",
+  ".go",
+  ".rs",
+  ".java",
+  ".kt",
+  ".swift",
+  ".rb",
+  ".php",
+  ".c",
+  ".cpp",
+  ".h",
+  ".cs",
+  ".vue",
+  ".svelte",
 ]);
 
 /**
@@ -52,7 +90,13 @@ const DEFAULT_MAX_FILES = 200;
 /** Tree-sitter languages we pre-warm before scanning. Anything not in
  *  this list falls back to the regex extractor — that's the existing
  *  behaviour for Java/Kotlin/Swift/Ruby/etc. */
-const PREWARM_LANGUAGES: LanguageId[] = ['typescript', 'javascript', 'python', 'go', 'rust'];
+const PREWARM_LANGUAGES: LanguageId[] = [
+  "typescript",
+  "javascript",
+  "python",
+  "go",
+  "rust",
+];
 
 /* ──────────────────────── Types ──────────────────────── */
 
@@ -95,7 +139,10 @@ export async function buildRepoMap(
   const opts: BuildRepoMapOptions = Array.isArray(optsOrExcludes)
     ? { additionalExcludes: optsOrExcludes }
     : (optsOrExcludes ?? {});
-  const excludes = new Set([...IGNORE_DIRS, ...(opts.additionalExcludes ?? [])]);
+  const excludes = new Set([
+    ...IGNORE_DIRS,
+    ...(opts.additionalExcludes ?? []),
+  ]);
   const maxDepth = Math.max(1, opts.maxDepth ?? DEFAULT_MAX_DEPTH);
   const maxFiles = Math.max(1, opts.maxFiles ?? DEFAULT_MAX_FILES);
 
@@ -105,7 +152,7 @@ export async function buildRepoMap(
   let adapter: ParserAdapter | null = null;
   try {
     adapter = await ParserFactory.getParser();
-    if (adapter.name === 'tree-sitter') {
+    if (adapter.name === "tree-sitter") {
       const ts = adapter as ParserAdapter & {
         loadLanguage?: (lang: LanguageId) => Promise<boolean>;
       };
@@ -120,10 +167,10 @@ export async function buildRepoMap(
   }
 
   const tree = scanDirectory(cwd, excludes, 0, adapter, maxDepth, maxFiles);
-  if (!tree) return '(empty workspace)';
+  if (!tree) return "(empty workspace)";
 
-  const lines: string[] = ['## Workspace Structure'];
-  renderTree(tree, '', lines, true);
+  const lines: string[] = ["## Workspace Structure"];
+  renderTree(tree, "", lines, true);
 
   // Count stats
   let fileCount = 0;
@@ -133,10 +180,10 @@ export async function buildRepoMap(
     dirCount = stats.dirs;
   });
 
-  lines.push('');
+  lines.push("");
   lines.push(`_${fileCount} files, ${dirCount} directories_`);
 
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 /* ──────────────────────── Tree Scanner ──────────────────────── */
@@ -171,12 +218,23 @@ function scanDirectory(
 
   for (const entry of entries) {
     // Hardcoded global structural blacklist to prevent token explosion
-    const blacklist = ['.git', 'node_modules', 'dist', 'build', 'out', '.next', '.nuxt', 'coverage', 'package-lock.json', 'yarn.lock'];
+    const blacklist = [
+      ".git",
+      "node_modules",
+      "dist",
+      "build",
+      "out",
+      ".next",
+      ".nuxt",
+      "coverage",
+      "package-lock.json",
+      "yarn.lock",
+    ];
     if (blacklist.includes(entry.name)) continue;
 
     if (excludes.has(entry.name)) continue;
     if (IGNORE_FILES.has(entry.name)) continue;
-    if (entry.name.startsWith('.') && entry.isFile()) continue;
+    if (entry.name.startsWith(".") && entry.isFile()) continue;
 
     if (entry.isDirectory()) {
       const subtree = scanDirectory(
@@ -242,10 +300,14 @@ function scanDirectory(
  * adapter error — returns an empty list rather than crashing the
  * scan.
  */
-function extractExports(filePath: string, ext: string, adapter: ParserAdapter | null): string[] {
+function extractExports(
+  filePath: string,
+  ext: string,
+  adapter: ParserAdapter | null,
+): string[] {
   let content: string;
   try {
-    content = fs.readFileSync(filePath, 'utf-8');
+    content = fs.readFileSync(filePath, "utf-8");
   } catch {
     return [];
   }
@@ -258,9 +320,7 @@ function extractExports(filePath: string, ext: string, adapter: ParserAdapter | 
   if (adapter) {
     try {
       const symbols = adapter.extractSymbols(content, language);
-      const names = symbols
-        .filter((s) => s.exported)
-        .map((s) => s.name);
+      const names = symbols.filter((s) => s.exported).map((s) => s.name);
       // Dedupe while preserving order — repo-map only renders the
       // first ~8 anyway, but stable ordering keeps cached output
       // diffs minimal.
@@ -286,7 +346,7 @@ function extractExports(filePath: string, ext: string, adapter: ParserAdapter | 
 function inlineRegexExports(content: string, ext: string): string[] {
   const exports: string[] = [];
 
-  if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+  if ([".ts", ".tsx", ".js", ".jsx"].includes(ext)) {
     const patterns = [
       /export\s+(?:async\s+)?function\s+(\w+)/g,
       /export\s+class\s+(\w+)/g,
@@ -302,7 +362,7 @@ function inlineRegexExports(content: string, ext: string): string[] {
         exports.push(match[1]);
       }
     }
-  } else if (ext === '.py') {
+  } else if (ext === ".py") {
     const patterns = [/^def\s+(\w+)/gm, /^class\s+(\w+)/gm];
     for (const pattern of patterns) {
       let match: RegExpExecArray | null;
@@ -310,7 +370,7 @@ function inlineRegexExports(content: string, ext: string): string[] {
         exports.push(match[1]);
       }
     }
-  } else if (ext === '.go') {
+  } else if (ext === ".go") {
     const pattern = /^func\s+([A-Z]\w*)/gm;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(content)) !== null) {
@@ -323,7 +383,12 @@ function inlineRegexExports(content: string, ext: string): string[] {
 
 /* ──────────────────────── Tree Rendering ──────────────────────── */
 
-function renderTree(entry: TreeEntry, prefix: string, lines: string[], isRoot: boolean): void {
+function renderTree(
+  entry: TreeEntry,
+  prefix: string,
+  lines: string[],
+  isRoot: boolean,
+): void {
   if (isRoot) {
     lines.push(`📁 ${entry.name}/`);
   }
@@ -333,8 +398,8 @@ function renderTree(entry: TreeEntry, prefix: string, lines: string[], isRoot: b
   for (let i = 0; i < entry.children.length; i++) {
     const child = entry.children[i];
     const isLast = i === entry.children.length - 1;
-    const connector = isLast ? '└── ' : '├── ';
-    const nextPrefix = prefix + (isLast ? '    ' : '│   ');
+    const connector = isLast ? "└── " : "├── ";
+    const nextPrefix = prefix + (isLast ? "    " : "│   ");
 
     if (child.isDir) {
       lines.push(`${prefix}${connector}📁 ${child.name}/`);
@@ -343,8 +408,8 @@ function renderTree(entry: TreeEntry, prefix: string, lines: string[], isRoot: b
       let line = `${prefix}${connector}${child.name}`;
 
       if (child.exports && child.exports.length > 0) {
-        const exportStr = child.exports.slice(0, 8).join(', ');
-        const suffix = child.exports.length > 8 ? ', …' : '';
+        const exportStr = child.exports.slice(0, 8).join(", ");
+        const suffix = child.exports.length > 8 ? ", …" : "";
         line += `  → {${exportStr}${suffix}}`;
       }
 
@@ -359,7 +424,7 @@ function countEntries(
   entry: TreeEntry,
   stats: { files: number; dirs: number },
   callback: (stats: { files: number; dirs: number }) => void,
-  depth = 0
+  depth = 0,
 ): void {
   if (depth > 20) return;
   if (entry.isDir) {

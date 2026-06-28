@@ -23,9 +23,9 @@
  * boundary, so availability beats precision.
  */
 
-import fs from 'node:fs';
-import { countTokens } from './tokenizer.js';
-import { resolveModelContextLimit } from './conversation.js';
+import fs from "node:fs";
+import { countTokens } from "./tokenizer.js";
+import { resolveModelContextLimit } from "./conversation.js";
 
 /** ~4 bytes per token is the industry-standard rough estimate for English text. */
 const FALLBACK_BYTES_PER_TOKEN = 4;
@@ -74,32 +74,44 @@ export function estimateReadCost(
 
     if (bytes <= SAMPLE_BYTES) {
       // Small enough to tokenise exactly.
-      const text = fs.readFileSync(absolutePath, 'utf-8');
+      const text = fs.readFileSync(absolutePath, "utf-8");
       try {
         const projectedTokens = countTokens(text, model);
         return { bytes, projectedTokens, exact: true };
       } catch {
-        return { bytes, projectedTokens: Math.ceil(bytes / FALLBACK_BYTES_PER_TOKEN), exact: false };
+        return {
+          bytes,
+          projectedTokens: Math.ceil(bytes / FALLBACK_BYTES_PER_TOKEN),
+          exact: false,
+        };
       }
     }
 
     // Larger file: tokenise the first SAMPLE_BYTES and extrapolate.
-    const fd = fs.openSync(absolutePath, 'r');
+    const fd = fs.openSync(absolutePath, "r");
     try {
       const buf = Buffer.alloc(SAMPLE_BYTES);
       const read = fs.readSync(fd, buf, 0, SAMPLE_BYTES, 0);
-      const sample = buf.subarray(0, read).toString('utf-8');
+      const sample = buf.subarray(0, read).toString("utf-8");
       const sampleTokens = countTokens(sample, model);
       const tokensPerByte = sampleTokens / Math.max(read, 1);
       const projectedTokens = Math.ceil(tokensPerByte * bytes);
       return { bytes, projectedTokens, exact: false };
     } catch {
-      return { bytes, projectedTokens: Math.ceil(bytes / FALLBACK_BYTES_PER_TOKEN), exact: false };
+      return {
+        bytes,
+        projectedTokens: Math.ceil(bytes / FALLBACK_BYTES_PER_TOKEN),
+        exact: false,
+      };
     } finally {
       // safe: closeSync after a failed openSync just means there was
       // no fd to close, or the kernel already reaped it. Either way
       // resource recovery is best-effort.
-      try { fs.closeSync(fd); } catch { /* safe: see above */ }
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* safe: see above */
+      }
     }
   } catch {
     return { bytes: 0, projectedTokens: 0, exact: false };
@@ -123,13 +135,15 @@ export function shouldDeferRead(
 ): DeferDecision {
   const modelLimit = resolveModelContextLimit(model);
   // budgetPct is sanitised: clamp to (0, 1].
-  const pct = !Number.isFinite(budgetPct) || budgetPct <= 0
-    ? DEFAULT_PREDICTIVE_BUDGET_PCT
-    : Math.min(budgetPct, 1);
+  const pct =
+    !Number.isFinite(budgetPct) || budgetPct <= 0
+      ? DEFAULT_PREDICTIVE_BUDGET_PCT
+      : Math.min(budgetPct, 1);
   const hardCap = Math.floor(modelLimit * pct);
-  const projectedTotal = Math.max(0, conversationTokens) + Math.max(0, estimate.projectedTokens);
+  const projectedTotal =
+    Math.max(0, conversationTokens) + Math.max(0, estimate.projectedTokens);
   if (projectedTotal <= hardCap) {
-    return { defer: false, reason: 'within budget', projectedTotal, hardCap };
+    return { defer: false, reason: "within budget", projectedTotal, hardCap };
   }
   const overshoot = projectedTotal - hardCap;
   return {
@@ -153,10 +167,10 @@ export function formatPredictiveGateDirective(
 ): string {
   return [
     `[Context-Budget Guard] read_file ${relativePath} deferred.`,
-    `  bytes=${estimate.bytes.toLocaleString()} projected_tokens=${estimate.projectedTokens.toLocaleString()}${estimate.exact ? '' : ' (estimated)'}`,
+    `  bytes=${estimate.bytes.toLocaleString()} projected_tokens=${estimate.projectedTokens.toLocaleString()}${estimate.exact ? "" : " (estimated)"}`,
     `  ${decision.reason}.`,
     `  → Use extract_symbols or extract_imports to scan the file's surface, then`,
     `    read_file with explicit lines, or use str_replace to edit without`,
     `    pulling the full file into context.`,
-  ].join('\n');
+  ].join("\n");
 }

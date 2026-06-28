@@ -28,4 +28,4 @@ export const FILE_WRITING_RULES_BLOCK = [
   `Target paths must NEVER be blank, empty, or evaluate to the directory root (e.g. \`.\`). Always specify the exact file name (e.g. \`path/to/file.ts\`). Writing to a blank path will fail with an EISDIR error.`,
   `If you find yourself reaching for any of these, stop and use \`write_file\` (or \`str_replace\`/\`apply_patch\` for edits) instead — it is faster, safer, and the only path that actually succeeds.`,
   `\`run_command\` is for running things (tests, builds, git, lint, format), not for producing files.`,
-].join('\n');
+].join("\n");

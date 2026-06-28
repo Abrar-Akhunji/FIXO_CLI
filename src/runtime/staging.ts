@@ -32,11 +32,11 @@
  * runs against the same workspace.
  */
 
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { WorkspaceGuard } from '../workspace-guard.js';
-import { getRunInventory } from './run-inventory.js';
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { WorkspaceGuard } from "../workspace-guard.js";
+import { getRunInventory } from "./run-inventory.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -64,7 +64,10 @@ export interface AtomicStagingOptions {
    * syntax damage (e.g. the LLM pasting code into the wrong
    * function) is caught before it lands on disk.
    */
-  syntaxHealthCheck?: (entry: StagedWrite, content: string) => Promise<void> | void;
+  syntaxHealthCheck?: (
+    entry: StagedWrite,
+    content: string,
+  ) => Promise<void> | void;
   /**
    * If false, the manager operates in "dry-run" mode: stage()
    * writes to the shadow dir but commit() refuses to swap. Useful
@@ -113,7 +116,7 @@ export class StagedWriteNotFoundError extends Error {
   public readonly id: string;
   constructor(id: string) {
     super(`No staged write with id ${id}`);
-    this.name = 'StagedWriteNotFoundError';
+    this.name = "StagedWriteNotFoundError";
     this.id = id;
   }
 }
@@ -123,8 +126,10 @@ export class PreCommitHookRejectedError extends Error {
   public readonly id: string;
   public readonly cause: unknown;
   constructor(id: string, cause: unknown) {
-    super(`Write rejected by pre-commit hook. Reason: ${String(cause)}. (Staged write id: ${id})`);
-    this.name = 'PreCommitHookRejectedError';
+    super(
+      `Write rejected by pre-commit hook. Reason: ${String(cause)}. (Staged write id: ${id})`,
+    );
+    this.name = "PreCommitHookRejectedError";
     this.id = id;
     this.cause = cause;
   }
@@ -135,7 +140,7 @@ export class StagingPathEscapeError extends Error {
   public readonly attempted: string;
   constructor(attempted: string) {
     super(`Staging refused: path escapes workspace root: ${attempted}`);
-    this.name = 'StagingPathEscapeError';
+    this.name = "StagingPathEscapeError";
     this.attempted = attempted;
   }
 }
@@ -145,17 +150,17 @@ export class StagingPathEscapeError extends Error {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-const STAGING_DIR_NAME = 'staging';
-const META_SUFFIX = '.meta.json';
-const PENDING_SUFFIX = '.pending';
-const BACKUP_SUFFIX = '.pending.bak';
+const STAGING_DIR_NAME = "staging";
+const META_SUFFIX = ".meta.json";
+const PENDING_SUFFIX = ".pending";
+const BACKUP_SUFFIX = ".pending.bak";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const sha256 = (input: string): string =>
-  crypto.createHash('sha256').update(input, 'utf-8').digest('hex');
+  crypto.createHash("sha256").update(input, "utf-8").digest("hex");
 
 /** Try to chmod; ignore on platforms that don't support it. */
 const chmodSafe = (filePath: string, mode: number): void => {
@@ -182,8 +187,10 @@ const rmSafe = (target: string): void => {
 export class AtomicStagingManager {
   public readonly cwd: string;
   public readonly runId: string;
-  public readonly options: Required<Pick<AtomicStagingOptions, 'ttlMs' | 'enabled'>> &
-    Pick<AtomicStagingOptions, 'preCommitHook' | 'syntaxHealthCheck'>;
+  public readonly options: Required<
+    Pick<AtomicStagingOptions, "ttlMs" | "enabled">
+  > &
+    Pick<AtomicStagingOptions, "preCommitHook" | "syntaxHealthCheck">;
   /** Absolute path of the staging directory for this run. */
   public readonly stagingDir: string;
 
@@ -201,7 +208,12 @@ export class AtomicStagingManager {
       preCommitHook: options.preCommitHook,
       syntaxHealthCheck: options.syntaxHealthCheck,
     };
-    this.stagingDir = path.join(this.cwd, '.fixo', STAGING_DIR_NAME, this.runId);
+    this.stagingDir = path.join(
+      this.cwd,
+      ".fixo",
+      STAGING_DIR_NAME,
+      this.runId,
+    );
   }
 
   /** Ensure the staging directory exists with mode 0o700. */
@@ -214,7 +226,7 @@ export class AtomicStagingManager {
   private resolveTarget(relativeOrAbsolute: string): string {
     const guard = new WorkspaceGuard(this.cwd);
     try {
-      return guard.resolve(relativeOrAbsolute, 'file', true);
+      return guard.resolve(relativeOrAbsolute, "file", true);
     } catch {
       throw new StagingPathEscapeError(relativeOrAbsolute);
     }
@@ -236,7 +248,7 @@ export class AtomicStagingManager {
 
     // Write pending content (atomic: write to temp + rename).
     const tmpPath = `${pendingPath}.tmp`;
-    fs.writeFileSync(tmpPath, content, { encoding: 'utf-8', mode: 0o600 });
+    fs.writeFileSync(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
     chmodSafe(tmpPath, 0o600);
     fs.renameSync(tmpPath, pendingPath);
 
@@ -247,7 +259,7 @@ export class AtomicStagingManager {
       createdAt: Date.now(),
     };
     fs.writeFileSync(metaPath, JSON.stringify(meta), {
-      encoding: 'utf-8',
+      encoding: "utf-8",
       mode: 0o600,
     });
     chmodSafe(metaPath, 0o600);
@@ -265,7 +277,7 @@ export class AtomicStagingManager {
   /** Read a staged write's content (lazy — only read on demand). */
   public read(id: string): string {
     const entry = this.readEntry(id);
-    return fs.readFileSync(entry.pendingPath, 'utf-8');
+    return fs.readFileSync(entry.pendingPath, "utf-8");
   }
 
   /** Look up a staged write by id without touching the file system further. */
@@ -275,7 +287,7 @@ export class AtomicStagingManager {
     if (!fs.existsSync(pendingPath) || !fs.existsSync(metaPath)) {
       throw new StagedWriteNotFoundError(id);
     }
-    const raw = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as {
+    const raw = JSON.parse(fs.readFileSync(metaPath, "utf-8")) as {
       targetPath: string;
       mode: number;
       createdAt: number;
@@ -353,7 +365,7 @@ export class AtomicStagingManager {
     // swap. If the staged content is syntactically broken the
     // write is rejected and discarded; the target is preserved.
     if (this.options.syntaxHealthCheck) {
-      const content = fs.readFileSync(entry.pendingPath, 'utf-8');
+      const content = fs.readFileSync(entry.pendingPath, "utf-8");
       try {
         await this.options.syntaxHealthCheck(entry, content);
       } catch (cause) {
@@ -364,7 +376,10 @@ export class AtomicStagingManager {
 
     if (!this.options.enabled) {
       // Dry-run mode: leave the staged write in place.
-      const bytes = Buffer.byteLength(fs.readFileSync(entry.pendingPath), 'utf-8');
+      const bytes = Buffer.byteLength(
+        fs.readFileSync(entry.pendingPath),
+        "utf-8",
+      );
       return {
         committed: false,
         targetPath: target,
@@ -400,7 +415,10 @@ export class AtomicStagingManager {
       // 5. Clear the backup.
       if (existed) rmSafe(backup);
 
-      const bytes = Buffer.byteLength(fs.readFileSync(target, 'utf-8'), 'utf-8');
+      const bytes = Buffer.byteLength(
+        fs.readFileSync(target, "utf-8"),
+        "utf-8",
+      );
       // Tidy up the meta sidecar.
       rmSafe(entry.metaPath);
       getRunInventory(this.runId).invalidate(target);
@@ -455,7 +473,11 @@ export class AtomicStagingManager {
   public async applySurgicalReplace(
     target: string,
     newContent: string,
-    meta: { runId: string; reason: 'str_replace' | 'todo_write' | 'subagent'; actorId: string },
+    meta: {
+      runId: string;
+      reason: "str_replace" | "todo_write" | "subagent";
+      actorId: string;
+    },
   ): Promise<{ ok: true; path: string; bytes: number }> {
     const resolved = this.resolveTarget(target);
     const id = sha256(resolved);
@@ -468,7 +490,7 @@ export class AtomicStagingManager {
 
     // 1. Write the new content to the .pending file (atomic via temp+rename).
     const tmpPath = `${pendingPath}.tmp`;
-    fs.writeFileSync(tmpPath, newContent, { encoding: 'utf-8', mode: 0o600 });
+    fs.writeFileSync(tmpPath, newContent, { encoding: "utf-8", mode: 0o600 });
     chmodSafe(tmpPath, 0o600);
     fs.renameSync(tmpPath, pendingPath);
 
@@ -482,7 +504,7 @@ export class AtomicStagingManager {
       runId: meta.runId,
     };
     fs.writeFileSync(metaPath, JSON.stringify(metaPayload), {
-      encoding: 'utf-8',
+      encoding: "utf-8",
       mode: 0o600,
     });
     chmodSafe(metaPath, 0o600);
@@ -513,7 +535,10 @@ export class AtomicStagingManager {
       if (existed) rmSafe(backup);
       rmSafe(metaPath);
 
-      const bytes = Buffer.byteLength(fs.readFileSync(resolved, 'utf-8'), 'utf-8');
+      const bytes = Buffer.byteLength(
+        fs.readFileSync(resolved, "utf-8"),
+        "utf-8",
+      );
       getRunInventory(this.runId).invalidate(resolved);
       return { ok: true, path: resolved, bytes };
     } catch (err) {
@@ -562,7 +587,7 @@ export class AtomicStagingManager {
    */
   public static garbageCollectAll(cwd: string, ttlMs?: number): number {
     const root = path.resolve(cwd);
-    const stagingRoot = path.join(root, '.fixo', STAGING_DIR_NAME);
+    const stagingRoot = path.join(root, ".fixo", STAGING_DIR_NAME);
     if (!fs.existsSync(stagingRoot)) return 0;
     let removed = 0;
     let runDirs: string[];

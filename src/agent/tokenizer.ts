@@ -21,17 +21,17 @@
  * tables are several MB and would otherwise inflate CLI cold-start.
  */
 
-import { encode as cl100kEncode } from 'gpt-tokenizer/encoding/cl100k_base';
-import { encode as o200kEncode } from 'gpt-tokenizer/encoding/o200k_base';
-import type { ChatContentBlock } from '../shared/types.js';
-import { IMAGE_TOKEN_COST } from '../shared/content.js';
+import { encode as cl100kEncode } from "gpt-tokenizer/encoding/cl100k_base";
+import { encode as o200kEncode } from "gpt-tokenizer/encoding/o200k_base";
+import type { ChatContentBlock } from "../shared/types.js";
+import { IMAGE_TOKEN_COST } from "../shared/content.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 /** Names of the encoders we ship. Kept as a closed union for type safety. */
-export type EncoderName = 'cl100k_base' | 'o200k_base';
+export type EncoderName = "cl100k_base" | "o200k_base";
 
 interface Encoder {
   readonly name: EncoderName;
@@ -49,26 +49,28 @@ interface Encoder {
  * which is the universal BPE that every modern OpenAI-adjacent model is
  * based on. GPT-4o / GPT-4.1 use the newer o200k_base vocabulary.
  */
-export function resolveEncoderForModel(model: string | undefined | null): EncoderName {
-  if (!model) return 'cl100k_base';
+export function resolveEncoderForModel(
+  model: string | undefined | null,
+): EncoderName {
+  if (!model) return "cl100k_base";
   // GPT-4o and GPT-4.1 use the new o200k_base vocabulary.
   if (/\bgpt-4o\b|\bgpt-4\.1\b|\bo1\b|\bo3\b|\bo4\b/i.test(model)) {
-    return 'o200k_base';
+    return "o200k_base";
   }
   // Everything else — including claude, llama, gemini, mistral, qwen,
   // deepseek, codestral, gpt-3.5, gpt-4 (non-4o), command-r — falls
   // back to cl100k_base. The token count is approximate, but close
   // enough to prevent overflows.
-  return 'cl100k_base';
+  return "cl100k_base";
 }
 
 const ENCODERS: Record<EncoderName, Encoder> = {
   cl100k_base: {
-    name: 'cl100k_base',
+    name: "cl100k_base",
     encode: (input) => cl100kEncode(input),
   },
   o200k_base: {
-    name: 'o200k_base',
+    name: "o200k_base",
     encode: (input) => o200kEncode(input),
   },
 };
@@ -99,13 +101,13 @@ export function countMessagesTokens(
   for (const m of messages) {
     total += PER_MESSAGE_OVERHEAD;
     const c = m.content;
-    if (typeof c === 'string' && c.length > 0) {
+    if (typeof c === "string" && c.length > 0) {
       total += countTokens(c, model);
     } else if (Array.isArray(c)) {
       for (const block of c) {
-        if (block.type === 'text' && block.text.length > 0) {
+        if (block.type === "text" && block.text.length > 0) {
           total += countTokens(block.text, model);
-        } else if (block.type === 'image') {
+        } else if (block.type === "image") {
           // Fixed estimate per the Phase 2 plan. See shared/content.ts.
           total += IMAGE_TOKEN_COST;
         }

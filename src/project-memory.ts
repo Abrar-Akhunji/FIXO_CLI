@@ -1,9 +1,9 @@
-import fs from 'fs';
-import path from 'path';
-import { createRequire } from 'node:module';
+import fs from "fs";
+import path from "path";
+import { createRequire } from "node:module";
 
 export interface ProjectFacts {
-  packageManager: 'npm' | 'pnpm' | 'yarn' | 'unknown';
+  packageManager: "npm" | "pnpm" | "yarn" | "unknown";
   scripts: Record<string, string>;
   testCommands: string[];
   buildCommands: string[];
@@ -15,55 +15,69 @@ export interface ProjectFacts {
 }
 
 export function detectProjectFacts(cwd: string): ProjectFacts {
-  const packageJson = path.join(cwd, 'package.json');
+  const packageJson = path.join(cwd, "package.json");
   let scripts: Record<string, string> = {};
   if (fs.existsSync(packageJson)) {
     try {
-      scripts = JSON.parse(fs.readFileSync(packageJson, 'utf-8')).scripts ?? {};
+      scripts = JSON.parse(fs.readFileSync(packageJson, "utf-8")).scripts ?? {};
     } catch (error: unknown) {
-      if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+      if (
+        process.env.DEBUG ||
+        process.env.VERBOSE ||
+        process.argv.includes("--verbose")
+      ) {
         const msg = error instanceof Error ? error.message : String(error);
-        console.warn(`[Debug Warning] Failed to parse package.json scripts: ${msg}`);
+        console.warn(
+          `[Debug Warning] Failed to parse package.json scripts: ${msg}`,
+        );
       }
       scripts = {};
     }
   }
-  const packageManager = fs.existsSync(path.join(cwd, 'pnpm-lock.yaml'))
-    ? 'pnpm'
-    : fs.existsSync(path.join(cwd, 'yarn.lock'))
-      ? 'yarn'
-      : fs.existsSync(path.join(cwd, 'package-lock.json'))
-        ? 'npm'
-        : 'unknown';
-  const prefix = packageManager === 'unknown' ? 'npm' : packageManager;
+  const packageManager = fs.existsSync(path.join(cwd, "pnpm-lock.yaml"))
+    ? "pnpm"
+    : fs.existsSync(path.join(cwd, "yarn.lock"))
+      ? "yarn"
+      : fs.existsSync(path.join(cwd, "package-lock.json"))
+        ? "npm"
+        : "unknown";
+  const prefix = packageManager === "unknown" ? "npm" : packageManager;
   return {
     packageManager,
     scripts,
-    testCommands: Object.keys(scripts).filter(k => /test|check|typecheck/.test(k)).map(k => `${prefix} run ${k}`),
-    buildCommands: Object.keys(scripts).filter(k => /build/.test(k)).map(k => `${prefix} run ${k}`),
+    testCommands: Object.keys(scripts)
+      .filter((k) => /test|check|typecheck/.test(k))
+      .map((k) => `${prefix} run ${k}`),
+    buildCommands: Object.keys(scripts)
+      .filter((k) => /build/.test(k))
+      .map((k) => `${prefix} run ${k}`),
     tsconfigs: findFiles(cwd, /^tsconfig.*\.json$/).slice(0, 20),
     updatedAt: new Date().toISOString(),
     allowRules: readAllowRules(cwd),
   };
 }
 
-import { colors } from './ui/colors.js';
+import { colors } from "./ui/colors.js";
 
 /** Minimal interface for the subset of Node.js built-in SQLite API we use. */
 interface DatabaseSync {
   exec(sql: string): void;
-  prepare(sql: string): { all(...args: unknown[]): unknown[]; run(...args: unknown[]): void; get(...args: unknown[]): unknown };
+  prepare(sql: string): {
+    all(...args: unknown[]): unknown[];
+    run(...args: unknown[]): void;
+    get(...args: unknown[]): unknown;
+  };
   close?(): void;
 }
 
 let dbInstance: DatabaseSync | null = null;
-let lastCwd = '';
+let lastCwd = "";
 
 let _DatabaseSyncCtor: (new (path: string) => DatabaseSync) | null = null;
 function getDatabaseSync(): new (path: string) => DatabaseSync {
   if (!_DatabaseSyncCtor) {
     const _require = createRequire(import.meta.url);
-    const sqlite = _require('node:sqlite');
+    const sqlite = _require("node:sqlite");
     _DatabaseSyncCtor = sqlite.DatabaseSync;
   }
   return _DatabaseSyncCtor!;
@@ -72,7 +86,7 @@ function getDatabaseSync(): new (path: string) => DatabaseSync {
 export function getDb(cwd: string): DatabaseSync {
   const dir = memoryDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
-  const dbPath = path.join(dir, 'memory.db');
+  const dbPath = path.join(dir, "memory.db");
 
   if (dbInstance && lastCwd === cwd) {
     return dbInstance;
@@ -82,9 +96,15 @@ export function getDb(cwd: string): DatabaseSync {
     try {
       dbInstance.close?.();
     } catch (error: unknown) {
-      if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+      if (
+        process.env.DEBUG ||
+        process.env.VERBOSE ||
+        process.argv.includes("--verbose")
+      ) {
         const msg = error instanceof Error ? error.message : String(error);
-        console.warn(`[Debug Warning] Failed to close database instance: ${msg}`);
+        console.warn(
+          `[Debug Warning] Failed to close database instance: ${msg}`,
+        );
       }
     }
   }
@@ -110,39 +130,44 @@ export function getDb(cwd: string): DatabaseSync {
   `);
 
   // Migrate legacy memory.md if present
-  const memoryFile = path.join(dir, 'memory.md');
+  const memoryFile = path.join(dir, "memory.md");
   if (fs.existsSync(memoryFile)) {
     try {
-      const content = fs.readFileSync(memoryFile, 'utf-8');
-      const lines = content.split('\n');
+      const content = fs.readFileSync(memoryFile, "utf-8");
+      const lines = content.split("\n");
       const insertStmt = dbInstance.prepare(`
         INSERT OR IGNORE INTO facts (content) VALUES (?)
       `);
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
           const fact = trimmed.slice(2).trim();
-          if (fact && fact !== 'FixO Project Memory') {
+          if (fact && fact !== "FixO Project Memory") {
             insertStmt.run(fact);
           }
         }
       }
 
-      fs.renameSync(memoryFile, path.join(dir, 'memory.md.migrated'));
+      fs.renameSync(memoryFile, path.join(dir, "memory.md.migrated"));
     } catch (err) {
-      console.warn(`[Memory Migration] Warning: Failed to migrate legacy memory.md: ${err instanceof Error ? err.message : String(err)}`);
+      console.warn(
+        `[Memory Migration] Warning: Failed to migrate legacy memory.md: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
   return dbInstance;
 }
 
-export function calculateTfidfSimilarity(query: string, documents: string[]): number[] {
+export function calculateTfidfSimilarity(
+  query: string,
+  documents: string[],
+): number[] {
   if (documents.length === 0) return [];
 
   const tokenize = (text: string): string[] => {
-    return (text.toLowerCase().match(/[a-z0-9]+/g) || []);
+    return text.toLowerCase().match(/[a-z0-9]+/g) || [];
   };
 
   const queryTokens = tokenize(query);
@@ -150,7 +175,7 @@ export function calculateTfidfSimilarity(query: string, documents: string[]): nu
     return new Array(documents.length).fill(0);
   }
 
-  const docTokensList = documents.map(doc => tokenize(doc));
+  const docTokensList = documents.map((doc) => tokenize(doc));
   const numDocs = documents.length;
 
   const allUniqueTokens = new Set([...queryTokens, ...docTokensList.flat()]);
@@ -167,7 +192,7 @@ export function calculateTfidfSimilarity(query: string, documents: string[]): nu
 
   const idf: Record<string, number> = {};
   for (const token of allUniqueTokens) {
-    idf[token] = Math.log(1 + (numDocs / (df[token] || 1)));
+    idf[token] = Math.log(1 + numDocs / (df[token] || 1));
   }
 
   const getVector = (tokens: string[]): Record<string, number> => {
@@ -234,17 +259,21 @@ export async function retrieveRelevantFacts(
   cwd: string,
   query: string,
   client?: any,
-  limit = 5
+  limit = 5,
 ): Promise<string[]> {
   const db = getDb(cwd);
-  const allRows = db.prepare('SELECT id, content, embedding FROM facts').all() as { id: number; content: string; embedding: string | null }[];
+  const allRows = db
+    .prepare("SELECT id, content, embedding FROM facts")
+    .all() as { id: number; content: string; embedding: string | null }[];
   if (allRows.length === 0) return [];
 
   if (client) {
     try {
       const queryEmbedding = await client.getEmbedding(query);
       if (queryEmbedding && Array.isArray(queryEmbedding)) {
-        const updateStmt = db.prepare('UPDATE facts SET embedding = ? WHERE id = ?');
+        const updateStmt = db.prepare(
+          "UPDATE facts SET embedding = ? WHERE id = ?",
+        );
         const similarities: { content: string; similarity: number }[] = [];
 
         for (const row of allRows) {
@@ -253,9 +282,16 @@ export async function retrieveRelevantFacts(
             try {
               factEmbedding = JSON.parse(row.embedding);
             } catch (error: unknown) {
-              if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
-                const msg = error instanceof Error ? error.message : String(error);
-                console.warn(`[Debug Warning] Failed to parse fact embedding JSON for ID ${row.id}: ${msg}`);
+              if (
+                process.env.DEBUG ||
+                process.env.VERBOSE ||
+                process.argv.includes("--verbose")
+              ) {
+                const msg =
+                  error instanceof Error ? error.message : String(error);
+                console.warn(
+                  `[Debug Warning] Failed to parse fact embedding JSON for ID ${row.id}: ${msg}`,
+                );
               }
             }
           }
@@ -268,7 +304,9 @@ export async function retrieveRelevantFacts(
               }
             } catch (err) {
               if (client.verbose) {
-                console.warn(`[Memory] Failed to compute embedding for fact ID ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+                console.warn(
+                  `[Memory] Failed to compute embedding for fact ID ${row.id}: ${err instanceof Error ? err.message : String(err)}`,
+                );
               }
             }
           }
@@ -282,52 +320,58 @@ export async function retrieveRelevantFacts(
         }
 
         similarities.sort((a, b) => b.similarity - a.similarity);
-        return similarities.slice(0, limit).map(s => s.content);
+        return similarities.slice(0, limit).map((s) => s.content);
       }
     } catch (err) {
-      console.warn(`${colors.yellow}Warning: Embeddings API failed. Falling back to local TF-IDF memory retrieval. Error: ${err instanceof Error ? err.message : String(err)}${colors.reset}`);
+      console.warn(
+        `${colors.yellow}Warning: Embeddings API failed. Falling back to local TF-IDF memory retrieval. Error: ${err instanceof Error ? err.message : String(err)}${colors.reset}`,
+      );
     }
   }
 
   try {
-    const docContents = allRows.map(r => r.content);
+    const docContents = allRows.map((r) => r.content);
     const sims = calculateTfidfSimilarity(query, docContents);
     const factsWithSim = allRows.map((row, idx) => ({
       content: row.content,
-      similarity: sims[idx] || 0
+      similarity: sims[idx] || 0,
     }));
 
     factsWithSim.sort((a, b) => b.similarity - a.similarity);
-    return factsWithSim.slice(0, limit).map(s => s.content);
+    return factsWithSim.slice(0, limit).map((s) => s.content);
   } catch (err) {
-    console.error(`${colors.red}Error: Local TF-IDF search failed. ${err instanceof Error ? err.message : String(err)}${colors.reset}`);
-    return allRows.slice(0, limit).map(r => r.content);
+    console.error(
+      `${colors.red}Error: Local TF-IDF search failed. ${err instanceof Error ? err.message : String(err)}${colors.reset}`,
+    );
+    return allRows.slice(0, limit).map((r) => r.content);
   }
 }
 
 export function appendSessionSummary(cwd: string, summary: string): void {
   const db = getDb(cwd);
-  const stmt = db.prepare('INSERT INTO session_history (summary) VALUES (?)');
+  const stmt = db.prepare("INSERT INTO session_history (summary) VALUES (?)");
   stmt.run(summary.trim());
 }
 
 export function readSessionHistory(cwd: string): string[] {
   const db = getDb(cwd);
-  const stmt = db.prepare('SELECT summary FROM session_history ORDER BY id DESC');
+  const stmt = db.prepare(
+    "SELECT summary FROM session_history ORDER BY id DESC",
+  );
   const rows = stmt.all() as { summary: string }[];
-  return rows.map(r => r.summary);
+  return rows.map((r) => r.summary);
 }
 
 export function memoryDir(cwd: string): string {
-  return path.join(cwd, '.fixo');
+  return path.join(cwd, ".fixo");
 }
 
 export function ensureProjectMemory(cwd: string): ProjectFacts {
   const dir = memoryDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
-  const projectFile = path.join(dir, 'project.json');
+  const projectFile = path.join(dir, "project.json");
   const facts = detectProjectFacts(cwd);
-  fs.writeFileSync(projectFile, JSON.stringify(facts, null, 2) + '\n', 'utf-8');
+  fs.writeFileSync(projectFile, JSON.stringify(facts, null, 2) + "\n", "utf-8");
   getDb(cwd); // Ensures DB is created and tables are initialized
   return facts;
 }
@@ -335,30 +379,44 @@ export function ensureProjectMemory(cwd: string): ProjectFacts {
 export function readMemory(cwd: string): string {
   ensureProjectMemory(cwd);
   const db = getDb(cwd);
-  const rows = db.prepare('SELECT content FROM facts ORDER BY id DESC').all() as { content: string }[];
+  const rows = db
+    .prepare("SELECT content FROM facts ORDER BY id DESC")
+    .all() as { content: string }[];
   if (rows.length === 0) {
-    return '';
+    return "";
   }
-  return rows.map(r => `- ${r.content}`).join('\n');
+  return rows.map((r) => `- ${r.content}`).join("\n");
 }
 
 export function appendMemory(cwd: string, text: string): void {
   ensureProjectMemory(cwd);
   const db = getDb(cwd);
-  const stmt = db.prepare('INSERT OR IGNORE INTO facts (content) VALUES (?)');
+  const stmt = db.prepare("INSERT OR IGNORE INTO facts (content) VALUES (?)");
   stmt.run(text.trim());
 }
 
 export function readAllowRules(cwd: string): { commands: string[] } {
-  const file = path.join(memoryDir(cwd), 'allow-rules.json');
+  const file = path.join(memoryDir(cwd), "allow-rules.json");
   if (!fs.existsSync(file)) return { commands: [] };
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as { commands?: string[] };
-    return { commands: Array.isArray(parsed.commands) ? parsed.commands.filter(Boolean) : [] };
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as {
+      commands?: string[];
+    };
+    return {
+      commands: Array.isArray(parsed.commands)
+        ? parsed.commands.filter(Boolean)
+        : [],
+    };
   } catch (error: unknown) {
-    if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+    if (
+      process.env.DEBUG ||
+      process.env.VERBOSE ||
+      process.argv.includes("--verbose")
+    ) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.warn(`[Debug Warning] Failed to read or parse allow-rules.json from ${file}: ${msg}`);
+      console.warn(
+        `[Debug Warning] Failed to read or parse allow-rules.json from ${file}: ${msg}`,
+      );
     }
     return { commands: [] };
   }
@@ -368,41 +426,57 @@ export function allowCommand(cwd: string, command: string): void {
   const dir = memoryDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   const rules = readAllowRules(cwd);
-  if (!rules.commands.includes(command.trim())) rules.commands.push(command.trim());
-  fs.writeFileSync(path.join(dir, 'allow-rules.json'), JSON.stringify(rules, null, 2) + '\n', 'utf-8');
+  if (!rules.commands.includes(command.trim()))
+    rules.commands.push(command.trim());
+  fs.writeFileSync(
+    path.join(dir, "allow-rules.json"),
+    JSON.stringify(rules, null, 2) + "\n",
+    "utf-8",
+  );
 }
 
 export function forgetMemory(cwd: string): void {
   const db = getDb(cwd);
-  db.exec('DELETE FROM facts');
+  db.exec("DELETE FROM facts");
 }
 
 export function doctor(cwd: string): string {
   const facts = ensureProjectMemory(cwd);
   const db = getDb(cwd);
-  const factsCount = (db.prepare('SELECT COUNT(*) as count FROM facts').get() as { count: number }).count;
-  const sessionsCount = (db.prepare('SELECT COUNT(*) as count FROM session_history').get() as { count: number }).count;
+  const factsCount = (
+    db.prepare("SELECT COUNT(*) as count FROM facts").get() as { count: number }
+  ).count;
+  const sessionsCount = (
+    db.prepare("SELECT COUNT(*) as count FROM session_history").get() as {
+      count: number;
+    }
+  ).count;
 
   const lines = [
-    'FixO Doctor',
+    "FixO Doctor",
     `Package manager: ${facts.packageManager}`,
     `Scripts: ${Object.keys(facts.scripts).length}`,
-    `Build commands: ${facts.buildCommands.join(', ') || '(none)'}`,
-    `Test commands: ${facts.testCommands.join(', ') || '(none)'}`,
-    `TypeScript configs: ${facts.tsconfigs.join(', ') || '(none)'}`,
+    `Build commands: ${facts.buildCommands.join(", ") || "(none)"}`,
+    `Test commands: ${facts.testCommands.join(", ") || "(none)"}`,
+    `TypeScript configs: ${facts.tsconfigs.join(", ") || "(none)"}`,
     `SQLite Database: ok (.fixo/memory.db)`,
     `Stored Facts: ${factsCount}`,
     `Stored Sessions: ${sessionsCount}`,
-    `Allowed commands: ${facts.allowRules.commands.join(', ') || '(none)'}`,
+    `Allowed commands: ${facts.allowRules.commands.join(", ") || "(none)"}`,
   ];
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function findFiles(root: string, pattern: RegExp): string[] {
   const result: string[] = [];
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist') continue;
+      if (
+        entry.name === "node_modules" ||
+        entry.name === ".git" ||
+        entry.name === "dist"
+      )
+        continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (pattern.test(entry.name)) result.push(path.relative(root, full));

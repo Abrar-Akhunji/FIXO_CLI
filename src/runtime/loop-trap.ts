@@ -31,9 +31,9 @@
  * synchronous.
  */
 
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 // ---------------------------------------------------------------------------
 // Public types — composite (Pillar 1) detector
@@ -54,13 +54,13 @@ export interface LoopSnapshot {
 }
 
 /** Which layers contributed to a `trap-detected` verdict. */
-export type LoopTrapLayer = 'tool-args' | 'tool-result' | 'workspace';
+export type LoopTrapLayer = "tool-args" | "tool-result" | "workspace";
 
 /** The detector's verdict for a turn. */
 export type LoopTrapVerdict =
-  | { readonly state: 'ok' }
+  | { readonly state: "ok" }
   | {
-      readonly state: 'trap-detected';
+      readonly state: "trap-detected";
       /** Composite fingerprint of the repeated turns. */
       readonly fingerprint: string;
       /** Layers that contributed to the detection. */
@@ -71,7 +71,7 @@ export type LoopTrapVerdict =
       readonly consecutiveCount: number;
     }
   | {
-      readonly state: 'hard-abort';
+      readonly state: "hard-abort";
       /** Composite fingerprint of the repeated turns. */
       readonly fingerprint: string;
       /** Number of consecutive equivalent turns. */
@@ -108,7 +108,7 @@ export class LoopTrapAbortedError extends Error {
       `Loop-trap hard-abort after ${consecutiveCount} consecutive equivalent turns ` +
         `(composite sha256: ${compositeFingerprint.slice(0, 16)}…).`,
     );
-    this.name = 'LoopTrapAbortedError';
+    this.name = "LoopTrapAbortedError";
     this.compositeFingerprint = compositeFingerprint;
     this.consecutiveCount = consecutiveCount;
   }
@@ -121,13 +121,13 @@ export class LoopTrapAbortedError extends Error {
 /** Tool names whose `path` argument should be tracked by the semantic
  *  detector. Anything not in this set contributes 0 to F(p). */
 export const SEMANTIC_LOOP_TARGET_TOOLS: ReadonlySet<string> = new Set([
-  'read_file',
-  'write_file',
-  'apply_patch',
-  'replace_range',
-  'insert_after',
-  'rename_file',
-  'delete_file',
+  "read_file",
+  "write_file",
+  "apply_patch",
+  "replace_range",
+  "insert_after",
+  "rename_file",
+  "delete_file",
 ]);
 
 /** Tunable thresholds for the semantic detector. */
@@ -160,15 +160,15 @@ export interface FileAccessRecord {
 
 /** The semantic detector's verdict for a turn. */
 export type SemanticLoopVerdict =
-  | { readonly state: 'ok'; target: string; count: number }
+  | { readonly state: "ok"; target: string; count: number }
   | {
-      readonly state: 'warn';
+      readonly state: "warn";
       target: string;
       count: number;
       windowSize: number;
     }
   | {
-      readonly state: 'hard-abort';
+      readonly state: "hard-abort";
       target: string;
       count: number;
       windowSize: number;
@@ -186,7 +186,7 @@ export class SemanticLoopAbortedError extends Error {
         `${count} times within the last ${windowSize} turns. ` +
         `The agent is forbidden from accessing this file again.`,
     );
-    this.name = 'SemanticLoopAbortedError';
+    this.name = "SemanticLoopAbortedError";
     this.target = target;
     this.count = count;
     this.windowSize = windowSize;
@@ -198,19 +198,19 @@ export class SemanticLoopAbortedError extends Error {
 // ---------------------------------------------------------------------------
 
 const sha256 = (input: string): string =>
-  crypto.createHash('sha256').update(input, 'utf-8').digest('hex');
+  crypto.createHash("sha256").update(input, "utf-8").digest("hex");
 
 const DEFAULT_WORKSPACE_EXCLUDES: ReadonlyArray<string> = [
-  '.fixo',
-  '.git',
-  'node_modules',
-  'dist',
-  '.next',
-  'out',
-  'build',
-  'coverage',
-  '.cache',
-  '.turbo',
+  ".fixo",
+  ".git",
+  "node_modules",
+  "dist",
+  ".next",
+  "out",
+  "build",
+  "coverage",
+  ".cache",
+  ".turbo",
 ];
 
 /**
@@ -239,16 +239,20 @@ export class LoopTrapDetector {
 
   constructor(prefs: LoopTrapPreferences = DEFAULT_LOOP_TRAP_PREFS) {
     if (prefs.triggerCount < 1) {
-      throw new Error('LoopTrapPreferences.triggerCount must be >= 1');
+      throw new Error("LoopTrapPreferences.triggerCount must be >= 1");
     }
     if (prefs.hardAbortCount < prefs.triggerCount) {
-      throw new Error('LoopTrapPreferences.hardAbortCount must be >= triggerCount');
+      throw new Error(
+        "LoopTrapPreferences.hardAbortCount must be >= triggerCount",
+      );
     }
     if (prefs.toolResultTailBytes < 64) {
-      throw new Error('LoopTrapPreferences.toolResultTailBytes must be >= 64');
+      throw new Error("LoopTrapPreferences.toolResultTailBytes must be >= 64");
     }
     if (prefs.maxHistory < prefs.hardAbortCount) {
-      throw new Error('LoopTrapPreferences.maxHistory must be >= hardAbortCount');
+      throw new Error(
+        "LoopTrapPreferences.maxHistory must be >= hardAbortCount",
+      );
     }
     this.prefs = prefs;
   }
@@ -269,7 +273,10 @@ export class LoopTrapDetector {
     cwd: string,
     extraExclude: ReadonlyArray<string> = [],
   ): Promise<string> {
-    const exclude = new Set<string>([...DEFAULT_WORKSPACE_EXCLUDES, ...extraExclude]);
+    const exclude = new Set<string>([
+      ...DEFAULT_WORKSPACE_EXCLUDES,
+      ...extraExclude,
+    ]);
     const root = path.resolve(cwd);
     const entries: Array<[string, string]> = [];
     const MAX_FILES = 100_000;
@@ -303,7 +310,7 @@ export class LoopTrapDetector {
           } catch {
             continue;
           }
-          entries.push([rel, sha256(content.toString('binary'))]);
+          entries.push([rel, sha256(content.toString("binary"))]);
         }
       }
       return true;
@@ -317,7 +324,7 @@ export class LoopTrapDetector {
     }
 
     entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-    const materialised = entries.map(([p, h]) => `${p}\t${h}`).join('\n');
+    const materialised = entries.map(([p, h]) => `${p}\t${h}`).join("\n");
     return sha256(materialised);
   }
 
@@ -342,13 +349,13 @@ export class LoopTrapDetector {
     if (this.history.length >= 2) {
       const prev = this.history[this.history.length - 2]!;
       if (prev.toolCallFingerprint === snapshot.toolCallFingerprint) {
-        layers.push('tool-args');
+        layers.push("tool-args");
       }
       if (prev.toolResultFingerprint === snapshot.toolResultFingerprint) {
-        layers.push('tool-result');
+        layers.push("tool-result");
       }
       if (prev.workspaceFingerprint === snapshot.workspaceFingerprint) {
-        layers.push('workspace');
+        layers.push("workspace");
       }
       for (let i = this.history.length - 2; i >= 0; i--) {
         const h = this.history[i]!;
@@ -379,21 +386,31 @@ export class LoopTrapDetector {
       }
     }
 
-    const effectiveConsecutive = Math.max(consecutive, identicalResultAndWorkspaceCount);
+    const effectiveConsecutive = Math.max(
+      consecutive,
+      identicalResultAndWorkspaceCount,
+    );
 
     if (effectiveConsecutive >= this.prefs.hardAbortCount) {
-      return { state: 'hard-abort', fingerprint: composite, consecutiveCount: effectiveConsecutive };
+      return {
+        state: "hard-abort",
+        fingerprint: composite,
+        consecutiveCount: effectiveConsecutive,
+      };
     }
     if (effectiveConsecutive >= this.prefs.triggerCount) {
       return {
-        state: 'trap-detected',
+        state: "trap-detected",
         fingerprint: composite,
-        layers: identicalResultAndWorkspaceCount > consecutive ? ['tool-result', 'workspace'] : layers,
+        layers:
+          identicalResultAndWorkspaceCount > consecutive
+            ? ["tool-result", "workspace"]
+            : layers,
         turnIndex: snapshot.turnIndex,
         consecutiveCount: effectiveConsecutive,
       };
     }
-    return { state: 'ok' };
+    return { state: "ok" };
   }
 
   private compositeFingerprint(snapshot: LoopSnapshot): string {
@@ -425,13 +442,15 @@ export class SemanticLoopDetector {
 
   constructor(prefs: SemanticLoopPreferences = DEFAULT_SEMANTIC_LOOP_PREFS) {
     if (prefs.windowSize < 1) {
-      throw new Error('SemanticLoopPreferences.windowSize must be >= 1');
+      throw new Error("SemanticLoopPreferences.windowSize must be >= 1");
     }
     if (prefs.triggerCount < 1) {
-      throw new Error('SemanticLoopPreferences.triggerCount must be >= 1');
+      throw new Error("SemanticLoopPreferences.triggerCount must be >= 1");
     }
     if (prefs.hardAbortCount < prefs.triggerCount) {
-      throw new Error('SemanticLoopPreferences.hardAbortCount must be >= triggerCount');
+      throw new Error(
+        "SemanticLoopPreferences.hardAbortCount must be >= triggerCount",
+      );
     }
     this.prefs = prefs;
   }
@@ -478,19 +497,19 @@ export class SemanticLoopDetector {
     cwd: string,
   ): SemanticLoopVerdict {
     if (!this.prefs.enabled) {
-      return { state: 'ok', target: '', count: 0 };
+      return { state: "ok", target: "", count: 0 };
     }
     if (!SEMANTIC_LOOP_TARGET_TOOLS.has(tool)) {
-      return { state: 'ok', target: '', count: 0 };
+      return { state: "ok", target: "", count: 0 };
     }
     const rawTarget = pickTargetArg(tool, args);
     if (!rawTarget) {
-      return { state: 'ok', target: '', count: 0 };
+      return { state: "ok", target: "", count: 0 };
     }
 
     const resolved = safeResolve(cwd, rawTarget);
     if (!resolved) {
-      return { state: 'ok', target: '', count: 0 };
+      return { state: "ok", target: "", count: 0 };
     }
 
     // Slide the window: evict the oldest record if full.
@@ -509,12 +528,22 @@ export class SemanticLoopDetector {
     this.freq.set(resolved, f);
 
     if (f >= this.prefs.hardAbortCount) {
-      return { state: 'hard-abort', target: resolved, count: f, windowSize: this.window.length };
+      return {
+        state: "hard-abort",
+        target: resolved,
+        count: f,
+        windowSize: this.window.length,
+      };
     }
     if (f >= this.prefs.triggerCount) {
-      return { state: 'warn', target: resolved, count: f, windowSize: this.window.length };
+      return {
+        state: "warn",
+        target: resolved,
+        count: f,
+        windowSize: this.window.length,
+      };
     }
-    return { state: 'ok', target: resolved, count: f };
+    return { state: "ok", target: resolved, count: f };
   }
 }
 
@@ -523,17 +552,24 @@ export class SemanticLoopDetector {
 // ---------------------------------------------------------------------------
 
 /** Pick the right argument to fingerprint for each tool. */
-function pickTargetArg(tool: string, args: Record<string, unknown>): string | null {
+function pickTargetArg(
+  tool: string,
+  args: Record<string, unknown>,
+): string | null {
   switch (tool) {
-    case 'read_file':
-    case 'write_file':
-    case 'replace_range':
-    case 'insert_after':
-    case 'delete_file':
-      return typeof args.path === 'string' ? args.path : null;
-    case 'rename_file':
-      return typeof args.to === 'string' ? args.to : typeof args.from === 'string' ? args.from : null;
-    case 'apply_patch': {
+    case "read_file":
+    case "write_file":
+    case "replace_range":
+    case "insert_after":
+    case "delete_file":
+      return typeof args.path === "string" ? args.path : null;
+    case "rename_file":
+      return typeof args.to === "string"
+        ? args.to
+        : typeof args.from === "string"
+          ? args.from
+          : null;
+    case "apply_patch": {
       // apply_patch takes a unified diff — we can't resolve individual
       // targets synchronously, so return null and let the caller
       // fall back to the composite detector.
@@ -557,8 +593,10 @@ function safeResolve(cwd: string, target: string): string | null {
  * should inject into the next system prompt when the semantic
  * detector warns. The wording matches the architectural spec.
  */
-export function toSafetyAlertDirective(verdict: SemanticLoopVerdict): string | null {
-  if (verdict.state !== 'warn' && verdict.state !== 'hard-abort') return null;
+export function toSafetyAlertDirective(
+  verdict: SemanticLoopVerdict,
+): string | null {
+  if (verdict.state !== "warn" && verdict.state !== "hard-abort") return null;
   return (
     `[Safety-Alert] You have queried or modified the target path '${verdict.target}' ` +
     `more than 3 times in your recent sequence. Your current approach is looping. ` +
@@ -570,7 +608,7 @@ export function toSafetyAlertDirective(verdict: SemanticLoopVerdict): string | n
 
 /** Build the [Loop-Trap] directive used by the composite detector. */
 export function toLoopTrapDirective(verdict: LoopTrapVerdict): string | null {
-  if (verdict.state !== 'trap-detected') return null;
+  if (verdict.state !== "trap-detected") return null;
   return (
     `[Loop-Trap] Detected ${verdict.consecutiveCount} consecutive equivalent turns. ` +
     `Reconsider your strategy before issuing the next tool call.`

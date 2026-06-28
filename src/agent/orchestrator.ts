@@ -1,9 +1,11 @@
-import type { AgentContext, Subtask, TaskDAG } from '../types.js';
-import { AgentClient } from './agent-client.js';
-import { loadConfig, getAgentDagConfig } from '../config.js';
-import { C } from '../ui/colors.js';
-import { globToRegExp } from './permissions.js';
-import { telemetry, recordTelemetry } from './telemetry.js';
+import fs from "fs";
+import path from "path";
+import type { AgentContext, Subtask, TaskDAG } from "../types.js";
+import { AgentClient } from "./agent-client.js";
+import { loadConfig, getAgentDagConfig } from "../config.js";
+import { C } from "../ui/colors.js";
+import { globToRegExp } from "./permissions.js";
+import { telemetry, recordTelemetry } from "./telemetry.js";
 
 /**
  * Phase 5.3 — Subtask personas that may write to the workspace.
@@ -14,10 +16,10 @@ import { telemetry, recordTelemetry } from './telemetry.js';
  * the obvious case. Only pairs of MUTATING_PERSONAS members are
  * candidates for write-conflict serialization.
  */
-const MUTATING_PERSONAS: ReadonlySet<Subtask['persona']> = new Set([
-  'code',
-  'test',
-  'doc',
+const MUTATING_PERSONAS: ReadonlySet<Subtask["persona"]> = new Set([
+  "code",
+  "test",
+  "doc",
 ]);
 
 /**
@@ -32,15 +34,18 @@ const MUTATING_PERSONAS: ReadonlySet<Subtask['persona']> = new Set([
  */
 export function couldOverlapFile(a: string, b: string): boolean {
   if (a === b) return true;
-  const aIsGlob = a.includes('*') || a.includes('?');
-  const bIsGlob = b.includes('*') || b.includes('?');
+  const aIsGlob = a.includes("*") || a.includes("?");
+  const bIsGlob = b.includes("*") || b.includes("?");
   if (aIsGlob && bIsGlob) return true; // can't cheaply decide; conservative
   if (aIsGlob) return globToRegExp(a).test(b);
   if (bIsGlob) return globToRegExp(b).test(a);
   return false;
 }
 
-function fileSetsCouldOverlap(filesA: readonly string[], filesB: readonly string[]): boolean {
+function fileSetsCouldOverlap(
+  filesA: readonly string[],
+  filesB: readonly string[],
+): boolean {
   for (const a of filesA) {
     for (const b of filesB) {
       if (couldOverlapFile(a, b)) return true;
@@ -96,12 +101,13 @@ export function serializeWriteConflicts(
       if (!MUTATING_PERSONAS.has(b.persona)) continue;
 
       // Skip if already directly ordered (in either direction).
-      if (b.dependencies.includes(a.id) || a.dependencies.includes(b.id)) continue;
+      if (b.dependencies.includes(a.id) || a.dependencies.includes(b.id))
+        continue;
 
       const aFiles = a.files ?? [];
       const bFiles = b.files ?? [];
       let reason: string | null = null;
-      let conflictKey = '';
+      let conflictKey = "";
 
       if (aFiles.length > 0 && bFiles.length > 0) {
         if (fileSetsCouldOverlap(aFiles, bFiles)) {
@@ -117,21 +123,24 @@ export function serializeWriteConflicts(
           reason = `shared write target (${conflictKey})`;
         }
       } else if (serializeMissingFiles) {
-        reason = aFiles.length === 0 && bFiles.length === 0
-          ? `both subtasks declared no files; conservative serialization`
-          : `one subtask declared no files; conservative serialization`;
-        conflictKey = '<unknown>';
+        reason =
+          aFiles.length === 0 && bFiles.length === 0
+            ? `both subtasks declared no files; conservative serialization`
+            : `one subtask declared no files; conservative serialization`;
+        conflictKey = "<unknown>";
       }
 
       if (reason) {
         b.dependencies = [...b.dependencies, a.id];
         edges.push({ from: a.id, to: b.id, reason });
         try {
-          recordTelemetry(telemetry.dagWriteSetConflictAvoided({
-            runId: 'plan-time',
-            file: conflictKey,
-            serializedSubtasks: [a.id, b.id],
-          }));
+          recordTelemetry(
+            telemetry.dagWriteSetConflictAvoided({
+              runId: "plan-time",
+              file: conflictKey,
+              serializedSubtasks: [a.id, b.id],
+            }),
+          );
         } catch {
           // telemetry must never break planning
         }
@@ -145,12 +154,16 @@ export function serializeWriteConflicts(
 export class Orchestrator {
   private client: AgentClient;
   private verbose: boolean;
-  public tokensUsed = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  public tokensUsed = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+  };
 
   constructor(verbose = false) {
     const config = loadConfig();
     this.client = new AgentClient(
-      config.freellmapi_api_key || '',
+      config.freellmapi_api_key || "",
       config.apiUrl,
       verbose,
       config.provider_mode,
@@ -160,12 +173,33 @@ export class Orchestrator {
   }
 
   async plan(context: AgentContext): Promise<TaskDAG> {
+    const workspaceRoot = context.cwd;
+    const projectName = path.basename(workspaceRoot);
+    let dirListing = "";
+    try {
+      const files = fs.readdirSync(workspaceRoot, { withFileTypes: true });
+      dirListing = files
+        .filter((f) => !f.name.startsWith(".") || f.name === ".env.example")
+        .map((f) => (f.isDirectory() ? `${f.name}/` : f.name))
+        .join(", ");
+    } catch (e) {
+      dirListing = "Unknown";
+    }
+
     const systemPrompt = `You are the FixO Orchestrator. Your job is to analyze a complex software engineering task and decompose it into a Directed Acyclic Graph (DAG) of subtasks.
 Each subtask will be assigned to a specialist worker agent:
 - 'code': Writes or modifies code files.
 - 'test': Creates, updates, or executes test suites.
 - 'doc': Updates documentation, READMEs, JSDocs, etc.
 - 'reviewer': Reviews changes, audits code modifications.
+
+Context Variables:
+- Current Workspace Root: ${workspaceRoot}
+- Project Name: ${projectName}
+- Workspace Top-level Directory Listing: ${dirListing}
+- User's Exact Query/Task Description: ${context.task}
+
+You are analyzing the USER'S PROJECT at ${workspaceRoot}. The project name is ${projectName}. You must ONLY generate subtasks relevant to the user's project and their request. Do NOT analyze or reference the Fixo CLI's own internal source code or architecture. The user's files are at ${workspaceRoot}.
 
 You must output a single valid JSON object containing a "subtasks" array. NO markdown formatting, NO backticks, and NO conversational text.
 
@@ -185,24 +219,33 @@ JSON Schema:
 
     const maxRetries = 3;
     let attempt = 0;
-    let feedback = '';
+    let feedback = "";
 
     while (attempt < maxRetries) {
       if (attempt > 0) {
         const delayMs = Math.pow(2, attempt) * 1000;
         if (this.verbose) {
-          console.log(`[Orchestrator] Retrying plan generation in ${(delayMs / 1000).toFixed(1)}s...`);
+          console.log(
+            `[Orchestrator] Retrying plan generation in ${(delayMs / 1000).toFixed(1)}s...`,
+          );
         }
-        await new Promise(resolve => setTimeout(resolve, delayMs));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
       try {
         const response = await this.client.chat(
           [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: context.task + (feedback ? `\n\nPrevious attempt failed validation: ${feedback}. Please output only valid JSON matching the schema.` : '') }
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content:
+                context.task +
+                (feedback
+                  ? `\n\nPrevious attempt failed validation: ${feedback}. Please output only valid JSON matching the schema.`
+                  : ""),
+            },
           ],
           context.model,
-          { agent_task_type: 'investigation', required_capabilities: ['fast'] }
+          { agent_task_type: "investigation", required_capabilities: ["fast"] },
         );
 
         if (response.usage) {
@@ -211,22 +254,46 @@ JSON Schema:
           this.tokensUsed.total_tokens += response.usage.total_tokens;
         }
 
-        const content = response.content?.trim() || '';
+        const content = response.content?.trim() || "";
         const jsonMatch = content.match(/\{[\s\S]*\}/);
-        
+
         if (jsonMatch) {
           const rawLength = content.length;
           const matchLength = jsonMatch[0].length;
           if (rawLength - matchLength > 50) {
-            throw new Error(`Model output contained too much conversational text (${rawLength - matchLength} chars outside JSON). Please output STRICTLY JSON without any conversational text or markdown formatting.`);
+            throw new Error(
+              `Model output contained too much conversational text (${rawLength - matchLength} chars outside JSON). Please output STRICTLY JSON without any conversational text or markdown formatting.`,
+            );
           }
         } else {
-          throw new Error('No JSON object found in response.');
+          throw new Error("No JSON object found in response.");
         }
 
         const parsed = JSON.parse(jsonMatch[0]) as TaskDAG;
 
         if (parsed && Array.isArray(parsed.subtasks)) {
+          // Validation step for workspace context leaks
+          const isFixoCliSelf = projectName === "FIXO_CLI";
+          if (!isFixoCliSelf) {
+            const hasFixoReference = parsed.subtasks.some((s) => {
+              const titleUpper = s.title.toUpperCase();
+              const descUpper = s.description.toUpperCase();
+              return (
+                titleUpper.includes("FIXO") ||
+                titleUpper.includes("ORCHESTRATOR") ||
+                titleUpper.includes("CLI CORE") ||
+                descUpper.includes("FIXO") ||
+                descUpper.includes("ORCHESTRATOR") ||
+                descUpper.includes("CLI CORE")
+              );
+            });
+            if (hasFixoReference) {
+              throw new Error(
+                `Plan contains references to Fixo/Orchestrator/CLI architecture, but we are analyzing a user project at ${workspaceRoot}. Generate subtasks relevant only to the user project.`,
+              );
+            }
+          }
+
           this.validateAndSortDAG(parsed.subtasks);
           // Phase 5.3 — inject write-conflict edges. Default is to
           // serialize on both observed overlap AND declared-empty
@@ -238,9 +305,13 @@ JSON Schema:
               serializeMissingFiles: dagCfg.serializeMissingFiles,
             });
             if (edgesInserted.length > 0 && this.verbose) {
-              console.log(`${C.BLUE}[Orchestrator] Injected ${edgesInserted.length} write-conflict edge(s).${C.RESET}`);
+              console.log(
+                `${C.BLUE}[Orchestrator] Injected ${edgesInserted.length} write-conflict edge(s).${C.RESET}`,
+              );
               for (const e of edgesInserted) {
-                console.log(`  ${C.DIM}${e.from} → ${e.to}: ${e.reason}${C.RESET}`);
+                console.log(
+                  `  ${C.DIM}${e.from} → ${e.to}: ${e.reason}${C.RESET}`,
+                );
               }
             }
             // Re-validate to confirm acyclicity (insertion is by sorted
@@ -250,26 +321,28 @@ JSON Schema:
           }
           return parsed;
         }
-        feedback = 'Missing subtasks array';
+        feedback = "Missing subtasks array";
       } catch (err: any) {
         feedback = err.message || String(err);
       }
       attempt++;
     }
 
-    console.warn(`${C.YELLOW}[Orchestrator] Warning: Failed to generate plan. Falling back to SingleAgent execution...${C.RESET}`);
+    console.warn(
+      `${C.YELLOW}[Orchestrator] Warning: Failed to generate plan. Falling back to SingleAgent execution...${C.RESET}`,
+    );
     return {
       subtasks: [
         {
-          id: 'fallback-task',
-          title: 'Execute coding task',
+          id: "fallback-task",
+          title: "Execute coding task",
           description: context.task,
-          persona: 'code',
+          persona: "code",
           dependencies: [],
           files: [],
-          status: 'pending'
-        }
-      ]
+          status: "pending",
+        },
+      ],
     };
   }
 

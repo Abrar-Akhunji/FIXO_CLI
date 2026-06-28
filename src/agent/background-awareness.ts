@@ -17,8 +17,8 @@
  * tracking is in-memory (one instance per agent run); persistence
  * across runs is handled by the registry's on-disk snapshot already.
  */
-import type { JobSnapshot, JobStatus } from '../runtime/background-jobs.js';
-import { listAllBackgroundJobs } from './tool-executor.js';
+import type { JobSnapshot, JobStatus } from "../runtime/background-jobs.js";
+import { listAllBackgroundJobs } from "./tool-executor.js";
 
 /** Total directive size cap. Keeps token cost predictable on every turn. */
 const MAX_DIRECTIVE_CHARS = 1500;
@@ -40,7 +40,7 @@ export interface AwarenessSnapshot {
  * "did anything overflow" case, so the tail is purely a hint.
  */
 function tailStderr(raw: string): string {
-  const trimmed = raw.replace(/\s+$/u, '');
+  const trimmed = raw.replace(/\s+$/u, "");
   if (trimmed.length <= MAX_STDERR_TAIL_CHARS) return trimmed;
   return `…${trimmed.slice(-MAX_STDERR_TAIL_CHARS)}`;
 }
@@ -71,7 +71,7 @@ export class BackgroundAwareness {
     const running: JobSnapshot[] = [];
     const newlyFinished: JobSnapshot[] = [];
     for (const job of all) {
-      if (job.status === 'running') {
+      if (job.status === "running") {
         running.push(job);
         continue;
       }
@@ -95,16 +95,16 @@ export class BackgroundAwareness {
     if (snap.running.length === 0 && snap.newlyFinished.length === 0) {
       return null;
     }
-    const lines: string[] = ['[Background Jobs]'];
+    const lines: string[] = ["[Background Jobs]"];
 
     if (snap.newlyFinished.length > 0) {
-      lines.push('Newly finished (poll these or move on):');
+      lines.push("Newly finished (poll these or move on):");
       for (const job of snap.newlyFinished) {
         const head =
           `  • ${job.id} · ${job.cmd} · ${job.status}` +
-          (job.exitCode !== undefined ? ` (exit ${job.exitCode})` : '');
+          (job.exitCode !== undefined ? ` (exit ${job.exitCode})` : "");
         lines.push(head);
-        if (job.status === 'failed' || job.status === 'killed') {
+        if (job.status === "failed" || job.status === "killed") {
           const tail = tailStderr(job.stderr);
           if (tail.length > 0) {
             lines.push(`    stderr: ${tail}`);
@@ -114,7 +114,7 @@ export class BackgroundAwareness {
     }
 
     if (snap.running.length > 0) {
-      lines.push('Still running (call poll_command_status when ready):');
+      lines.push("Still running (call poll_command_status when ready):");
       for (const job of snap.running) {
         const age = secondsSince(job.startedAt);
         lines.push(
@@ -123,7 +123,7 @@ export class BackgroundAwareness {
       }
     }
 
-    const joined = lines.join('\n');
+    const joined = lines.join("\n");
     if (joined.length <= MAX_DIRECTIVE_CHARS) return joined;
     // Hard cap. We trim from the end so the header + newly-finished
     // section (the most actionable part) always survives.

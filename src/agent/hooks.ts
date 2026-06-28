@@ -28,15 +28,15 @@
  *   - Every fired hook emits a `hook_fired` telemetry event
  *     with the decision and the duration.
  */
-import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { recordTelemetry, telemetry } from './telemetry.js';
-import { WorkspaceGuard } from '../workspace-guard.js';
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { recordTelemetry, telemetry } from "./telemetry.js";
+import { WorkspaceGuard } from "../workspace-guard.js";
 
-export type HookEvent = 'PreToolUse' | 'PostToolUse';
+export type HookEvent = "PreToolUse" | "PostToolUse";
 
-export type HookDecision = 'allow' | 'deny' | 'modify';
+export type HookDecision = "allow" | "deny" | "modify";
 
 export interface HookPayload {
   event: HookEvent;
@@ -84,14 +84,14 @@ export interface HookExecutionResult {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
-const HOOKS_PATH_FOR = (cwd: string) => path.join(cwd, '.fixo', 'hooks.json');
+const HOOKS_PATH_FOR = (cwd: string) => path.join(cwd, ".fixo", "hooks.json");
 
 /** Read `.fixo/hooks.json` from cwd. Returns null if absent. */
 export function loadHooksFile(cwd: string): HooksFile | null {
   const p = HOOKS_PATH_FOR(cwd);
   if (!fs.existsSync(p)) return null;
   try {
-    const raw = JSON.parse(fs.readFileSync(p, 'utf-8')) as HooksFile;
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8")) as HooksFile;
     if (raw.version !== 1 || !Array.isArray(raw.hooks)) return null;
     return raw;
   } catch {
@@ -100,7 +100,10 @@ export function loadHooksFile(cwd: string): HooksFile | null {
 }
 
 /** Save the hooks file. Used by /hooks slash command. */
-export function saveHooksFile(cwd: string, file: HooksFile): { ok: boolean; error?: string } {
+export function saveHooksFile(
+  cwd: string,
+  file: HooksFile,
+): { ok: boolean; error?: string } {
   const p = HOOKS_PATH_FOR(cwd);
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -115,7 +118,7 @@ export function saveHooksFile(cwd: string, file: HooksFile): { ok: boolean; erro
 export function getHooksForEvent(cwd: string, event: HookEvent): HookSpec[] {
   const file = loadHooksFile(cwd);
   if (!file) return [];
-  return file.hooks.filter(h => h.event === event && (h.enabled ?? true));
+  return file.hooks.filter((h) => h.event === event && (h.enabled ?? true));
 }
 
 /**
@@ -123,50 +126,63 @@ export function getHooksForEvent(cwd: string, event: HookEvent): HookSpec[] {
  * The hook's stdin receives the JSON payload; the stdout
  * (if present) is parsed as a HookCommandResult.
  */
-function runHook(spec: HookSpec, payload: HookPayload, timeoutMs: number): HookCommandResult {
+function runHook(
+  spec: HookSpec,
+  payload: HookPayload,
+  timeoutMs: number,
+): HookCommandResult {
   const payloadJson = JSON.stringify(payload);
   let result: ReturnType<typeof spawnSync>;
   try {
     result = spawnSync(spec.command, spec.args ?? [], {
       input: payloadJson,
-      encoding: 'utf-8',
+      encoding: "utf-8",
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024, // 1 MiB stdout cap
     });
   } catch (err) {
-    return { decision: 'deny', reason: `hook failed to spawn: ${(err as Error).message}` };
-  }
-  if (result.error) {
-    return { decision: 'deny', reason: `hook error: ${result.error.message}` };
-  }
-  if (result.status !== 0) {
-    const stderrText = typeof result.stderr === 'string' ? result.stderr : '';
     return {
-      decision: 'deny',
-      reason: `hook exited with status ${result.status}${stderrText ? `: ${stderrText.slice(0, 200)}` : ''}`,
+      decision: "deny",
+      reason: `hook failed to spawn: ${(err as Error).message}`,
     };
   }
-  const stdout = (typeof result.stdout === 'string' ? result.stdout : '').trim();
+  if (result.error) {
+    return { decision: "deny", reason: `hook error: ${result.error.message}` };
+  }
+  if (result.status !== 0) {
+    const stderrText = typeof result.stderr === "string" ? result.stderr : "";
+    return {
+      decision: "deny",
+      reason: `hook exited with status ${result.status}${stderrText ? `: ${stderrText.slice(0, 200)}` : ""}`,
+    };
+  }
+  const stdout = (
+    typeof result.stdout === "string" ? result.stdout : ""
+  ).trim();
   if (stdout.length === 0) {
     // Hook succeeded with no output → default allow.
-    return { decision: 'allow' };
+    return { decision: "allow" };
   }
   try {
     const parsed = JSON.parse(stdout) as Partial<HookCommandResult>;
-    const decision: HookDecision = parsed.decision === 'allow' || parsed.decision === 'deny' || parsed.decision === 'modify'
-      ? parsed.decision
-      : 'allow';
+    const decision: HookDecision =
+      parsed.decision === "allow" ||
+      parsed.decision === "deny" ||
+      parsed.decision === "modify"
+        ? parsed.decision
+        : "allow";
     return {
       decision,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
-      modifiedArgs: parsed.modifiedArgs && typeof parsed.modifiedArgs === 'object'
-        ? (parsed.modifiedArgs as Record<string, unknown>)
-        : undefined,
+      reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
+      modifiedArgs:
+        parsed.modifiedArgs && typeof parsed.modifiedArgs === "object"
+          ? (parsed.modifiedArgs as Record<string, unknown>)
+          : undefined,
     };
   } catch {
     // Hook wrote garbage — treat as a soft allow (the
     // contract is "stdout is JSON; if not, ignore").
-    return { decision: 'allow' };
+    return { decision: "allow" };
   }
 }
 
@@ -178,36 +194,40 @@ function runHook(spec: HookSpec, payload: HookPayload, timeoutMs: number): HookC
 export function fireHooks(
   cwd: string,
   event: HookEvent,
-  payload: Omit<HookPayload, 'event' | 'cwd'>,
+  payload: Omit<HookPayload, "event" | "cwd">,
 ): HookExecutionResult {
   const start = Date.now();
   const specs = getHooksForEvent(cwd, event);
-  let aggDecision: HookDecision = 'allow';
+  let aggDecision: HookDecision = "allow";
   let aggReason: string | undefined;
   let aggModifiedArgs: Record<string, unknown> | undefined;
   let lastHookId: string | null = null;
   for (const spec of specs) {
-    const res = runHook(spec, { ...payload, event, cwd }, spec.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const res = runHook(
+      spec,
+      { ...payload, event, cwd },
+      spec.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
     lastHookId = spec.id;
     recordTelemetry(
       telemetry.hookFired({
         hook: `${spec.id}:${payload.tool}:${res.decision}`,
-        phase: event === 'PreToolUse' ? 'pre' : 'post',
-        matched: res.decision !== 'allow',
+        phase: event === "PreToolUse" ? "pre" : "post",
+        matched: res.decision !== "allow",
         durationMs: Date.now() - start,
       }),
     );
-    if (res.decision === 'deny') {
+    if (res.decision === "deny") {
       return {
         fired: true,
-        decision: 'deny',
+        decision: "deny",
         reason: res.reason ?? `hook ${spec.id} denied`,
         durationMs: Date.now() - start,
         hookId: spec.id,
       };
     }
-    if (res.decision === 'modify') {
-      aggDecision = 'modify';
+    if (res.decision === "modify") {
+      aggDecision = "modify";
       if (res.modifiedArgs) aggModifiedArgs = res.modifiedArgs;
       if (res.reason) aggReason = res.reason;
     }
@@ -237,18 +257,27 @@ export function applyModifiedArgs(
 ): { ok: boolean; args: Record<string, unknown>; reason?: string } {
   const guard = new WorkspaceGuard(cwd);
   // We re-validate any path-shaped field.
-  const pathKeys = ['path', 'filePath', 'filepath', 'src', 'dst', 'cwd', 'outputPath', 'inputPath'];
+  const pathKeys = [
+    "path",
+    "filePath",
+    "filepath",
+    "src",
+    "dst",
+    "cwd",
+    "outputPath",
+    "inputPath",
+  ];
   for (const key of pathKeys) {
     if (!(key in modified)) continue;
     const value = modified[key];
-    if (typeof value !== 'string') continue;
+    if (typeof value !== "string") continue;
     // If the value is a relative path or equals cwd, it
     // resolves inside the workspace by construction. Only
     // absolute paths are checked.
     if (!path.isAbsolute(value)) continue;
     if (value === cwd) continue;
     try {
-      guard.resolve(value, 'modified-args', true);
+      guard.resolve(value, "modified-args", true);
     } catch (err) {
       return {
         ok: false,

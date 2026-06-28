@@ -13,16 +13,15 @@
  * callback so the raw key never escapes into a wider stack
  * frame, an error message, or a log line.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-import crypto from 'node:crypto';
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
 import {
   getProviderKeyVault,
   resetProviderKeyVault,
-  ProviderNotInVaultError,
   type ProviderCredential,
-} from '../runtime/credential-vault.js';
+} from "../runtime/credential-vault.js";
 
 /* ──────────────────────── Provider Registry ──────────────────────── */
 
@@ -31,10 +30,10 @@ import {
  * Used by the router when `modelRouting === 'auto'` to prevent task deadlocks.
  */
 export const MODEL_DAG_VERIFIED = new Set([
-  'claude-3-5-sonnet-20241022',
-  'gemini-2.5-pro',
-  'gpt-4o',
-  'o3-mini',
+  "claude-3-5-sonnet-20241022",
+  "gemini-2.5-pro",
+  "gpt-4o",
+  "o3-mini",
 ]);
 
 export interface ProviderDefinition {
@@ -56,132 +55,157 @@ export interface ProviderDefinition {
 
 export const PROVIDER_REGISTRY: ProviderDefinition[] = [
   {
-    name: 'openai',
-    displayName: 'OpenAI',
-    baseUrl: 'https://api.openai.com/v1',
+    name: "openai",
+    displayName: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
     openAICompat: true,
-    models: ['gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini', 'gpt-4.1'],
+    models: ["gpt-4o", "gpt-4o-mini", "o3", "o4-mini", "gpt-4.1"],
     requiresKey: true,
-    docsUrl: 'https://platform.openai.com/api-keys',
+    docsUrl: "https://platform.openai.com/api-keys",
   },
   {
-    name: 'anthropic',
-    displayName: 'Anthropic (Claude)',
-    baseUrl: 'https://api.anthropic.com/v1',
+    name: "anthropic",
+    displayName: "Anthropic (Claude)",
+    baseUrl: "https://api.anthropic.com/v1",
     openAICompat: false,
-    models: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-    requiresKey: true,
-    docsUrl: 'https://console.anthropic.com/settings/keys',
-  },
-  {
-    name: 'google',
-    displayName: 'Google (Gemini)',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    openAICompat: true,
-    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
-    requiresKey: true,
-    docsUrl: 'https://aistudio.google.com/app/apikey',
-  },
-  {
-    name: 'groq',
-    displayName: 'Groq',
-    baseUrl: 'https://api.groq.com/openai/v1',
-    openAICompat: true,
-    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
-    requiresKey: true,
-    docsUrl: 'https://console.groq.com/keys',
-  },
-  {
-    name: 'mistral',
-    displayName: 'Mistral AI',
-    baseUrl: 'https://api.mistral.ai/v1',
-    openAICompat: true,
-    models: ['mistral-large-latest', 'mistral-small-latest', 'codestral-latest'],
-    requiresKey: true,
-    docsUrl: 'https://console.mistral.ai/api-keys/',
-  },
-  {
-    name: 'cohere',
-    displayName: 'Cohere',
-    baseUrl: 'https://api.cohere.ai/compatibility/v1',
-    openAICompat: true,
-    models: ['command-r-plus', 'command-r', 'command-a-03-2025'],
-    requiresKey: true,
-    docsUrl: 'https://dashboard.cohere.com/api-keys',
-  },
-  {
-    name: 'openrouter',
-    displayName: 'OpenRouter',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    openAICompat: true,
-    models: ['anthropic/claude-opus-4-7', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'meta-llama/llama-4-maverick'],
-    requiresKey: true,
-    docsUrl: 'https://openrouter.ai/keys',
-  },
-  {
-    name: 'nvidia',
-    displayName: 'NVIDIA NIM',
-    baseUrl: 'https://integrate.api.nvidia.com/v1',
-    openAICompat: true,
-    models: ['nvidia/llama-3.1-nemotron-ultra-253b-v1', 'meta/llama-3.1-405b-instruct'],
-    requiresKey: true,
-    docsUrl: 'https://build.nvidia.com/explore/discover',
-  },
-  {
-    name: 'cerebras',
-    displayName: 'Cerebras',
-    baseUrl: 'https://api.cerebras.ai/v1',
-    openAICompat: true,
-    models: ['llama3.3-70b', 'llama-4-scout-17b-16e-instruct', 'qwen-3-32b'],
-    requiresKey: true,
-    docsUrl: 'https://cloud.cerebras.ai/',
-  },
-  {
-    name: 'sambanova',
-    displayName: 'SambaNova',
-    baseUrl: 'https://api.sambanova.ai/v1',
-    openAICompat: true,
-    models: ['Meta-Llama-3.3-70B-Instruct', 'DeepSeek-R1-671B', 'Llama-4-Maverick-17B-128E-Instruct'],
-    requiresKey: true,
-    docsUrl: 'https://cloud.sambanova.ai/',
-  },
-  {
-    name: 'github',
-    displayName: 'GitHub Models',
-    baseUrl: 'https://models.github.ai/inference',
-    openAICompat: true,
-    models: ['openai/gpt-4o', 'microsoft/phi-4', 'meta/llama-3.3-70b-instruct'],
-    requiresKey: true,
-    docsUrl: 'https://github.com/settings/tokens',
-  },
-  {
-    name: 'xai',
-    displayName: 'xAI (Grok)',
-    baseUrl: 'https://api.x.ai/v1',
-    openAICompat: true,
-    models: ['grok-3', 'grok-3-mini', 'grok-2-1212'],
-    requiresKey: true,
-    docsUrl: 'https://console.x.ai/',
-  },
-  {
-    name: 'zen',
-    displayName: 'Zen (OpenCode)',
-    baseUrl: 'https://opencode.ai/zen/v1',
-    openAICompat: true,
     models: [
-      'kimi-k2.6',
-      'mimo-v2.5-free',
-      'minimax-m2.7',
-      'minimax-m3-free',
-      'nemotron-3-super-free',
-      'qwen3.5-plus',
-      'qwen3.6-plus',
-      'stepfun/step-3.5-flash-free',
-      'z-ai/glm-4.7-flash-free',
-      'deepseek/deepseek-chat',
+      "claude-opus-4-7",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
     ],
     requiresKey: true,
-    docsUrl: 'https://opencode.ai/zen',
+    docsUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
+    name: "google",
+    displayName: "Google (Gemini)",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    openAICompat: true,
+    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+    requiresKey: true,
+    docsUrl: "https://aistudio.google.com/app/apikey",
+  },
+  {
+    name: "groq",
+    displayName: "Groq",
+    baseUrl: "https://api.groq.com/openai/v1",
+    openAICompat: true,
+    models: [
+      "llama-3.3-70b-versatile",
+      "llama-3.1-8b-instant",
+      "mixtral-8x7b-32768",
+      "gemma2-9b-it",
+    ],
+    requiresKey: true,
+    docsUrl: "https://console.groq.com/keys",
+  },
+  {
+    name: "mistral",
+    displayName: "Mistral AI",
+    baseUrl: "https://api.mistral.ai/v1",
+    openAICompat: true,
+    models: [
+      "mistral-large-latest",
+      "mistral-small-latest",
+      "codestral-latest",
+    ],
+    requiresKey: true,
+    docsUrl: "https://console.mistral.ai/api-keys/",
+  },
+  {
+    name: "cohere",
+    displayName: "Cohere",
+    baseUrl: "https://api.cohere.ai/compatibility/v1",
+    openAICompat: true,
+    models: ["command-r-plus", "command-r", "command-a-03-2025"],
+    requiresKey: true,
+    docsUrl: "https://dashboard.cohere.com/api-keys",
+  },
+  {
+    name: "openrouter",
+    displayName: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    openAICompat: true,
+    models: [
+      "anthropic/claude-opus-4-7",
+      "openai/gpt-4o",
+      "google/gemini-2.5-pro",
+      "meta-llama/llama-4-maverick",
+    ],
+    requiresKey: true,
+    docsUrl: "https://openrouter.ai/keys",
+  },
+  {
+    name: "nvidia",
+    displayName: "NVIDIA NIM",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    openAICompat: true,
+    models: [
+      "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+      "meta/llama-3.1-405b-instruct",
+    ],
+    requiresKey: true,
+    docsUrl: "https://build.nvidia.com/explore/discover",
+  },
+  {
+    name: "cerebras",
+    displayName: "Cerebras",
+    baseUrl: "https://api.cerebras.ai/v1",
+    openAICompat: true,
+    models: ["llama3.3-70b", "llama-4-scout-17b-16e-instruct", "qwen-3-32b"],
+    requiresKey: true,
+    docsUrl: "https://cloud.cerebras.ai/",
+  },
+  {
+    name: "sambanova",
+    displayName: "SambaNova",
+    baseUrl: "https://api.sambanova.ai/v1",
+    openAICompat: true,
+    models: [
+      "Meta-Llama-3.3-70B-Instruct",
+      "DeepSeek-R1-671B",
+      "Llama-4-Maverick-17B-128E-Instruct",
+    ],
+    requiresKey: true,
+    docsUrl: "https://cloud.sambanova.ai/",
+  },
+  {
+    name: "github",
+    displayName: "GitHub Models",
+    baseUrl: "https://models.github.ai/inference",
+    openAICompat: true,
+    models: ["openai/gpt-4o", "microsoft/phi-4", "meta/llama-3.3-70b-instruct"],
+    requiresKey: true,
+    docsUrl: "https://github.com/settings/tokens",
+  },
+  {
+    name: "xai",
+    displayName: "xAI (Grok)",
+    baseUrl: "https://api.x.ai/v1",
+    openAICompat: true,
+    models: ["grok-3", "grok-3-mini", "grok-2-1212"],
+    requiresKey: true,
+    docsUrl: "https://console.x.ai/",
+  },
+  {
+    name: "zen",
+    displayName: "Zen (OpenCode)",
+    baseUrl: "https://opencode.ai/zen/v1",
+    openAICompat: true,
+    models: [
+      "kimi-k2.6",
+      "mimo-v2.5-free",
+      "minimax-m2.7",
+      "minimax-m3-free",
+      "nemotron-3-super-free",
+      "qwen3.5-plus",
+      "qwen3.6-plus",
+      "stepfun/step-3.5-flash-free",
+      "z-ai/glm-4.7-flash-free",
+      "deepseek/deepseek-chat",
+    ],
+    requiresKey: true,
+    docsUrl: "https://opencode.ai/zen",
   },
 ];
 
@@ -198,51 +222,59 @@ type ProvidersStore = Record<string, ProviderEntry>;
 /* ──────────────────────── ProvidersManager ──────────────────────── */
 
 function getProvidersFilePath(): string {
-  return path.join(os.homedir(), '.fixocli', 'providers.json');
+  return path.join(os.homedir(), ".fixocli", "providers.json");
 }
 
 function getMachineKey(): Buffer {
-  const p = path.join(os.homedir(), '.fixocli', '.machine_key');
+  const p = path.join(os.homedir(), ".fixocli", ".machine_key");
   if (fs.existsSync(p)) {
-    return Buffer.from(fs.readFileSync(p, 'utf-8').trim(), 'hex');
+    return Buffer.from(fs.readFileSync(p, "utf-8").trim(), "hex");
   }
   const key = crypto.randomBytes(32);
-  fs.writeFileSync(p, key.toString('hex') + '\n', { mode: 0o600 });
+  fs.writeFileSync(p, key.toString("hex") + "\n", { mode: 0o600 });
   return key;
 }
 
 function encryptKey(key: string): string {
-  if (key.startsWith('ENC:')) return key;
+  if (key.startsWith("ENC:")) return key;
   const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv('aes-256-gcm', getMachineKey(), iv);
-  let encrypted = cipher.update(key, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  const authTag = cipher.getAuthTag().toString('hex');
-  return `ENC:${iv.toString('hex')}:${authTag}:${encrypted}`;
+  const cipher = crypto.createCipheriv("aes-256-gcm", getMachineKey(), iv);
+  let encrypted = cipher.update(key, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  const authTag = cipher.getAuthTag().toString("hex");
+  return `ENC:${iv.toString("hex")}:${authTag}:${encrypted}`;
 }
 
 function decryptKey(val: string): string {
-  if (!val.startsWith('ENC:')) return val;
-  const parts = val.split(':');
+  if (!val.startsWith("ENC:")) return val;
+  const parts = val.split(":");
   if (parts.length !== 4) {
-    console.warn('[FixO] providers.json: malformed ENC entry — removing this key. Run /providers remove and re-add it.');
-    throw new Error('Malformed encrypted key entry in providers.json');
+    console.warn(
+      "[FixO] providers.json: malformed ENC entry — removing this key. Run /providers remove and re-add it.",
+    );
+    throw new Error("Malformed encrypted key entry in providers.json");
   }
-  const iv = Buffer.from(parts[1], 'hex');
-  const authTag = Buffer.from(parts[2], 'hex');
+  const iv = Buffer.from(parts[1], "hex");
+  const authTag = Buffer.from(parts[2], "hex");
   const encrypted = parts[3];
   try {
-    const decipher = crypto.createDecipheriv('aes-256-gcm', getMachineKey(), iv);
+    const decipher = crypto.createDecipheriv(
+      "aes-256-gcm",
+      getMachineKey(),
+      iv,
+    );
     decipher.setAuthTag(authTag);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
+    let decrypted = decipher.update(encrypted, "hex", "utf8");
+    decrypted += decipher.final("utf8");
     return decrypted;
   } catch {
     console.warn(
-      '[FixO] Failed to decrypt a stored API key. Your ~/.fixocli/providers.json may be corrupted\n' +
-      '       or the machine key has changed. Run: /providers remove <name>, then re-add the key.',
+      "[FixO] Failed to decrypt a stored API key. Your ~/.fixocli/providers.json may be corrupted\n" +
+        "       or the machine key has changed. Run: /providers remove <name>, then re-add the key.",
     );
-    throw new Error('AES-256-GCM decryption failed — corrupted providers.json or rotated machine key');
+    throw new Error(
+      "AES-256-GCM decryption failed — corrupted providers.json or rotated machine key",
+    );
   }
 }
 
@@ -250,7 +282,7 @@ function loadStore(): ProvidersStore {
   const filePath = getProvidersFilePath();
   try {
     if (!fs.existsSync(filePath)) return {};
-    const raw = fs.readFileSync(filePath, 'utf-8');
+    const raw = fs.readFileSync(filePath, "utf-8");
     const store = JSON.parse(raw) as ProvidersStore;
     for (const k of Object.keys(store)) {
       if (store[k].apiKey) {
@@ -264,7 +296,7 @@ function loadStore(): ProvidersStore {
 }
 
 function saveStore(store: ProvidersStore): void {
-  const dir = path.join(os.homedir(), '.fixocli');
+  const dir = path.join(os.homedir(), ".fixocli");
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
@@ -275,16 +307,20 @@ function saveStore(store: ProvidersStore): void {
       toSave[k].apiKey = encryptKey(toSave[k].apiKey);
     }
   }
-  fs.writeFileSync(filePath, JSON.stringify(toSave, null, 2) + '\n', {
-    encoding: 'utf-8',
+  fs.writeFileSync(filePath, JSON.stringify(toSave, null, 2) + "\n", {
+    encoding: "utf-8",
     mode: 0o600,
   });
-  try { fs.chmodSync(filePath, 0o600); } catch { /* safe: see above */ }
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    /* safe: see above */
+  }
 }
 
 function maskKey(key: string): string {
-  if (key.length <= 8) return '••••••••';
-  return key.slice(0, 6) + '••••••' + key.slice(-4);
+  if (key.length <= 8) return "••••••••";
+  return key.slice(0, 6) + "••••••" + key.slice(-4);
 }
 
 /* ──────────────────────── Models Cache ──────────────────────── */
@@ -300,7 +336,7 @@ function maskKey(key: string): string {
 export interface ProviderModelsCacheEntry {
   models: string[];
   fetchedAt: string; // ISO timestamp
-  source: 'live' | 'registry-fallback';
+  source: "live" | "registry-fallback";
 }
 
 type ProviderModelsCacheStore = Record<string, ProviderModelsCacheEntry>;
@@ -308,33 +344,37 @@ type ProviderModelsCacheStore = Record<string, ProviderModelsCacheEntry>;
 const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function getModelsCachePath(): string {
-  return path.join(os.homedir(), '.fixocli', 'models-cache.json');
+  return path.join(os.homedir(), ".fixocli", "models-cache.json");
 }
 
 function loadModelsCache(): ProviderModelsCacheStore {
   const filePath = getModelsCachePath();
   try {
     if (!fs.existsSync(filePath)) return {};
-    const raw = fs.readFileSync(filePath, 'utf-8');
+    const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw) as ProviderModelsCacheStore;
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
   }
 }
 
 function saveModelsCache(store: ProviderModelsCacheStore): void {
-  const dir = path.join(os.homedir(), '.fixocli');
+  const dir = path.join(os.homedir(), ".fixocli");
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const filePath = getModelsCachePath();
-  fs.writeFileSync(filePath, JSON.stringify(store, null, 2) + '\n', {
-    encoding: 'utf-8',
+  fs.writeFileSync(filePath, JSON.stringify(store, null, 2) + "\n", {
+    encoding: "utf-8",
     mode: 0o600,
   });
   // safe: same belt-and-braces chmod as saveStore — see comment there.
-  try { fs.chmodSync(filePath, 0o600); } catch { /* safe: see saveStore */ }
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    /* safe: see saveStore */
+  }
 }
 
 /**
@@ -342,19 +382,22 @@ function saveModelsCache(store: ProviderModelsCacheStore): void {
  * `/providers test` flow uses. Kept here so the live-fetch path
  * and the legacy test path can share one source of truth.
  */
-function buildModelsRequestHeaders(name: string, apiKey: string): Record<string, string> {
+function buildModelsRequestHeaders(
+  name: string,
+  apiKey: string,
+): Record<string, string> {
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${apiKey}`,
+    Authorization: `Bearer ${apiKey}`,
   };
-  if (name === 'zen' || name === 'openrouter') {
-    headers['HTTP-Referer'] = 'https://opencode.ai/';
-    headers['X-Title'] = 'opencode';
-  } else if (name === 'nvidia') {
-    headers['HTTP-Referer'] = 'https://opencode.ai/';
-    headers['X-Title'] = 'opencode';
-    headers['X-BILLING-INVOKE-ORIGIN'] = 'OpenCode';
-  } else if (name === 'cerebras') {
-    headers['X-Cerebras-3rd-Party-Integration'] = 'opencode';
+  if (name === "zen" || name === "openrouter") {
+    headers["HTTP-Referer"] = "https://opencode.ai/";
+    headers["X-Title"] = "opencode";
+  } else if (name === "nvidia") {
+    headers["HTTP-Referer"] = "https://opencode.ai/";
+    headers["X-Title"] = "opencode";
+    headers["X-BILLING-INVOKE-ORIGIN"] = "OpenCode";
+  } else if (name === "cerebras") {
+    headers["X-Cerebras-3rd-Party-Integration"] = "opencode";
   }
   return headers;
 }
@@ -364,22 +407,24 @@ interface OpenAIModelsResponse {
 }
 
 function parseModelsResponse(payload: unknown): string[] | null {
-  if (!payload || typeof payload !== 'object') return null;
+  if (!payload || typeof payload !== "object") return null;
   const data = (payload as OpenAIModelsResponse).data;
   if (!Array.isArray(data)) return null;
   const ids = data
-    .map(m => (m && typeof m === 'object' && typeof m.id === 'string') ? m.id : null)
-    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+    .map((m) =>
+      m && typeof m === "object" && typeof m.id === "string" ? m.id : null,
+    )
+    .filter((s): s is string => typeof s === "string" && s.length > 0);
   return ids.length > 0 ? ids : null;
 }
 
 function getModelHintsPath(): string {
-  return path.join(os.homedir(), '.fixocli', 'model-hints.json');
+  return path.join(os.homedir(), ".fixocli", "model-hints.json");
 }
 
 function loadModelProviderHints(): Map<string, string> {
   try {
-    const raw = fs.readFileSync(getModelHintsPath(), 'utf-8');
+    const raw = fs.readFileSync(getModelHintsPath(), "utf-8");
     const parsed = JSON.parse(raw) as Record<string, string>;
     return new Map(Object.entries(parsed));
   } catch {
@@ -388,12 +433,12 @@ function loadModelProviderHints(): Map<string, string> {
 }
 
 function persistModelProviderHints(hints: Map<string, string>): void {
-  const dir = path.join(os.homedir(), '.fixocli');
+  const dir = path.join(os.homedir(), ".fixocli");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     getModelHintsPath(),
-    JSON.stringify(Object.fromEntries(hints), null, 2) + '\n',
-    { encoding: 'utf-8', mode: 0o600 },
+    JSON.stringify(Object.fromEntries(hints), null, 2) + "\n",
+    { encoding: "utf-8", mode: 0o600 },
   );
 }
 
@@ -425,10 +470,15 @@ export const ProvidersManager = {
   },
 
   /** List all connected providers with masked keys. */
-  list(): Array<{ name: string; displayName: string; maskedKey: string; addedAt: string }> {
+  list(): Array<{
+    name: string;
+    displayName: string;
+    maskedKey: string;
+    addedAt: string;
+  }> {
     const store = loadStore();
     return Object.entries(store).map(([name, entry]) => {
-      const def = PROVIDER_REGISTRY.find(p => p.name === name);
+      const def = PROVIDER_REGISTRY.find((p) => p.name === name);
       return {
         name,
         displayName: def?.displayName ?? name,
@@ -478,17 +528,24 @@ export const ProvidersManager = {
   },
 
   /** Get the base URL and key for a provider — for direct bypass. */
-  getDirectConfig(name: string): { apiKey: string; baseUrl: string; displayName: string } | null {
+  getDirectConfig(
+    name: string,
+  ): { apiKey: string; baseUrl: string; displayName: string } | null {
     // Lazily hydrate the vault on first access.
     this.hydrateVault();
     const store = loadStore();
     const entry = store[name];
     if (!entry) return null;
-    const def = PROVIDER_REGISTRY.find(p => p.name === name);
+    const def = PROVIDER_REGISTRY.find((p) => p.name === name);
     if (!def) return null;
     // Re-ingest in case the on-disk key was added since the last
     // hydration. Idempotent: ingest() overwrites by name.
-    getProviderKeyVault().ingest(name, entry.apiKey, def.baseUrl, def.displayName);
+    getProviderKeyVault().ingest(
+      name,
+      entry.apiKey,
+      def.baseUrl,
+      def.displayName,
+    );
     return {
       apiKey: entry.apiKey,
       baseUrl: def.baseUrl,
@@ -508,7 +565,9 @@ export const ProvidersManager = {
    */
   async withDirectCredential<T>(
     name: string,
-    fn: (cred: ProviderCredential & { openAICompat: boolean }) => Promise<T> | T,
+    fn: (
+      cred: ProviderCredential & { openAICompat: boolean },
+    ) => Promise<T> | T,
   ): Promise<T | null> {
     if (!this.has(name)) return null;
     // Make sure the vault is hydrated.
@@ -530,13 +589,13 @@ export const ProvidersManager = {
     const store = loadStore();
     const vault = getProviderKeyVault();
     let needsMigration = false;
-    
+
     // We read directly from file without decrypting to check if any are unencrypted
     try {
-      const raw = fs.readFileSync(getProvidersFilePath(), 'utf-8');
+      const raw = fs.readFileSync(getProvidersFilePath(), "utf-8");
       const rawStore = JSON.parse(raw) as ProvidersStore;
       for (const entry of Object.values(rawStore)) {
-        if (entry.apiKey && !entry.apiKey.startsWith('ENC:')) {
+        if (entry.apiKey && !entry.apiKey.startsWith("ENC:")) {
           needsMigration = true;
           break;
         }
@@ -550,7 +609,7 @@ export const ProvidersManager = {
       vault.ingest(
         name,
         entry.apiKey,
-        def ? def.baseUrl : '',
+        def ? def.baseUrl : "",
         def ? def.displayName : name,
       );
     }
@@ -576,7 +635,7 @@ export const ProvidersManager = {
 
   /** Get provider definition by name. */
   getDefinition(name: string): ProviderDefinition | undefined {
-    return PROVIDER_REGISTRY.find(p => p.name === name);
+    return PROVIDER_REGISTRY.find((p) => p.name === name);
   },
 
   /** Get all registered provider definitions. */
@@ -615,38 +674,66 @@ export const ProvidersManager = {
    */
   async fetchRemoteModels(name: string): Promise<{
     models: string[];
-    source: 'live' | 'cache' | 'registry-fallback';
+    source: "live" | "cache" | "registry-fallback";
     fetchedAt: string;
   }> {
     const def = this.getDefinition(name);
     if (!def) {
       const fallback = this.getCachedModels(name);
       if (fallback) {
-        return { models: fallback.models, source: 'cache', fetchedAt: fallback.fetchedAt };
+        return {
+          models: fallback.models,
+          source: "cache",
+          fetchedAt: fallback.fetchedAt,
+        };
       }
-      return { models: [], source: 'registry-fallback', fetchedAt: new Date().toISOString() };
+      return {
+        models: [],
+        source: "registry-fallback",
+        fetchedAt: new Date().toISOString(),
+      };
     }
 
-    const registryFallback = (): { models: string[]; source: 'registry-fallback'; fetchedAt: string } => {
+    const registryFallback = (): {
+      models: string[];
+      source: "registry-fallback";
+      fetchedAt: string;
+    } => {
       const now = new Date().toISOString();
       // Persist a synthetic entry tagged registry-fallback so the
       // /model picker can render the `[unverified]` hint without
       // having to know whether a live fetch was ever attempted.
       const store = loadModelsCache();
-      store[name] = { models: def.models.slice(), fetchedAt: now, source: 'registry-fallback' };
+      store[name] = {
+        models: def.models.slice(),
+        fetchedAt: now,
+        source: "registry-fallback",
+      };
       // safe: cache persistence is a perf optimisation only — losing
       // it means the next /model call re-runs the fallback, never
       // user-visible breakage. ENOSPC / read-only $HOME are the only
       // realistic causes.
-      try { saveModelsCache(store); } catch { /* safe: see above */ }
-      return { models: def.models.slice(), source: 'registry-fallback', fetchedAt: now };
+      try {
+        saveModelsCache(store);
+      } catch {
+        /* safe: see above */
+      }
+      return {
+        models: def.models.slice(),
+        source: "registry-fallback",
+        fetchedAt: now,
+      };
     };
 
     // No key on disk → cannot live-fetch; fall through to cache → registry.
     if (!this.has(name)) {
       const cached = this.getCachedModels(name);
       if (cached) {
-        return { models: cached.models, source: 'cache', fetchedAt: cached.fetchedAt };
+        return {
+          models: cached.models,
+          source: "cache",
+          fetchedAt: cached.fetchedAt,
+        };
       }
       return registryFallback();
     }
@@ -664,29 +751,36 @@ export const ProvidersManager = {
         if (!ids) return null;
         const now = new Date().toISOString();
         const store = loadModelsCache();
-        store[name] = { models: ids, fetchedAt: now, source: 'live' };
+        store[name] = { models: ids, fetchedAt: now, source: "live" };
         saveModelsCache(store);
-        return { models: ids, source: 'live' as const, fetchedAt: now };
+        return { models: ids, source: "live" as const, fetchedAt: now };
       } catch {
         return null;
       }
     });
 
     if (liveResult) return liveResult;
- 
-     const cached = this.getCachedModels(name);
-     if (cached) {
-       return { models: cached.models, source: 'cache', fetchedAt: cached.fetchedAt };
-     }
-     return registryFallback();
-   },
+
+    const cached = this.getCachedModels(name);
+    if (cached) {
+      return {
+        models: cached.models,
+        source: "cache",
+        fetchedAt: cached.fetchedAt,
+      };
+    }
+    return registryFallback();
+  },
 
   /**
    * Verify an API key and fetch the live models.
    * Unlike fetchRemoteModels, this does not require the key to be saved in the manager.
    * It makes a live API call and throws if the call fails or returns non-OK status.
    */
-  async verifyKeyAndFetchModels(name: string, apiKey: string): Promise<string[]> {
+  async verifyKeyAndFetchModels(
+    name: string,
+    apiKey: string,
+  ): Promise<string[]> {
     const def = this.getDefinition(name);
     if (!def) {
       throw new Error(`Unknown provider: ${name}`);
@@ -699,16 +793,19 @@ export const ProvidersManager = {
         signal: AbortSignal.timeout(8000),
       });
     } catch (err: any) {
-      throw new Error(`Network error or timeout connecting to ${def.displayName}: ${err?.message ?? err}`);
+      throw new Error(
+        `Network error or timeout connecting to ${def.displayName}: ${err?.message ?? err}`,
+      );
     }
 
     if (!resp.ok) {
-      let detail = '';
+      let detail = "";
       try {
         const body = await resp.json();
-        if (body && typeof body === 'object') {
+        if (body && typeof body === "object") {
           const errObj = (body as any).error;
-          detail = errObj?.message || (body as any).message || JSON.stringify(body);
+          detail =
+            errObj?.message || (body as any).message || JSON.stringify(body);
         }
       } catch {
         try {
@@ -717,26 +814,30 @@ export const ProvidersManager = {
           // ignore
         }
       }
-      const errMsg = detail ? `: ${detail.slice(0, 150)}` : '';
-      throw new Error(`API returned status ${resp.status} ${resp.statusText}${errMsg}`);
+      const errMsg = detail ? `: ${detail.slice(0, 150)}` : "";
+      throw new Error(
+        `API returned status ${resp.status} ${resp.statusText}${errMsg}`,
+      );
     }
 
     let payload: unknown;
     try {
       payload = await resp.json();
     } catch {
-      throw new Error('Failed to parse API response as JSON');
+      throw new Error("Failed to parse API response as JSON");
     }
 
     const ids = parseModelsResponse(payload);
     if (!ids || ids.length === 0) {
-      throw new Error('No models returned from API or failed to parse response');
+      throw new Error(
+        "No models returned from API or failed to parse response",
+      );
     }
 
     // Cache the successfully retrieved models
     const now = new Date().toISOString();
     const store = loadModelsCache();
-    store[name] = { models: ids, fetchedAt: now, source: 'live' };
+    store[name] = { models: ids, fetchedAt: now, source: "live" };
     try {
       saveModelsCache(store);
     } catch {
@@ -746,4 +847,3 @@ export const ProvidersManager = {
     return ids;
   },
 };
-

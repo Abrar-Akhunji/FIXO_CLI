@@ -25,25 +25,25 @@
  * bothered by it.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 
 export type SyntaxHealthVerdict =
-  | { readonly state: 'ok' }
+  | { readonly state: "ok" }
   | {
-      readonly state: 'unbalanced';
+      readonly state: "unbalanced";
       /** The first unclosed delimiter, in document order. */
-      readonly opener: '{' | '(' | '[';
+      readonly opener: "{" | "(" | "[";
       /** 1-based line where the imbalance was detected. */
       readonly line: number;
     }
   | {
-      readonly state: 'unterminated-string';
+      readonly state: "unterminated-string";
       /** 1-based line where the runaway string starts. */
       readonly line: number;
     }
   | {
-      readonly state: 'unterminated-comment';
+      readonly state: "unterminated-comment";
       /** 1-based line where the block comment starts. */
       readonly line: number;
     };
@@ -54,7 +54,7 @@ export type SyntaxHealthVerdict =
  * pin the verdict exactly.
  */
 export function syntaxHealthCheck(source: string): SyntaxHealthVerdict {
-  const stack: Array<{ ch: '{' | '(' | '['; line: number }> = [];
+  const stack: Array<{ ch: "{" | "(" | "["; line: number }> = [];
   const lineStarts: number[] = [0];
   for (let i = 0; i < source.length; i++) {
     if (source.charCodeAt(i) === 10) lineStarts.push(i + 1);
@@ -69,12 +69,12 @@ export function syntaxHealthCheck(source: string): SyntaxHealthVerdict {
   let singleStartLine = 0;
   let doubleStartLine = 0;
   let templateStartLine = 0;
-  let prevCh = '';
+  let prevCh = "";
 
   for (let i = 0; i < source.length; i++) {
     const ch = source[i]!;
     const code = source.charCodeAt(i);
-    const nextCh = i + 1 < source.length ? source[i + 1]! : '';
+    const nextCh = i + 1 < source.length ? source[i + 1]! : "";
     const line = lineNumberAt(lineStarts, i);
 
     if (inLineComment) {
@@ -83,66 +83,66 @@ export function syntaxHealthCheck(source: string): SyntaxHealthVerdict {
       continue;
     }
     if (inBlockComment) {
-      if (prevCh === '*' && ch === '/') {
+      if (prevCh === "*" && ch === "/") {
         inBlockComment = false;
       }
       prevCh = ch;
       continue;
     }
     if (inSingle) {
-      if (ch === '\\') {
+      if (ch === "\\") {
         // Skip the next char. (No need to handle surrogate pairs
         // separately — `\\u{1F600}` etc. still consume 2 source
         // chars; the skip-i+1 below handles it.)
         i++;
-        prevCh = '';
+        prevCh = "";
         continue;
       }
-      if (ch === "'" && prevCh !== '\\') {
+      if (ch === "'" && prevCh !== "\\") {
         inSingle = false;
       } else if (code === 10) {
-        return { state: 'unterminated-string', line: singleStartLine };
+        return { state: "unterminated-string", line: singleStartLine };
       }
       prevCh = ch;
       continue;
     }
     if (inDouble) {
-      if (ch === '\\') {
+      if (ch === "\\") {
         i++;
-        prevCh = '';
+        prevCh = "";
         continue;
       }
-      if (ch === '"' && prevCh !== '\\') {
+      if (ch === '"' && prevCh !== "\\") {
         inDouble = false;
       } else if (code === 10) {
-        return { state: 'unterminated-string', line: doubleStartLine };
+        return { state: "unterminated-string", line: doubleStartLine };
       }
       prevCh = ch;
       continue;
     }
     if (inTemplate) {
-      if (ch === '\\') {
+      if (ch === "\\") {
         i++;
-        prevCh = '';
+        prevCh = "";
         continue;
       }
-      if (ch === '`') {
+      if (ch === "`") {
         inTemplate = false;
       } else if (code === 10) {
-        return { state: 'unterminated-string', line: templateStartLine };
+        return { state: "unterminated-string", line: templateStartLine };
       }
       prevCh = ch;
       continue;
     }
 
     // Not in any string/comment — check for new states.
-    if (ch === '/' && nextCh === '/') {
+    if (ch === "/" && nextCh === "/") {
       inLineComment = true;
       prevCh = ch;
       i++;
       continue;
     }
-    if (ch === '/' && nextCh === '*') {
+    if (ch === "/" && nextCh === "*") {
       inBlockComment = true;
       blockCommentStartLine = line;
       prevCh = ch;
@@ -161,17 +161,16 @@ export function syntaxHealthCheck(source: string): SyntaxHealthVerdict {
       prevCh = ch;
       continue;
     }
-    if (ch === '`') {
+    if (ch === "`") {
       inTemplate = true;
       templateStartLine = line;
       prevCh = ch;
       continue;
     }
-    if (ch === '{' || ch === '(' || ch === '[') {
-      stack.push({ ch: ch as '{' | '(' | '[', line });
-    } else if (ch === '}' || ch === ')' || ch === ']') {
-      const expected =
-        ch === '}' ? '{' : ch === ')' ? '(' : '[';
+    if (ch === "{" || ch === "(" || ch === "[") {
+      stack.push({ ch: ch as "{" | "(" | "[", line });
+    } else if (ch === "}" || ch === ")" || ch === "]") {
+      const expected = ch === "}" ? "{" : ch === ")" ? "(" : "[";
       const top = stack.pop();
       if (!top || top.ch !== expected) {
         // The first missing closer tells us the first unclosed
@@ -179,25 +178,28 @@ export function syntaxHealthCheck(source: string): SyntaxHealthVerdict {
         // we still report a synthetic 'unbalanced' so the caller
         // sees a verdict.
         if (top) {
-          return { state: 'unbalanced', opener: top.ch, line: top.line };
+          return { state: "unbalanced", opener: top.ch, line: top.line };
         }
-        return { state: 'unbalanced', opener: expected, line };
+        return { state: "unbalanced", opener: expected, line };
       }
     }
     prevCh = ch;
   }
 
   if (inBlockComment) {
-    return { state: 'unterminated-comment', line: blockCommentStartLine };
+    return { state: "unterminated-comment", line: blockCommentStartLine };
   }
   if (stack.length > 0) {
     const top = stack[stack.length - 1]!;
-    return { state: 'unbalanced', opener: top.ch, line: top.line };
+    return { state: "unbalanced", opener: top.ch, line: top.line };
   }
-  return { state: 'ok' };
+  return { state: "ok" };
 }
 
-function lineNumberAt(lineStarts: ReadonlyArray<number>, index: number): number {
+function lineNumberAt(
+  lineStarts: ReadonlyArray<number>,
+  index: number,
+): number {
   // Binary search would be O(log n) but a linear scan is fine for
   // files up to ~10_000 lines, and the inlined version lets V8
   // keep both arrays hot in the same cache line.
@@ -215,13 +217,13 @@ function lineNumberAt(lineStarts: ReadonlyArray<number>, index: number): number 
  */
 export function formatSyntaxVerdict(verdict: SyntaxHealthVerdict): string {
   switch (verdict.state) {
-    case 'ok':
-      return 'Syntax health check: OK (balanced).';
-    case 'unbalanced':
+    case "ok":
+      return "Syntax health check: OK (balanced).";
+    case "unbalanced":
       return `Syntax health check: unbalanced — '${verdict.opener}' opened on line ${verdict.line} has no matching closer.`;
-    case 'unterminated-string':
+    case "unterminated-string":
       return `Syntax health check: unterminated string starting on line ${verdict.line}.`;
-    case 'unterminated-comment':
+    case "unterminated-comment":
       return `Syntax health check: unterminated block comment starting on line ${verdict.line}.`;
   }
 }
@@ -245,16 +247,16 @@ export interface LspSanityResult {
 }
 
 const COMMON_LANGUAGE_SERVERS = [
-  'typescript-language-server',
-  'tsserver',
-  'vscode-langservers-extracted',
-  'gopls',
-  'rust-analyzer',
-  'pyright',
-  'pylsp',
-  'clangd',
-  'jdtls',
-  'solargraph',
+  "typescript-language-server",
+  "tsserver",
+  "vscode-langservers-extracted",
+  "gopls",
+  "rust-analyzer",
+  "pyright",
+  "pylsp",
+  "clangd",
+  "jdtls",
+  "solargraph",
 ] as const;
 
 /**
@@ -271,9 +273,11 @@ const COMMON_LANGUAGE_SERVERS = [
  * case the pre-save gate would block all writes, which is a much
  * worse experience than a boot-time warning.
  */
-export function checkLspSanity(env: NodeJS.ProcessEnv = process.env): LspSanityResult {
-  const syntaxOnly = env.FIXO_LSP_FALLBACK === 'syntax-only';
-  const pathEntries = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
+export function checkLspSanity(
+  env: NodeJS.ProcessEnv = process.env,
+): LspSanityResult {
+  const syntaxOnly = env.FIXO_LSP_FALLBACK === "syntax-only";
+  const pathEntries = (env.PATH ?? "").split(path.delimiter).filter(Boolean);
 
   // `execFileSync('which', ...)` would spawn a child process —
   // expensive and unnecessary. PATH scan is enough: a binary on
@@ -295,12 +299,19 @@ export function checkLspSanity(env: NodeJS.ProcessEnv = process.env): LspSanityR
   }
 
   if (found.length > 0) {
-    return { ok: true, reason: '', checked: [...COMMON_LANGUAGE_SERVERS], found, syntaxOnly };
+    return {
+      ok: true,
+      reason: "",
+      checked: [...COMMON_LANGUAGE_SERVERS],
+      found,
+      syntaxOnly,
+    };
   }
   if (syntaxOnly) {
     return {
       ok: true,
-      reason: 'FIXO_LSP_FALLBACK=syntax-only; brace-balance check will run instead of a real LSP.',
+      reason:
+        "FIXO_LSP_FALLBACK=syntax-only; brace-balance check will run instead of a real LSP.",
       checked: [...COMMON_LANGUAGE_SERVERS],
       found: [],
       syntaxOnly: true,
@@ -309,8 +320,8 @@ export function checkLspSanity(env: NodeJS.ProcessEnv = process.env): LspSanityR
   return {
     ok: false,
     reason:
-      'No common language server found on PATH. Pre-save diagnostics will be skipped. ' +
-      'Install typescript-language-server / gopls / rust-analyzer or set FIXO_LSP_FALLBACK=syntax-only.',
+      "No common language server found on PATH. Pre-save diagnostics will be skipped. " +
+      "Install typescript-language-server / gopls / rust-analyzer or set FIXO_LSP_FALLBACK=syntax-only.",
     checked: [...COMMON_LANGUAGE_SERVERS],
     found: [],
     syntaxOnly: false,

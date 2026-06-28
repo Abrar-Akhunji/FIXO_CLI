@@ -16,11 +16,11 @@
  * content is appended under a clearly-labelled
  * `<project-instructions>` block.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import { getConfigDir } from '../config.js';
+import fs from "node:fs";
+import path from "node:path";
+import { getConfigDir } from "../config.js";
 
-export type FixoMdSource = 'project-fixo' | 'project-cwd' | 'global' | 'none';
+export type FixoMdSource = "project-fixo" | "project-cwd" | "global" | "none";
 
 export interface FixoMdLoadResult {
   /** The path that won, or null when no FIXO.md was found. */
@@ -40,11 +40,14 @@ export interface FixoMdLoadResult {
  * read the file — the caller decides whether to read it
  * synchronously or stream it.
  */
-export function findFixoMdPath(cwd: string): { source: FixoMdSource; path: string | null } {
+export function findFixoMdPath(cwd: string): {
+  source: FixoMdSource;
+  path: string | null;
+} {
   const candidates: Array<{ source: FixoMdSource; p: string }> = [
-    { source: 'project-fixo', p: path.join(cwd, '.fixo', 'FIXO.md') },
-    { source: 'project-cwd', p: path.join(cwd, 'FIXO.md') },
-    { source: 'global', p: path.join(getConfigDir(), 'FIXO.md') },
+    { source: "project-fixo", p: path.join(cwd, ".fixo", "FIXO.md") },
+    { source: "project-cwd", p: path.join(cwd, "FIXO.md") },
+    { source: "global", p: path.join(getConfigDir(), "FIXO.md") },
   ];
   for (const c of candidates) {
     try {
@@ -56,7 +59,7 @@ export function findFixoMdPath(cwd: string): { source: FixoMdSource; path: strin
       // ENOENT or permission denied — try the next candidate.
     }
   }
-  return { source: 'none', path: null };
+  return { source: "none", path: null };
 }
 
 /**
@@ -70,15 +73,15 @@ export function findFixoMdPath(cwd: string): { source: FixoMdSource; path: strin
 export function loadProjectInstructions(cwd: string): FixoMdLoadResult {
   const found = findFixoMdPath(cwd);
   if (found.path === null) {
-    return { source: 'none', path: null, content: '', bytes: 0 };
+    return { source: "none", path: null, content: "", bytes: 0 };
   }
   let content: string;
   try {
-    content = fs.readFileSync(found.path, 'utf-8');
+    content = fs.readFileSync(found.path, "utf-8");
   } catch {
-    return { source: 'none', path: found.path, content: '', bytes: 0 };
+    return { source: "none", path: found.path, content: "", bytes: 0 };
   }
-  const bytes = Buffer.byteLength(content, 'utf-8');
+  const bytes = Buffer.byteLength(content, "utf-8");
   return {
     source: found.source,
     path: found.path,
@@ -103,13 +106,13 @@ export function buildProjectInstructionsBlock(cwd: string): {
   result: FixoMdLoadResult;
 } {
   const result = loadProjectInstructions(cwd);
-  if (result.source === 'none' || result.content.length === 0) {
-    return { block: '', result };
+  if (result.source === "none" || result.content.length === 0) {
+    return { block: "", result };
   }
   const header =
-    result.source === 'global'
-      ? 'Global instructions (from ~/.fixocli/FIXO.md)'
-      : `Project instructions (from ${result.path ?? 'FIXO.md'})`;
+    result.source === "global"
+      ? "Global instructions (from ~/.fixocli/FIXO.md)"
+      : `Project instructions (from ${result.path ?? "FIXO.md"})`;
   const block =
     `\n\n<project-instructions source="${result.source}">\n` +
     `## ${header}\n\n` +
@@ -126,9 +129,12 @@ export function buildProjectInstructionsBlock(cwd: string): {
  * the loader. Errors are swallowed — telemetry must never
  * break a tool call.
  */
-export async function recordFixoMdLoad(result: FixoMdLoadResult): Promise<void> {
+export async function recordFixoMdLoad(
+  result: FixoMdLoadResult,
+): Promise<void> {
   try {
-    const { recordTelemetry, telemetry } = await import('../agent/telemetry.js');
+    const { recordTelemetry, telemetry } =
+      await import("../agent/telemetry.js");
     recordTelemetry(
       telemetry.fixoMdLoaded({
         source: result.source,

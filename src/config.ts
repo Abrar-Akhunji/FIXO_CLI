@@ -1,9 +1,9 @@
-import os from 'node:os';
-import fs from 'node:fs';
-import path from 'node:path';
-import type { PolicyProfile } from './runtime/policy.js';
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import type { PolicyProfile } from "./runtime/policy.js";
 
-export const DEFAULT_API_URL = 'https://freellm-for-fixo.vercel.app/v1';
+export const DEFAULT_API_URL = "https://freellm-for-fixo.vercel.app/v1";
 
 /**
  * How the CLI authenticates against an LLM backend.
@@ -17,10 +17,10 @@ export const DEFAULT_API_URL = 'https://freellm-for-fixo.vercel.app/v1';
  *               convenience for users who want load-balanced failover
  *               across free-tier providers without managing keys.
  */
-export type ProviderMode = 'direct' | 'proxy';
+export type ProviderMode = "direct" | "proxy";
 
 /** Stream-resume policy. */
-export type StreamResumePolicy = 'auto' | 'never';
+export type StreamResumePolicy = "auto" | "never";
 
 /**
  * Context-budget policy.
@@ -34,7 +34,7 @@ export type StreamResumePolicy = 'auto' | 'never';
  *  - `never`    — kill-switch. No enforcement, no compaction. Useful
  *                 when a user wants exact 1:1 historical behaviour.
  */
-export type ContextBudgetPolicy = 'auto' | 'truncate' | 'never';
+export type ContextBudgetPolicy = "auto" | "truncate" | "never";
 
 /* ──────────────────────── Safety Configuration ──────────────────────── */
 
@@ -98,7 +98,7 @@ export interface ToolCallBudgetPolicy {
 }
 
 /** Pre-save gate severity. */
-export type LspPreSaveMode = 'off' | 'warn' | 'block' | 'sandbox-mock';
+export type LspPreSaveMode = "off" | "warn" | "block" | "sandbox-mock";
 
 /**
  * Sandbox mode for `run_command` execution.
@@ -118,7 +118,7 @@ export type LspPreSaveMode = 'off' | 'warn' | 'block' | 'sandbox-mock';
  *
  * Always combined with the regex/guard layer — defence in depth.
  */
-export type SandboxMode = 'guard' | 'os-sandbox';
+export type SandboxMode = "guard" | "os-sandbox";
 
 /** Safety preferences — Pillar 1, 2, 3 surface. Pillar 4 lives in the
  *  credential vault module, not in the user-facing config. */
@@ -369,14 +369,14 @@ export interface FreeLLMConfig {
   defaultModel: string;
   /** Persisted across launches so the next boot auto-reconnects. */
   lastSession?: {
-    provider: string;      // e.g. "google"
-    model: string;         // e.g. "gemini-2.5-pro"
-    updatedAt: string;     // ISO timestamp
+    provider: string; // e.g. "google"
+    model: string; // e.g. "gemini-2.5-pro"
+    updatedAt: string; // ISO timestamp
   };
   preferences: {
     autoCommit: boolean;
     streaming: boolean;
-    theme: 'dark' | 'light';
+    theme: "dark" | "light";
     maxRetries: number;
     policy: PolicyProfile;
     telemetry: boolean;
@@ -433,17 +433,17 @@ export interface FreeLLMConfig {
 
 /** Returns the FixO CLI config directory (`~/.fixocli/`). */
 export function getConfigDir(): string {
-  return path.join(os.homedir(), '.fixocli');
+  return path.join(os.homedir(), ".fixocli");
 }
 
 /** Returns the full path to the config file (`~/.fixocli/config.json`). */
 export function getConfigPath(): string {
-  return path.join(getConfigDir(), 'config.json');
+  return path.join(getConfigDir(), "config.json");
 }
 
 /** Returns the full path to the prompt history log (`~/.fixocli/history.jsonl`). */
 export function getHistoryPath(): string {
-  return path.join(getConfigDir(), 'history.jsonl');
+  return path.join(getConfigDir(), "history.jsonl");
 }
 
 // ---------------------------------------------------------------------------
@@ -453,28 +453,28 @@ export function getHistoryPath(): string {
 /** Returns a complete default configuration object. */
 export function getDefaultConfig(): FreeLLMConfig {
   return {
-    provider_mode: 'direct',
-    defaultModel: 'auto',
+    provider_mode: "direct",
+    defaultModel: "auto",
     preferences: {
       autoCommit: false,
       streaming: true,
-      theme: 'dark',
+      theme: "dark",
       maxRetries: 3,
-      policy: 'shell-confirm',
+      policy: "shell-confirm",
       telemetry: true,
       telemetryLocal: true,
       telemetryRemote: false,
       resilience: {
-        streamResume: 'auto',
+        streamResume: "auto",
         maxResumeAttempts: 3,
         useWithRetry: true,
-        contextBudget: 'auto',
+        contextBudget: "auto",
         contextBudgetRatio: 0.8,
       },
       safety: {
         atomicStaging: true,
         stagingTtlMs: 24 * 60 * 60 * 1000,
-        lspPreSave: 'warn',
+        lspPreSave: "warn",
         loopTrap: {
           triggerCount: 3,
           hardAbortCount: 6,
@@ -496,14 +496,14 @@ export function getDefaultConfig(): FreeLLMConfig {
           autoExtend: true,
           investigationMultiplier: 3,
         },
-        sandboxMode: 'guard',
+        sandboxMode: "guard",
         autoVerify: true,
         autoVerifyMaxRepairs: 1,
       },
       agent: {
         pool: {
           concurrencyLimit: 3,
-          subtaskBudget: 12,
+          subtaskBudget: 100,
           preservePartialOnFailure: true,
         },
         loopGuard: {
@@ -534,12 +534,14 @@ export function loadConfig(): FreeLLMConfig {
   const configPath = getConfigPath();
 
   try {
-    const raw = fs.readFileSync(configPath, 'utf-8');
+    const raw = fs.readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw) as Partial<FreeLLMConfig>;
-    
+
     let migrated = false;
-    const isLegacyLiart = parsed.apiUrl && parsed.apiUrl.includes('freellm-' + 'liart.vercel.app');
-    const isLegacyFreeLLM = parsed.apiUrl && parsed.apiUrl.includes('api.' + 'freellmapi.com');
+    const isLegacyLiart =
+      parsed.apiUrl && parsed.apiUrl.includes("freellm-" + "liart.vercel.app");
+    const isLegacyFreeLLM =
+      parsed.apiUrl && parsed.apiUrl.includes("api." + "freellmapi.com");
     if (parsed.apiUrl && (isLegacyLiart || isLegacyFreeLLM)) {
       parsed.apiUrl = DEFAULT_API_URL;
       migrated = true;
@@ -552,7 +554,8 @@ export function loadConfig(): FreeLLMConfig {
     // predate a new field still pick up the new default.
     const parsedPreferences = parsed.preferences ?? {};
     const parsedResilience =
-      (parsedPreferences as { resilience?: Partial<ResilienceConfig> }).resilience ?? {};
+      (parsedPreferences as { resilience?: Partial<ResilienceConfig> })
+        .resilience ?? {};
     const parsedSafety =
       (parsedPreferences as { safety?: Partial<SafetyConfig> }).safety ?? {};
     const parsedLoopTrap =
@@ -561,13 +564,15 @@ export function loadConfig(): FreeLLMConfig {
       (parsedSafety as { semanticLoopTrap?: Partial<SemanticLoopTrapPolicy> })
         .semanticLoopTrap ?? {};
     const parsedToolCalls =
-      (parsedSafety as { toolCalls?: Partial<ToolCallBudgetPolicy> }).toolCalls ?? {};
+      (parsedSafety as { toolCalls?: Partial<ToolCallBudgetPolicy> })
+        .toolCalls ?? {};
     const parsedAgent =
       (parsedPreferences as { agent?: Partial<AgentConfig> }).agent ?? {};
     const parsedAgentPool =
       (parsedAgent as { pool?: Partial<AgentPoolConfig> }).pool ?? {};
     const parsedAgentLoopGuard =
-      (parsedAgent as { loopGuard?: Partial<AgentLoopGuardConfig> }).loopGuard ?? {};
+      (parsedAgent as { loopGuard?: Partial<AgentLoopGuardConfig> })
+        .loopGuard ?? {};
     const parsedAgentRouting =
       (parsedAgent as { routing?: Partial<AgentRoutingConfig> }).routing ?? {};
     const parsedAgentDag =
@@ -577,7 +582,7 @@ export function loadConfig(): FreeLLMConfig {
     // implicitly proxy users; otherwise they're either fresh or
     // explicitly direct. Never silently flip an existing user.
     const inferredMode: ProviderMode =
-      parsed.provider_mode ?? (parsed.freellmapi_api_key ? 'proxy' : 'direct');
+      parsed.provider_mode ?? (parsed.freellmapi_api_key ? "proxy" : "direct");
 
     const config = {
       ...defaults,
@@ -660,11 +665,15 @@ export function getAgentPoolConfig(config?: FreeLLMConfig): AgentPoolConfig {
   return getAgentConfig(config).pool;
 }
 
-export function getAgentLoopGuardConfig(config?: FreeLLMConfig): AgentLoopGuardConfig {
+export function getAgentLoopGuardConfig(
+  config?: FreeLLMConfig,
+): AgentLoopGuardConfig {
   return getAgentConfig(config).loopGuard;
 }
 
-export function getAgentRoutingConfig(config?: FreeLLMConfig): AgentRoutingConfig {
+export function getAgentRoutingConfig(
+  config?: FreeLLMConfig,
+): AgentRoutingConfig {
   return getAgentConfig(config).routing;
 }
 
@@ -684,8 +693,8 @@ export function saveConfig(config: FreeLLMConfig): void {
   }
 
   const configPath = getConfigPath();
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', {
-    encoding: 'utf-8',
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+    encoding: "utf-8",
     mode: 0o600,
   });
 

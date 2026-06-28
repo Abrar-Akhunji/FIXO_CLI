@@ -7,7 +7,7 @@
  * matches.
  */
 
-import type { ImportInfo, LanguageId } from '../parser-adapter.js';
+import type { ImportInfo, LanguageId } from "../parser-adapter.js";
 
 const MAX_IMPORTS_PER_FILE = 100;
 
@@ -51,7 +51,10 @@ const PATTERNS: Record<LanguageId, RegExp[]> = {
   generic: [],
 };
 
-export function extractImports(source: string, language: LanguageId): ImportInfo[] {
+export function extractImports(
+  source: string,
+  language: LanguageId,
+): ImportInfo[] {
   const patterns = PATTERNS[language] ?? [];
   if (patterns.length === 0) return [];
 
@@ -84,18 +87,18 @@ function indexToLine(source: string, index: number): number {
 }
 
 function extractImportedSymbols(raw: string, language: LanguageId): string[] {
-  if (language === 'python') {
+  if (language === "python") {
     // match[2] is the symbol list in a `from x import a, b` statement.
     return [];
   }
-  if (language === 'go' || language === 'rust') {
+  if (language === "go" || language === "rust") {
     return [];
   }
   // JS/TS: try to pull out `{ a, b as c }`.
   const named = /\{([^}]+)\}\s*from\s*['"`]/.exec(raw);
   if (!named || !named[1]) return [];
   return named[1]
-    .split(',')
+    .split(",")
     .map((s) => s.trim().split(/\s+as\s+/)[0])
     .filter((s) => s.length > 0);
 }

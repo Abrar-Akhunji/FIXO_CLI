@@ -1,16 +1,16 @@
-import { spawn, ChildProcess } from 'child_process';
-import path from 'path';
-import * as rpc from 'vscode-jsonrpc/node.js';
+import { spawn, ChildProcess } from "child_process";
+import path from "path";
+import * as rpc from "vscode-jsonrpc/node.js";
 
 export function filePathToUri(filePath: string): string {
-  const absolutePath = path.resolve(filePath).replace(/\\/g, '/');
-  return `file://${absolutePath.startsWith('/') ? '' : '/'}${absolutePath}`;
+  const absolutePath = path.resolve(filePath).replace(/\\/g, "/");
+  return `file://${absolutePath.startsWith("/") ? "" : "/"}${absolutePath}`;
 }
 
 export function uriToFilePath(uri: string): string {
-  if (uri.startsWith('file://')) {
+  if (uri.startsWith("file://")) {
     let p = uri.slice(7);
-    if (process.platform === 'win32' && p.startsWith('/')) {
+    if (process.platform === "win32" && p.startsWith("/")) {
       p = p.slice(1);
     }
     return path.resolve(decodeURIComponent(p));
@@ -21,20 +21,20 @@ export function uriToFilePath(uri: string): string {
 export function getLanguageId(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   switch (ext) {
-    case '.ts':
-    case '.tsx':
-      return 'typescript';
-    case '.js':
-    case '.jsx':
-      return 'javascript';
-    case '.py':
-      return 'python';
-    case '.go':
-      return 'go';
-    case '.rs':
-      return 'rust';
+    case ".ts":
+    case ".tsx":
+      return "typescript";
+    case ".js":
+    case ".jsx":
+      return "javascript";
+    case ".py":
+      return "python";
+    case ".go":
+      return "go";
+    case ".rs":
+      return "rust";
     default:
-      return '';
+      return "";
   }
 }
 
@@ -48,20 +48,20 @@ export class LspClient {
   constructor(
     public binaryPath: string,
     public args: string[],
-    public workspaceRoot: string
+    public workspaceRoot: string,
   ) {}
 
   async start(): Promise<void> {
     this.childProcess = spawn(this.binaryPath, this.args, {
       cwd: this.workspaceRoot,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
-    this.childProcess.stderr?.on('data', (data) => {
+    this.childProcess.stderr?.on("data", () => {
       // For diagnostic logs, can be enabled under verbose configurations
     });
 
-    this.childProcess.on('error', (err) => {
+    this.childProcess.on("error", (err) => {
       console.error(`LSP process error for ${this.binaryPath}:`, err);
     });
 
@@ -71,10 +71,13 @@ export class LspClient {
     this.connection = rpc.createMessageConnection(reader, writer);
 
     // Track incoming compile/type diagnostics
-    this.connection.onNotification('textDocument/publishDiagnostics', (params: any) => {
-      const { uri, diagnostics } = params;
-      this.diagnosticsMap.set(uri, diagnostics);
-    });
+    this.connection.onNotification(
+      "textDocument/publishDiagnostics",
+      (params: any) => {
+        const { uri, diagnostics } = params;
+        this.diagnosticsMap.set(uri, diagnostics);
+      },
+    );
 
     this.connection.listen();
 
@@ -93,7 +96,7 @@ export class LspClient {
             relatedInformation: true,
           },
           hover: {
-            contentFormat: ['markdown', 'plaintext'],
+            contentFormat: ["markdown", "plaintext"],
           },
           definition: {
             dynamicRegistration: true,
@@ -107,10 +110,13 @@ export class LspClient {
     };
 
     try {
-      await this.connection.sendRequest('initialize', initParams);
-      await this.connection.sendNotification('initialized', {});
+      await this.connection.sendRequest("initialize", initParams);
+      await this.connection.sendNotification("initialized", {});
     } catch (err) {
-      console.error(`LSP client failed to initialize server ${this.binaryPath}:`, err);
+      console.error(
+        `LSP client failed to initialize server ${this.binaryPath}:`,
+        err,
+      );
       this.stop();
       throw err;
     }
@@ -127,7 +133,7 @@ export class LspClient {
 
     if (!this.openedFiles.has(uri)) {
       this.openedFiles.add(uri);
-      this.connection.sendNotification('textDocument/didOpen', {
+      this.connection.sendNotification("textDocument/didOpen", {
         textDocument: {
           uri,
           languageId,
@@ -136,7 +142,7 @@ export class LspClient {
         },
       });
     } else {
-      this.connection.sendNotification('textDocument/didChange', {
+      this.connection.sendNotification("textDocument/didChange", {
         textDocument: {
           uri,
           version,
@@ -146,19 +152,27 @@ export class LspClient {
     }
   }
 
-  async gotoDefinition(filePath: string, line: number, character: number): Promise<any> {
-    if (!this.connection) throw new Error('LSP client not connected');
+  async gotoDefinition(
+    filePath: string,
+    line: number,
+    character: number,
+  ): Promise<any> {
+    if (!this.connection) throw new Error("LSP client not connected");
     const uri = filePathToUri(filePath);
-    return this.connection.sendRequest('textDocument/definition', {
+    return this.connection.sendRequest("textDocument/definition", {
       textDocument: { uri },
       position: { line, character },
     });
   }
 
-  async findReferences(filePath: string, line: number, character: number): Promise<any> {
-    if (!this.connection) throw new Error('LSP client not connected');
+  async findReferences(
+    filePath: string,
+    line: number,
+    character: number,
+  ): Promise<any> {
+    if (!this.connection) throw new Error("LSP client not connected");
     const uri = filePathToUri(filePath);
-    return this.connection.sendRequest('textDocument/references', {
+    return this.connection.sendRequest("textDocument/references", {
       textDocument: { uri },
       position: { line, character },
       context: { includeDeclaration: true },
@@ -166,9 +180,9 @@ export class LspClient {
   }
 
   async hover(filePath: string, line: number, character: number): Promise<any> {
-    if (!this.connection) throw new Error('LSP client not connected');
+    if (!this.connection) throw new Error("LSP client not connected");
     const uri = filePathToUri(filePath);
-    return this.connection.sendRequest('textDocument/hover', {
+    return this.connection.sendRequest("textDocument/hover", {
       textDocument: { uri },
       position: { line, character },
     });
@@ -186,8 +200,8 @@ export class LspClient {
   async stop(): Promise<void> {
     if (this.connection) {
       try {
-        await this.connection.sendRequest('shutdown');
-        this.connection.sendNotification('exit');
+        await this.connection.sendRequest("shutdown");
+        this.connection.sendNotification("exit");
         await new Promise((resolve) => setTimeout(resolve, 50));
       } catch {
         // Suppress shutdown issues if process dies early

@@ -5,23 +5,23 @@
 // Hugging Face, Moonshot, and MiniMax direct integrations were dropped
 // in migrateModelsV4 (see server/src/db/index.ts).
 export type Platform =
-  | 'google'
-  | 'groq'
-  | 'cerebras'
-  | 'sambanova'
-  | 'nvidia'
-  | 'mistral'
-  | 'openrouter'
-  | 'github'
-  | 'cohere'
-  | 'cloudflare'
-  | 'zhipu'
-  | 'ollama'
-  | 'kilo'
-  | 'pollinations'
-  | 'llm7'
-  | 'zen'
-  | 'ollama-local';
+  | "google"
+  | "groq"
+  | "cerebras"
+  | "sambanova"
+  | "nvidia"
+  | "mistral"
+  | "openrouter"
+  | "github"
+  | "cohere"
+  | "cloudflare"
+  | "zhipu"
+  | "ollama"
+  | "kilo"
+  | "pollinations"
+  | "llm7"
+  | "zen"
+  | "ollama-local";
 
 export interface Model {
   id: number;
@@ -40,7 +40,8 @@ export interface Model {
   enabled: boolean;
 }
 
-export type KeyStatus = 'healthy' | 'rate_limited' | 'invalid' | 'error' | 'unknown';
+export type KeyStatus =
+  "healthy" | "rate_limited" | "invalid" | "error" | "unknown";
 
 export interface ApiKey {
   id: number;
@@ -80,7 +81,7 @@ export interface ChatToolCallFunction {
 
 export interface ChatToolCall {
   id: string;
-  type: 'function';
+  type: "function";
   function: ChatToolCallFunction;
   thought_signature?: string;
 }
@@ -93,37 +94,33 @@ export interface ChatToolFunctionDefinition {
 }
 
 export interface ChatToolDefinition {
-  type: 'function';
+  type: "function";
   function: ChatToolFunctionDefinition;
 }
 
 export type ChatToolChoice =
-  | 'none'
-  | 'auto'
-  | 'required'
+  | "none"
+  | "auto"
+  | "required"
   | {
-    type: 'function';
-    function: {
-      name: string;
+      type: "function";
+      function: {
+        name: string;
+      };
     };
-  };
 
 export type ChatImageMediaType =
-  | 'image/png'
-  | 'image/jpeg'
-  | 'image/webp'
-  | 'image/gif';
+  "image/png" | "image/jpeg" | "image/webp" | "image/gif";
 
 export type ChatImageSource =
-  | { kind: 'base64'; mediaType: ChatImageMediaType; data: string }
-  | { kind: 'url'; url: string };
+  | { kind: "base64"; mediaType: ChatImageMediaType; data: string }
+  | { kind: "url"; url: string };
 
 export type ChatContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image'; source: ChatImageSource };
+  { type: "text"; text: string } | { type: "image"; source: ChatImageSource };
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
+  role: "system" | "user" | "assistant" | "tool";
   /**
    * Either a plain string (the historical shape — text-only) or an
    * ordered array of content blocks. Mixed text+image inputs MUST
@@ -162,7 +159,7 @@ export interface TokenUsage {
 
 export interface ChatCompletionResponse {
   id: string;
-  object: 'chat.completion';
+  object: "chat.completion";
   created: number;
   model: string;
   choices: ChatCompletionChoice[];
@@ -175,13 +172,13 @@ export interface ChatCompletionResponse {
 
 export interface ChatCompletionChunk {
   id: string;
-  object: 'chat.completion.chunk';
+  object: "chat.completion.chunk";
   created: number;
   model: string;
   choices: {
     index: number;
     delta: {
-      role?: 'assistant';
+      role?: "assistant";
       content?: string;
       tool_calls?: ChatToolCall[];
     };
@@ -220,7 +217,7 @@ export interface RequestLog {
   id: number;
   platform: Platform;
   modelId: string;
-  status: 'success' | 'error';
+  status: "success" | "error";
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;

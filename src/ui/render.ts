@@ -15,7 +15,7 @@
  */
 import fs from "fs";
 import path from "path";
-import { colors, renderStatusLabel, themeMode } from "./colors.js";
+import { colors, renderStatusLabel } from "./colors.js";
 
 const c = { ...colors, renderStatusLabel };
 
@@ -126,7 +126,12 @@ export class Dashboard {
   }
 
   /** Wipe state and start a fresh run with the given task. */
-  reset(task: string, mode: ExecutionMode, modelId: string, agentName = "single-agent"): void {
+  reset(
+    task: string,
+    mode: ExecutionMode,
+    modelId: string,
+    agentName = "single-agent",
+  ): void {
     this.runStartedAt = Date.now();
     this.state = {
       runId: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -169,9 +174,13 @@ export class Dashboard {
             this.state.activeTool &&
             this.state.activeTool.name === event.tool
           ) {
-            this.state.activeTool = { ...this.state.activeTool, state: event.state };
+            this.state.activeTool = {
+              ...this.state.activeTool,
+              state: event.state,
+            };
           }
-          this.state.status = event.state === "failed" ? `Failed ${event.tool}` : `Idle`;
+          this.state.status =
+            event.state === "failed" ? `Failed ${event.tool}` : `Idle`;
           break;
         case "log":
           this.pushLog(`[${event.level}] ${event.message}`);
@@ -191,7 +200,9 @@ export class Dashboard {
         case "done":
           this.state.status = event.success ? "Completed" : "Failed";
           this.state.activeTool = null;
-          this.state.progressPercent = event.success ? 100 : this.state.progressPercent;
+          this.state.progressPercent = event.success
+            ? 100
+            : this.state.progressPercent;
           break;
       }
       this.state.elapsedTimeMs = Date.now() - this.runStartedAt;
@@ -210,7 +221,9 @@ export class Dashboard {
     const sanitized = line.length > 200 ? `${line.slice(0, 197)}…` : line;
     const next = [...this.state.logs, sanitized];
     this.state.logs =
-      next.length > MAX_LOG_ENTRIES ? next.slice(next.length - MAX_LOG_ENTRIES) : next;
+      next.length > MAX_LOG_ENTRIES
+        ? next.slice(next.length - MAX_LOG_ENTRIES)
+        : next;
   }
 
   private notify(event: DashboardEvent): void {
@@ -244,7 +257,7 @@ const RESET = "\x1b[0m";
 export function selectRenderMode(
   isTTY: boolean,
   columns: number,
-  rows: number
+  rows: number,
 ): RenderMode {
   if (!isTTY) return "off";
   if (columns < 80 || rows < 24) return "single-line";
@@ -282,14 +295,14 @@ function fmtUsd(usd: number): string {
 export class AnsiRenderer {
   private mode: RenderMode = "off";
   private lastRenderedHeight = 0;
-  private lastEventLine = "";
+
   private mounted = false;
   private readonly exitHandlers: Array<() => void> = [];
 
   constructor(
     private readonly isTTY: () => boolean = () => Boolean(process.stdout.isTTY),
     private readonly columns: () => number = () => process.stdout.columns ?? 80,
-    private readonly rows: () => number = () => process.stdout.rows ?? 24
+    private readonly rows: () => number = () => process.stdout.rows ?? 24,
   ) {}
 
   setMode(mode: RenderMode): void {
@@ -323,9 +336,11 @@ export class AnsiRenderer {
   renderEventLine(line: string): void {
     if (this.mode === "off" || !this.isTTY()) return;
     const trimmed = shortStatus(stripAnsi(line).replace(/\n/g, " ⏎ "), 200);
-    this.lastEventLine = trimmed;
+
     if (this.mode === "single-line") {
-      this.write(`${HIDE_CURSOR}${SAVE_CURSOR}${trimmed}${RESET}${RESTORE_CURSOR}${SHOW_CURSOR}`);
+      this.write(
+        `${HIDE_CURSOR}${SAVE_CURSOR}${trimmed}${RESET}${RESTORE_CURSOR}${SHOW_CURSOR}`,
+      );
     }
   }
 
@@ -384,7 +399,8 @@ export class AnsiRenderer {
       : "—";
     const tokens =
       state.tokensConsumed > 0 ? `${state.tokensConsumed} tok` : "—";
-    const line = `${colors.cyan}[${state.executionMode}]${RESET} ` +
+    const line =
+      `${colors.cyan}[${state.executionMode}]${RESET} ` +
       `${colors.bold}${shortStatus(state.activeTask, 60)}${RESET} ` +
       `${colors.dim}${state.modelId}${RESET} · ${state.status} · ${tool} · ` +
       `${tokens} · ${fmtMs(state.elapsedTimeMs)}`;
@@ -405,20 +421,20 @@ export class AnsiRenderer {
         `${colors.bold}${shortStatus(state.activeTask, inner - 30)}${RESET}` +
         ` ${colors.dim}· run ${state.runId.slice(-8)} · ${state.modelId}${RESET}` +
         `${" ".repeat(Math.max(0, inner - 50 - state.activeTask.length))}` +
-        `${colors.cyan}│${RESET}\n`
+        `${colors.cyan}│${RESET}\n`,
     );
     out.push(this.box(width, "─", "─", "─"));
 
     // Diagnostic metrics
     out.push(
       `${colors.cyan}│${RESET}  ${colors.dim}tokens${RESET}  ${bold(
-        String(state.tokensConsumed)
+        String(state.tokensConsumed),
       )}` +
         `   ${colors.dim}cost${RESET}  ${bold(fmtUsd(state.estimatedCostUsd))}` +
         `   ${colors.dim}elapsed${RESET}  ${bold(fmtMs(state.elapsedTimeMs))}` +
         `   ${colors.dim}progress${RESET}  ${bold(this.progressLabel(state.progressPercent))}` +
         `${" ".repeat(Math.max(0, inner - 65))}` +
-        `${colors.cyan}│${RESET}\n`
+        `${colors.cyan}│${RESET}\n`,
     );
 
     // Action stream (single dynamic spinner line)
@@ -430,7 +446,7 @@ export class AnsiRenderer {
     out.push(
       `${colors.cyan}│${RESET}  ${actionText}` +
         `${" ".repeat(Math.max(0, inner - stripAnsi(actionText).length - 2))}` +
-        `${colors.cyan}│${RESET}\n`
+        `${colors.cyan}│${RESET}\n`,
     );
     out.push(this.box(width, "─", "─", "─"));
 
@@ -438,7 +454,7 @@ export class AnsiRenderer {
     out.push(
       `${colors.cyan}│${RESET}  ${colors.dim}Recent events${RESET}` +
         `${" ".repeat(Math.max(0, inner - 15))}` +
-        `${colors.cyan}│${RESET}\n`
+        `${colors.cyan}│${RESET}\n`,
     );
     const logs = state.logs;
     for (let i = 0; i < MAX_LOG_ENTRIES; i++) {
@@ -446,8 +462,8 @@ export class AnsiRenderer {
       out.push(
         `${colors.cyan}│${RESET}  ${pad(
           line ? `${colors.dim}•${RESET} ${shortStatus(line, inner - 4)}` : "",
-          inner - 2
-        )}  ${colors.cyan}│${RESET}\n`
+          inner - 2,
+        )}  ${colors.cyan}│${RESET}\n`,
       );
     }
     out.push(this.box(width, "─", "─", "─"));
@@ -516,53 +532,65 @@ renderer.mount();
 
 export const COMMANDS_WITH_DESC = [
   // Core
-  { cmd: '/help', desc: 'Show all commands and usage' },
-  { cmd: '/exit', desc: 'Exit FixO CLI (alias: /quit)' },
+  { cmd: "/help", desc: "Show all commands and usage" },
+  { cmd: "/exit", desc: "Exit FixO CLI (alias: /quit)" },
   // Model & Providers
-  { cmd: '/model', desc: 'Interactive model picker or set model' },
-  { cmd: '/providers', desc: 'Manage AI provider API keys (add/list/remove/test)' },
+  { cmd: "/model", desc: "Interactive model picker or set model" },
+  {
+    cmd: "/providers",
+    desc: "Manage AI provider API keys (add/list/remove/test)",
+  },
   // Files & Context
-  { cmd: '/select', desc: 'Pin a file for agent context' },
-  { cmd: '/unselect', desc: 'Clear all pinned files' },
-  { cmd: '/pastes', desc: 'List active paste attachments' },
-  { cmd: '/index', desc: 'Build the local repo index' },
-  { cmd: '/find', desc: 'Search the repo index' },
-  { cmd: '/explain', desc: 'Explain a file or symbol from index' },
+  { cmd: "/select", desc: "Pin a file for agent context" },
+  { cmd: "/unselect", desc: "Clear all pinned files" },
+  { cmd: "/pastes", desc: "List active paste attachments" },
+  { cmd: "/index", desc: "Build the local repo index" },
+  { cmd: "/find", desc: "Search the repo index" },
+  { cmd: "/explain", desc: "Explain a file or symbol from index" },
   // Conversation
-  { cmd: '/clear', desc: 'Clear conversation history' },
-  { cmd: '/compact', desc: 'Summarise & compress conversation (frees context tokens)' },
-  { cmd: '/stats', desc: 'Show session token usage statistics' },
-  { cmd: '/session', desc: 'Manage sessions: list | load <uuid> | new' },
-  { cmd: '/todo', desc: 'Manage todo list: list | add <text> | done <id> | remove <id> | clear' },
-  { cmd: '/mcp', desc: 'Manage MCP servers: list | add <name> <cmd> [args] | remove <name> | test <name>' },
+  { cmd: "/clear", desc: "Clear conversation history" },
+  {
+    cmd: "/compact",
+    desc: "Summarise & compress conversation (frees context tokens)",
+  },
+  { cmd: "/stats", desc: "Show session token usage statistics" },
+  { cmd: "/session", desc: "Manage sessions: list | load <uuid> | new" },
+  {
+    cmd: "/todo",
+    desc: "Manage todo list: list | add <text> | done <id> | remove <id> | clear",
+  },
+  {
+    cmd: "/mcp",
+    desc: "Manage MCP servers: list | add <name> <cmd> [args] | remove <name> | test <name>",
+  },
   // Agent modes & plans
-  { cmd: '/mode', desc: 'Toggle or set PLAN / BUILD execution mode' },
-  { cmd: '/plan', desc: 'Generate a task execution plan' },
-  { cmd: '/run-plan', desc: 'Execute the last generated plan' },
+  { cmd: "/mode", desc: "Toggle or set PLAN / BUILD execution mode" },
+  { cmd: "/plan", desc: "Generate a task execution plan" },
+  { cmd: "/run-plan", desc: "Execute the last generated plan" },
   // Git
-  { cmd: '/diff', desc: 'Show git diff of workspace' },
-  { cmd: '/undo', desc: 'Undo last AI change' },
-  { cmd: '/log', desc: 'Show recent git commits' },
-  { cmd: '/snapshot', desc: 'Create a named git snapshot' },
+  { cmd: "/diff", desc: "Show git diff of workspace" },
+  { cmd: "/undo", desc: "Undo last AI change" },
+  { cmd: "/log", desc: "Show recent git commits" },
+  { cmd: "/snapshot", desc: "Create a named git snapshot" },
   // Quality & review
-  { cmd: '/review', desc: 'Review the current workspace diff' },
-  { cmd: '/test', desc: 'Run detected project checks' },
-  { cmd: '/fix-tests', desc: 'Run tests and auto-fix failures' },
-  { cmd: '/fix-ci', desc: 'Fix CI failures (paste logs)' },
+  { cmd: "/review", desc: "Review the current workspace diff" },
+  { cmd: "/test", desc: "Run detected project checks" },
+  { cmd: "/fix-tests", desc: "Run tests and auto-fix failures" },
+  { cmd: "/fix-ci", desc: "Fix CI failures (paste logs)" },
   // Runs & memory
-  { cmd: '/runs', desc: 'List task run ledgers' },
-  { cmd: '/show-run', desc: 'Show details of a specific run' },
-  { cmd: '/memory', desc: 'Show project memory facts' },
-  { cmd: '/remember', desc: 'Add a project fact to memory' },
-  { cmd: '/forget', desc: 'Clear all project memory' },
+  { cmd: "/runs", desc: "List task run ledgers" },
+  { cmd: "/show-run", desc: "Show details of a specific run" },
+  { cmd: "/memory", desc: "Show project memory facts" },
+  { cmd: "/remember", desc: "Add a project fact to memory" },
+  { cmd: "/forget", desc: "Clear all project memory" },
   // Tools & skills
-  { cmd: '/skills', desc: 'List all registered skill profiles' },
-  { cmd: '/doctor', desc: 'Run FixO diagnostics / doctor checks' },
+  { cmd: "/skills", desc: "List all registered skill profiles" },
+  { cmd: "/doctor", desc: "Run FixO diagnostics / doctor checks" },
   // Privacy
-  { cmd: '/telemetry', desc: 'Toggle telemetry on/off or view status' },
+  { cmd: "/telemetry", desc: "Toggle telemetry on/off or view status" },
   // Theme
-  { cmd: '/theme', desc: 'Toggle Dark Void / Inverted theme' },
-  { cmd: '/variant', desc: 'Toggle theme color variant' },
+  { cmd: "/theme", desc: "Toggle Dark Void / Inverted theme" },
+  { cmd: "/variant", desc: "Toggle theme color variant" },
 ];
 
 export function printHelp(): void {
@@ -571,80 +599,122 @@ export function printHelp(): void {
     const left = `  ${c.cyan}${cmd}${c.reset} ${c.dim}${args}${c.reset}`;
     const stripped = `  ${cmd} ${args}`;
     const pad = Math.max(1, 32 - stripped.length);
-    console.log(`${left}${' '.repeat(pad)}${desc}`);
+    console.log(`${left}${" ".repeat(pad)}${desc}`);
   };
 
-  console.log('');
+  console.log("");
   console.log(`${c.bold}${c.cyan}FixO CLI — All Commands${c.reset}`);
-  console.log(`${c.dim}${'─'.repeat(w)}${c.reset}`);
+  console.log(`${c.dim}${"─".repeat(w)}${c.reset}`);
 
   console.log(`\n${c.snow}${c.bold}🤖 Model & Providers${c.reset}`);
-  line('/model',     '[name|list]',   'Interactive model picker, or set model by name');
-  line('/providers', '<sub-command>', 'Manage provider API keys: list | add <name> | remove <name> | test <name>');
+  line(
+    "/model",
+    "[name|list]",
+    "Interactive model picker, or set model by name",
+  );
+  line(
+    "/providers",
+    "<sub-command>",
+    "Manage provider API keys: list | add <name> | remove <name> | test <name>",
+  );
 
   console.log(`\n${c.snow}${c.bold}📂 Files & Context${c.reset}`);
-  line('/select',    '[file]',        'Pin a file for focused agent context');
-  line('/unselect',  '',              'Clear all pinned files');
-  line('/pastes',    '',              'List active paste attachments');
-  line('/index',     '',              'Build / refresh the local repo index');
-  line('/find',      '<query>',       'Search the repo index for symbols or files');
-  line('/explain',   '<target>',      'Explain a file, symbol, or function from the index');
+  line("/select", "[file]", "Pin a file for focused agent context");
+  line("/unselect", "", "Clear all pinned files");
+  line("/pastes", "", "List active paste attachments");
+  line("/index", "", "Build / refresh the local repo index");
+  line("/find", "<query>", "Search the repo index for symbols or files");
+  line(
+    "/explain",
+    "<target>",
+    "Explain a file, symbol, or function from the index",
+  );
 
   console.log(`\n${c.snow}${c.bold}💬 Conversation${c.reset}`);
-  line('/clear',     '',              'Clear conversation history');
-  line('/compact',   '',              'Summarise & compress conversation (frees context tokens)');
-  line('/stats',     '',              'Show session token usage and cost savings');
-  line('/session',   '<sub-command>', 'Manage sessions: list | load <uuid> | new');
+  line("/clear", "", "Clear conversation history");
+  line(
+    "/compact",
+    "",
+    "Summarise & compress conversation (frees context tokens)",
+  );
+  line("/stats", "", "Show session token usage and cost savings");
+  line(
+    "/session",
+    "<sub-command>",
+    "Manage sessions: list | load <uuid> | new",
+  );
 
   console.log(`\n${c.snow}${c.bold}⚙️  Agent Modes & Plans${c.reset}`);
-  line('/mode',      '[PLAN|BUILD]',  'Toggle or set execution mode (PLAN = read-only, BUILD = write)');
-  line('/plan',      '<task>',        'Generate a structured multi-phase execution plan');
-  line('/run-plan',  '',              'Execute the last saved plan via the Agent Pool');
+  line(
+    "/mode",
+    "[PLAN|BUILD]",
+    "Toggle or set execution mode (PLAN = read-only, BUILD = write)",
+  );
+  line("/plan", "<task>", "Generate a structured multi-phase execution plan");
+  line("/run-plan", "", "Execute the last saved plan via the Agent Pool");
 
   console.log(`\n${c.snow}${c.bold}🌳 Git Operations${c.reset}`);
-  line('/diff',      '',              'Show git diff of the workspace');
-  line('/undo',      '',              'Undo the last FixO auto-committed change');
-  line('/log',       '',              'Show recent git commits');
-  line('/snapshot',  '[label]',       'Create a named git snapshot commit of current workspace');
+  line("/diff", "", "Show git diff of the workspace");
+  line("/undo", "", "Undo the last FixO auto-committed change");
+  line("/log", "", "Show recent git commits");
+  line(
+    "/snapshot",
+    "[label]",
+    "Create a named git snapshot commit of current workspace",
+  );
 
   console.log(`\n${c.snow}${c.bold}🔍 Quality & Review${c.reset}`);
-  line('/review',    '',              'Review the current diff for issues');
-  line('/test',      '',              'Run detected project tests');
-  line('/fix-tests', '',              'Run tests and automatically fix failures');
-  line('/fix-ci',    '',              'Fix CI failures (paste CI logs into the task)');
+  line("/review", "", "Review the current diff for issues");
+  line("/test", "", "Run detected project tests");
+  line("/fix-tests", "", "Run tests and automatically fix failures");
+  line("/fix-ci", "", "Fix CI failures (paste CI logs into the task)");
 
   console.log(`\n${c.snow}${c.bold}📋 Runs & Memory${c.reset}`);
-  line('/runs',      '',              'List all recorded task run ledgers');
-  line('/show-run',  '<id>',          'Show details of a specific run');
-  line('/memory',    '',              'Show all project memory facts');
-  line('/remember',  '<fact>',        'Add a project fact to persistent memory');
-  line('/forget',    '',              'Clear all project memory');
+  line("/runs", "", "List all recorded task run ledgers");
+  line("/show-run", "<id>", "Show details of a specific run");
+  line("/memory", "", "Show all project memory facts");
+  line("/remember", "<fact>", "Add a project fact to persistent memory");
+  line("/forget", "", "Clear all project memory");
 
   console.log(`\n${c.snow}${c.bold}🛠  Tools & Skills${c.reset}`);
-  line('/skills',    '',              'List all registered and auto-detected skill profiles');
-  line('/doctor',    '',              'Run FixO diagnostics and troubleshooting checks');
+  line("/skills", "", "List all registered and auto-detected skill profiles");
+  line("/doctor", "", "Run FixO diagnostics and troubleshooting checks");
 
   console.log(`\n${c.snow}${c.bold}🔒 Privacy${c.reset}`);
-  line('/telemetry', '<on|off>',      'View or toggle telemetry collection');
+  line("/telemetry", "<on|off>", "View or toggle telemetry collection");
 
   console.log(`\n${c.snow}${c.bold}🎨 Theme${c.reset}`);
-  line('/theme',     '',              'Toggle Dark Void Minimalist / High-Contrast Inverted theme');
-  line('/variant',   '',              'Toggle theme color variant');
+  line(
+    "/theme",
+    "",
+    "Toggle Dark Void Minimalist / High-Contrast Inverted theme",
+  );
+  line("/variant", "", "Toggle theme color variant");
 
   console.log(`\n${c.snow}${c.bold}🚪 Exit${c.reset}`);
-  line('/exit',      '',              'Exit FixO CLI cleanly (alias: /quit)');
+  line("/exit", "", "Exit FixO CLI cleanly (alias: /quit)");
 
-  console.log(`\n${c.dim}${'─'.repeat(w)}${c.reset}`);
-  console.log(`${c.dim}  Shell commands   prefix with !  e.g. !npm test, !ls -la${c.reset}`);
-  console.log(`${c.dim}  Autocomplete     type / for commands, @ for files & agents${c.reset}`);
-  console.log(`${c.dim}  Mode toggle      press [TAB] on an empty line to switch PLAN ↔ BUILD${c.reset}`);
-  console.log('');
+  console.log(`\n${c.dim}${"─".repeat(w)}${c.reset}`);
+  console.log(
+    `${c.dim}  Shell commands   prefix with !  e.g. !npm test, !ls -la${c.reset}`,
+  );
+  console.log(
+    `${c.dim}  Autocomplete     type / for commands, @ for files & agents${c.reset}`,
+  );
+  console.log(
+    `${c.dim}  Mode toggle      press [TAB] on an empty line to switch PLAN ↔ BUILD${c.reset}`,
+  );
+  console.log("");
 }
 
-export function buildPromptString(cwd: string, model: string, branch: string): string {
+export function buildPromptString(
+  cwd: string,
+  model: string,
+  branch: string,
+): string {
   const dirName = path.basename(cwd);
   const dirLabel = c.renderStatusLabel(`📂 ${dirName}`);
-  const branchLabel = branch ? ` ${c.renderStatusLabel(`🌳 ${branch}`)}` : '';
+  const branchLabel = branch ? ` ${c.renderStatusLabel(`🌳 ${branch}`)}` : "";
   const modelLabel = ` ${c.renderStatusLabel(`🤖 ${model}`)}`;
   return `\n${dirLabel}${branchLabel}${modelLabel}\n${c.cyan}❯${c.reset} `;
 }
@@ -653,7 +723,7 @@ export function formatInputPaths(input: string, cwd: string): string {
   const commands = COMMANDS_WITH_DESC.map((item) => item.cmd);
 
   return input.replace(/(?:\/[\w.-]+)+/g, (match) => {
-    if (match.startsWith('/')) {
+    if (match.startsWith("/")) {
       const commandName = match.split(/\s+/)[0];
       if (commands.includes(commandName) || commandName.length <= 4) {
         return match;

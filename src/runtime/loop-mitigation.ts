@@ -46,9 +46,9 @@ export const DEFAULT_BLOCK_WINDOW_TURNS = 10;
 
 /** Tool names that count as "reading" the target path. */
 const READ_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'read_file',
-  'extract_symbols',
-  'extract_imports',
+  "read_file",
+  "extract_symbols",
+  "extract_imports",
 ]);
 
 export function isReadTool(name: string): boolean {
@@ -88,7 +88,8 @@ export class LoopMitigationTracker {
 
   constructor(options: LoopMitigationOptions = {}) {
     this.useSlidingWindow = options.useSlidingWindow === true;
-    this.blockWindowTurns = options.blockWindowTurns ?? DEFAULT_BLOCK_WINDOW_TURNS;
+    this.blockWindowTurns =
+      options.blockWindowTurns ?? DEFAULT_BLOCK_WINDOW_TURNS;
   }
 
   /**
@@ -132,7 +133,10 @@ export class LoopMitigationTracker {
     const prev = this.warnCounts.get(target) ?? 0;
     const next = prev + 1;
     this.warnCounts.set(target, next);
-    if (next >= REPEAT_WARN_BLOCK_THRESHOLD && !this.blockedTargets.has(target)) {
+    if (
+      next >= REPEAT_WARN_BLOCK_THRESHOLD &&
+      !this.blockedTargets.has(target)
+    ) {
       this.blockedTargets.add(target);
       return true;
     }
@@ -203,7 +207,10 @@ export class LoopMitigationTracker {
  * Talks to the model in the same shape as a real read_file failure so
  * the next-turn reasoning has a clear pivot signal.
  */
-export function buildLoopBlockedReadResult(target: string, warns: number): string {
+export function buildLoopBlockedReadResult(
+  target: string,
+  warns: number,
+): string {
   return (
     `Error: read_file refused. The loop-trap detector has flagged '${target}' ` +
     `with ${warns} consecutive warnings — repeatedly reading this file is ` +

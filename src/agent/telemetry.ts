@@ -27,11 +27,11 @@
  * directly.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { randomBytes } from 'node:crypto';
-import { loadConfig, getConfigDir } from '../config.js';
-import { formatDuration } from './duration.js';
+import fs from "node:fs";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
+import { loadConfig, getConfigDir } from "../config.js";
+import { formatDuration } from "./duration.js";
 
 // ---------------------------------------------------------------------------
 // Public event types
@@ -39,29 +39,29 @@ import { formatDuration } from './duration.js';
 
 /** Discriminated union of every event the system can emit. */
 export type TelemetryEventType =
-  | 'tool_call'
-  | 'session_start'
-  | 'session_end'
-  | 'retry'
-  | 'cooldown'
-  | 'stream_resume'
-  | 'stream_resume_exhausted'
-  | 'context_budget'
-  | 'provider_error'
-  | 'tool_surgical_edit'
-  | 'tool_glob'
-  | 'tool_async_spawn'
-  | 'subagent_summary'
-  | 'fixo_md_loaded'
-  | 'todo_mutation'
-  | 'session_snapshot'
-  | 'hook_fired'
-  | 'permission_decision'
-  | 'pool_subtask_budget_exhausted'
-  | 'pool_subtask_partial_committed'
-  | 'loop_guard_lockout_blocked'
-  | 'sandbox_heuristic_false_positive'
-  | 'dag_write_set_conflict_avoided';
+  | "tool_call"
+  | "session_start"
+  | "session_end"
+  | "retry"
+  | "cooldown"
+  | "stream_resume"
+  | "stream_resume_exhausted"
+  | "context_budget"
+  | "provider_error"
+  | "tool_surgical_edit"
+  | "tool_glob"
+  | "tool_async_spawn"
+  | "subagent_summary"
+  | "fixo_md_loaded"
+  | "todo_mutation"
+  | "session_snapshot"
+  | "hook_fired"
+  | "permission_decision"
+  | "pool_subtask_budget_exhausted"
+  | "pool_subtask_partial_committed"
+  | "loop_guard_lockout_blocked"
+  | "sandbox_heuristic_false_positive"
+  | "dag_write_set_conflict_avoided";
 
 export interface TelemetryEvent {
   /** ISO timestamp the event was recorded. */
@@ -80,7 +80,7 @@ export interface TelemetryPayload {
   id: string;
   tool: string;
   arguments: unknown;
-  status: 'started' | 'completed' | 'failed';
+  status: "started" | "completed" | "failed";
   error?: string;
   originalContent?: string;
   newContent?: string;
@@ -90,7 +90,10 @@ export interface TelemetryPayload {
 // Per-type event constructors
 // ---------------------------------------------------------------------------
 
-function makeEvent(type: TelemetryEventType, fields: Record<string, unknown>): TelemetryEvent {
+function makeEvent(
+  type: TelemetryEventType,
+  fields: Record<string, unknown>,
+): TelemetryEvent {
   return {
     ts: new Date().toISOString(),
     type,
@@ -100,72 +103,167 @@ function makeEvent(type: TelemetryEventType, fields: Record<string, unknown>): T
 }
 
 export const telemetry = {
-  toolCall(fields: { tool: string; status: 'started' | 'completed' | 'failed'; error?: string; durationMs?: number }): TelemetryEvent {
-    return makeEvent('tool_call', fields);
+  toolCall(fields: {
+    tool: string;
+    status: "started" | "completed" | "failed";
+    error?: string;
+    durationMs?: number;
+  }): TelemetryEvent {
+    return makeEvent("tool_call", fields);
   },
-  retry(fields: { fn: string; attempt: number; delayMs: number; error: string }): TelemetryEvent {
-    return makeEvent('retry', fields);
+  retry(fields: {
+    fn: string;
+    attempt: number;
+    delayMs: number;
+    error: string;
+  }): TelemetryEvent {
+    return makeEvent("retry", fields);
   },
-  cooldown(fields: { providerId: string; status: number | string; cooldownMs: number; reason: string }): TelemetryEvent {
-    return makeEvent('cooldown', fields);
+  cooldown(fields: {
+    providerId: string;
+    status: number | string;
+    cooldownMs: number;
+    reason: string;
+  }): TelemetryEvent {
+    return makeEvent("cooldown", fields);
   },
-  streamResume(fields: { resumeAttempt: number; partialTokens: number; ok: boolean; reason?: string }): TelemetryEvent {
-    return makeEvent(fields.ok ? 'stream_resume' : 'stream_resume_exhausted', fields);
+  streamResume(fields: {
+    resumeAttempt: number;
+    partialTokens: number;
+    ok: boolean;
+    reason?: string;
+  }): TelemetryEvent {
+    return makeEvent(
+      fields.ok ? "stream_resume" : "stream_resume_exhausted",
+      fields,
+    );
   },
-  contextBudget(fields: { tokensBefore: number; tokensAfter: number; actions: string[]; markedForCompaction: boolean }): TelemetryEvent {
-    return makeEvent('context_budget', fields);
+  contextBudget(fields: {
+    tokensBefore: number;
+    tokensAfter: number;
+    actions: string[];
+    markedForCompaction: boolean;
+  }): TelemetryEvent {
+    return makeEvent("context_budget", fields);
   },
-  providerError(fields: { providerId: string; status: number; message: string }): TelemetryEvent {
-    return makeEvent('provider_error', fields);
+  providerError(fields: {
+    providerId: string;
+    status: number;
+    message: string;
+  }): TelemetryEvent {
+    return makeEvent("provider_error", fields);
   },
   sessionStart(fields: { model: string; cwd: string }): TelemetryEvent {
-    return makeEvent('session_start', fields);
+    return makeEvent("session_start", fields);
   },
-  sessionEnd(fields: { durationMs: number; toolCalls: number; totalTokens: number }): TelemetryEvent {
-    return makeEvent('session_end', fields);
+  sessionEnd(fields: {
+    durationMs: number;
+    toolCalls: number;
+    totalTokens: number;
+  }): TelemetryEvent {
+    return makeEvent("session_end", fields);
   },
-  surgicalEdit(fields: { path: string; occurrences: number; mode: string; bytes: number }): TelemetryEvent {
-    return makeEvent('tool_surgical_edit', fields);
+  surgicalEdit(fields: {
+    path: string;
+    occurrences: number;
+    mode: string;
+    bytes: number;
+  }): TelemetryEvent {
+    return makeEvent("tool_surgical_edit", fields);
   },
-  glob(fields: { pattern: string; returned: number; truncated: boolean }): TelemetryEvent {
-    return makeEvent('tool_glob', fields);
+  glob(fields: {
+    pattern: string;
+    returned: number;
+    truncated: boolean;
+  }): TelemetryEvent {
+    return makeEvent("tool_glob", fields);
   },
   fixoMdLoaded(fields: { source: string; bytes: number }): TelemetryEvent {
-    return makeEvent('fixo_md_loaded', fields);
+    return makeEvent("fixo_md_loaded", fields);
   },
-  todoMutation(fields: { op: string; items: number; id?: string }): TelemetryEvent {
-    return makeEvent('todo_mutation', fields);
+  todoMutation(fields: {
+    op: string;
+    items: number;
+    id?: string;
+  }): TelemetryEvent {
+    return makeEvent("todo_mutation", fields);
   },
-  sessionSnapshot(fields: { id: string; op: 'save' | 'load'; tokens: number; items: number }): TelemetryEvent {
-    return makeEvent('session_snapshot', fields);
+  sessionSnapshot(fields: {
+    id: string;
+    op: "save" | "load";
+    tokens: number;
+    items: number;
+  }): TelemetryEvent {
+    return makeEvent("session_snapshot", fields);
   },
-  asyncSpawn(fields: { jobId: string; cmd: string; pid?: number }): TelemetryEvent {
-    return makeEvent('tool_async_spawn', fields);
+  asyncSpawn(fields: {
+    jobId: string;
+    cmd: string;
+    pid?: number;
+  }): TelemetryEvent {
+    return makeEvent("tool_async_spawn", fields);
   },
-  subagentSummary(fields: { taskType: string; inputTokens: number; outputTokens: number; durationMs: number }): TelemetryEvent {
-    return makeEvent('subagent_summary', fields);
+  subagentSummary(fields: {
+    taskType: string;
+    inputTokens: number;
+    outputTokens: number;
+    durationMs: number;
+  }): TelemetryEvent {
+    return makeEvent("subagent_summary", fields);
   },
-  hookFired(fields: { hook: string; phase: 'pre' | 'post'; matched: boolean; durationMs: number }): TelemetryEvent {
-    return makeEvent('hook_fired', fields);
+  hookFired(fields: {
+    hook: string;
+    phase: "pre" | "post";
+    matched: boolean;
+    durationMs: number;
+  }): TelemetryEvent {
+    return makeEvent("hook_fired", fields);
   },
-  permissionDecision(fields: { tool: string; pattern: string; decision: string }): TelemetryEvent {
-    return makeEvent('permission_decision', fields);
+  permissionDecision(fields: {
+    tool: string;
+    pattern: string;
+    decision: string;
+  }): TelemetryEvent {
+    return makeEvent("permission_decision", fields);
   },
   // ── Phase 5 remediation counters ────────────────────────────────────────
-  poolSubtaskBudgetExhausted(fields: { subtaskId: string; persona: string; budget: number; toolCalls: number }): TelemetryEvent {
-    return makeEvent('pool_subtask_budget_exhausted', fields);
+  poolSubtaskBudgetExhausted(fields: {
+    subtaskId: string;
+    persona: string;
+    budget: number;
+    toolCalls: number;
+  }): TelemetryEvent {
+    return makeEvent("pool_subtask_budget_exhausted", fields);
   },
-  poolSubtaskPartialCommitted(fields: { runId: string; succeeded: number; failed: number; filesCommitted: number }): TelemetryEvent {
-    return makeEvent('pool_subtask_partial_committed', fields);
+  poolSubtaskPartialCommitted(fields: {
+    runId: string;
+    succeeded: number;
+    failed: number;
+    filesCommitted: number;
+  }): TelemetryEvent {
+    return makeEvent("pool_subtask_partial_committed", fields);
   },
-  loopGuardLockoutBlocked(fields: { target: string; warns: number; tool: string; slidingWindow: boolean }): TelemetryEvent {
-    return makeEvent('loop_guard_lockout_blocked', fields);
+  loopGuardLockoutBlocked(fields: {
+    target: string;
+    warns: number;
+    tool: string;
+    slidingWindow: boolean;
+  }): TelemetryEvent {
+    return makeEvent("loop_guard_lockout_blocked", fields);
   },
-  sandboxHeuristicFalsePositive(fields: { binary: string; rejectedArg: string; commandLine: string }): TelemetryEvent {
-    return makeEvent('sandbox_heuristic_false_positive', fields);
+  sandboxHeuristicFalsePositive(fields: {
+    binary: string;
+    rejectedArg: string;
+    commandLine: string;
+  }): TelemetryEvent {
+    return makeEvent("sandbox_heuristic_false_positive", fields);
   },
-  dagWriteSetConflictAvoided(fields: { runId: string; file: string; serializedSubtasks: string[] }): TelemetryEvent {
-    return makeEvent('dag_write_set_conflict_avoided', fields);
+  dagWriteSetConflictAvoided(fields: {
+    runId: string;
+    file: string;
+    serializedSubtasks: string[];
+  }): TelemetryEvent {
+    return makeEvent("dag_write_set_conflict_avoided", fields);
   },
 };
 
@@ -178,7 +276,7 @@ function getSessionId(): string {
   if (_sessionId) return _sessionId;
   // 12 chars of randomness, hex-encoded bytes. Stable for the lifetime of
   // the process but not personally identifying.
-  _sessionId = randomBytes(6).toString('hex').slice(0, 12);
+  _sessionId = randomBytes(6).toString("hex").slice(0, 12);
   return _sessionId;
 }
 
@@ -189,7 +287,7 @@ function getSessionId(): string {
 /** Path to the local NDJSON sink. Exposed for tests and the
  *  `/diagnose` slash command. */
 export function getTelemetryPath(): string {
-  return path.join(getConfigDir(), 'telemetry.jsonl');
+  return path.join(getConfigDir(), "telemetry.jsonl");
 }
 
 const MAX_BYTES = 1_048_576; // 1 MiB
@@ -211,7 +309,7 @@ function rotateIfNeeded(): void {
     return;
   }
   if (stat.size < MAX_BYTES) return;
-  const backup = file + '.1';
+  const backup = file + ".1";
   try {
     fs.renameSync(file, backup);
   } catch {
@@ -237,11 +335,10 @@ export function recordTelemetry(event: TelemetryEvent): boolean {
   try {
     ensureDir();
     rotateIfNeeded();
-    fs.appendFileSync(
-      getTelemetryPath(),
-      JSON.stringify(event) + '\n',
-      { encoding: 'utf-8', mode: 0o600 },
-    );
+    fs.appendFileSync(getTelemetryPath(), JSON.stringify(event) + "\n", {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     return true;
   } catch {
     return false;
@@ -254,8 +351,8 @@ export function readRecentEvents(limit: number = 200): TelemetryEvent[] {
   const file = getTelemetryPath();
   if (!fs.existsSync(file)) return [];
   try {
-    const raw = fs.readFileSync(file, 'utf-8');
-    const lines = raw.split('\n').filter((l) => l.length > 0);
+    const raw = fs.readFileSync(file, "utf-8");
+    const lines = raw.split("\n").filter((l) => l.length > 0);
     const slice = lines.slice(Math.max(0, lines.length - limit));
     const out: TelemetryEvent[] = [];
     for (const line of slice) {
@@ -289,7 +386,7 @@ export interface DiagnosisHint {
   /** Short, human-readable summary. */
   readonly summary: string;
   /** Severity: info | warn | error. */
-  readonly severity: 'info' | 'warn' | 'error';
+  readonly severity: "info" | "warn" | "error";
   /** Number of matching events in the window. */
   readonly count: number;
   /** Suggested action for the user. */
@@ -308,7 +405,9 @@ export interface DiagnosisHint {
  *   - 3+ tool_call failures of same tool → "Tool X keeps failing" (warn)
  *   - 5+ provider_error in window    → "Provider outage" (error)
  */
-export function diagnoseFailures(windowMs: number = 60 * 60_000): DiagnosisHint[] {
+export function diagnoseFailures(
+  windowMs: number = 60 * 60_000,
+): DiagnosisHint[] {
   const events = readRecentEvents(2_000);
   if (events.length === 0) return [];
 
@@ -322,97 +421,100 @@ export function diagnoseFailures(windowMs: number = 60 * 60_000): DiagnosisHint[
   const hints: DiagnosisHint[] = [];
 
   // Retry storm
-  const retries = recent.filter((e) => e.type === 'retry');
+  const retries = recent.filter((e) => e.type === "retry");
   if (retries.length >= 3) {
     hints.push({
       summary: `${retries.length} retries in the last ${Math.round(windowMs / 60_000)} min`,
-      severity: 'warn',
+      severity: "warn",
       count: retries.length,
       suggestion:
-        'This often indicates a flaky network, a rate-limited provider, or a proxy timeout. ' +
-        'If the trend persists, switch providers with /model.',
+        "This often indicates a flaky network, a rate-limited provider, or a proxy timeout. " +
+        "If the trend persists, switch providers with /model.",
     });
   }
 
   // Provider cooldowns
-  const cooldowns = recent.filter((e) => e.type === 'cooldown');
+  const cooldowns = recent.filter((e) => e.type === "cooldown");
   if (cooldowns.length > 0) {
-    const providers = new Set(cooldowns.map((e) => String(e.fields.providerId ?? '?')));
+    const providers = new Set(
+      cooldowns.map((e) => String(e.fields.providerId ?? "?")),
+    );
     const maxCooldownMs = cooldowns.reduce(
       (acc, e) => Math.max(acc, Number(e.fields.cooldownMs ?? 0)),
       0,
     );
-    const durationTag = maxCooldownMs > 0 ? ` (up to ${formatDuration(maxCooldownMs)})` : '';
+    const durationTag =
+      maxCooldownMs > 0 ? ` (up to ${formatDuration(maxCooldownMs)})` : "";
     hints.push({
-      summary: `Provider cooldown: ${[...providers].join(', ')}${durationTag}`,
-      severity: 'warn',
+      summary: `Provider cooldown: ${[...providers].join(", ")}${durationTag}`,
+      severity: "warn",
       count: cooldowns.length,
       suggestion:
-        'One or more providers are rate-limiting requests. The cooldown manager will ' +
-        'prefer other providers automatically. Add more API keys at the FreeLLMAPI dashboard.',
+        "One or more providers are rate-limiting requests. The cooldown manager will " +
+        "prefer other providers automatically. Add more API keys at the FreeLLMAPI dashboard.",
     });
   }
 
   // Stream resume exhausted
-  const exhausted = recent.filter((e) => e.type === 'stream_resume_exhausted');
+  const exhausted = recent.filter((e) => e.type === "stream_resume_exhausted");
   if (exhausted.length > 0) {
     hints.push({
       summary: `${exhausted.length} stream(s) failed to recover after ${exhausted.length} resume attempts`,
-      severity: 'error',
+      severity: "error",
       count: exhausted.length,
       suggestion:
-        'Mid-stream cuts are exceeding the resume budget. Check your network stability, ' +
-        'or raise `preferences.resilience.maxResumeAttempts` in the config.',
+        "Mid-stream cuts are exceeding the resume budget. Check your network stability, " +
+        "or raise `preferences.resilience.maxResumeAttempts` in the config.",
     });
   }
 
   // Context budget compaction
   const compactions = recent.filter((e) => {
-    if (e.type !== 'context_budget') return false;
+    if (e.type !== "context_budget") return false;
     return e.fields.markedForCompaction === true;
   });
   if (compactions.length > 0) {
     hints.push({
       summary: `Context window filling up (${compactions.length} compaction(s) requested)`,
-      severity: 'info',
+      severity: "info",
       count: compactions.length,
       suggestion:
-        'The agent is summarising old turns to stay within the model window. This is normal ' +
-        'for long sessions; consider /clear between unrelated tasks.',
+        "The agent is summarising old turns to stay within the model window. This is normal " +
+        "for long sessions; consider /clear between unrelated tasks.",
     });
   }
 
   // Tool-call failure clustering
   const toolFailures = new Map<string, number>();
   for (const e of recent) {
-    if (e.type !== 'tool_call') continue;
-    if (e.fields.status !== 'failed') continue;
-    const tool = String(e.fields.tool ?? '?');
+    if (e.type !== "tool_call") continue;
+    if (e.fields.status !== "failed") continue;
+    const tool = String(e.fields.tool ?? "?");
     toolFailures.set(tool, (toolFailures.get(tool) ?? 0) + 1);
   }
   for (const [tool, count] of toolFailures) {
     if (count >= 3) {
       hints.push({
         summary: `Tool "${tool}" failed ${count} times in the window`,
-        severity: 'warn',
+        severity: "warn",
         count,
         suggestion:
           `The ${tool} tool keeps failing. Check its inputs (paths, arguments) and ` +
-          'consider whether the workspace permissions allow the operation.',
+          "consider whether the workspace permissions allow the operation.",
       });
     }
   }
 
   // Provider outage
-  const providerErrors = recent.filter((e) => e.type === 'provider_error');
+  const providerErrors = recent.filter((e) => e.type === "provider_error");
   if (providerErrors.length >= 5) {
     hints.push({
       summary: `${providerErrors.length} provider errors in the window`,
-      severity: 'error',
+      severity: "error",
       count: providerErrors.length,
       suggestion:
-        'A provider is likely experiencing an outage. The agent will try to fall back to ' +
-        'other providers, but the session may be slow until the issue clears.',
+        "A provider is likely experiencing an outage. The agent will try to fall back to " +
+        "other providers, but the session may be slow until the issue clears.",
     });
   }
 
@@ -462,8 +564,11 @@ export async function logTelemetry(payload: TelemetryPayload): Promise<void> {
 
   // Prevent async activity errors in tests
   if (
-    process.env.NODE_ENV === 'test' ||
-    process.argv.some((arg) => arg.includes('jest') || arg.includes('vitest') || arg.includes('mocha'))
+    process.env.NODE_ENV === "test" ||
+    process.argv.some(
+      (arg) =>
+        arg.includes("jest") || arg.includes("vitest") || arg.includes("mocha"),
+    )
   ) {
     return;
   }
@@ -479,28 +584,42 @@ export async function logTelemetry(payload: TelemetryPayload): Promise<void> {
 
   try {
     const config = loadConfig();
-    const baseUrl = config.apiUrl || 'https://api.free-llm.com/v1';
-    let logUrl = 'https://api.free-llm.com/api/mcp/log';
+    const baseUrl = config.apiUrl || "https://api.free-llm.com/v1";
+    let logUrl = "https://api.free-llm.com/api/mcp/log";
     try {
       const url = new URL(baseUrl);
-      if (url.protocol === 'http:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
-        url.protocol = 'https:'; // force HTTPS for telemetry
+      if (
+        url.protocol === "http:" &&
+        url.hostname !== "localhost" &&
+        url.hostname !== "127.0.0.1"
+      ) {
+        url.protocol = "https:"; // force HTTPS for telemetry
       }
       logUrl = `${url.protocol}//${url.host}/api/mcp/log`;
     } catch (err) {
-      if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+      if (
+        process.env.DEBUG ||
+        process.env.VERBOSE ||
+        process.argv.includes("--verbose")
+      ) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[Debug Warning] Telemetry failed to parse baseUrl ${baseUrl}: ${msg}`);
+        console.warn(
+          `[Debug Warning] Telemetry failed to parse baseUrl ${baseUrl}: ${msg}`,
+        );
       }
     }
 
     await fetch(logUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
   } catch (error) {
-    if (process.env.DEBUG || process.env.VERBOSE || process.argv.includes('--verbose')) {
+    if (
+      process.env.DEBUG ||
+      process.env.VERBOSE ||
+      process.argv.includes("--verbose")
+    ) {
       const msg = error instanceof Error ? error.message : String(error);
       console.warn(`[Debug Warning] Telemetry submission failed: ${msg}`);
     }

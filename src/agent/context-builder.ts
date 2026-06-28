@@ -26,8 +26,8 @@
  * unconditionally; an empty string is a clean no-op for the system
  * prompt.
  */
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   ParserFactory,
@@ -35,8 +35,8 @@ import {
   type LanguageId,
   type SymbolInfo,
   type ParserAdapter,
-} from './parser-adapter.js';
-import type { LspManager } from '../lsp/lsp-manager.js';
+} from "./parser-adapter.js";
+import type { LspManager } from "../lsp/lsp-manager.js";
 
 /** A file the run intends to mutate; symbols may be left implicit. */
 export interface ReferenceTarget {
@@ -62,19 +62,19 @@ const MAX_LSP_WAIT_MS = 1500;
  */
 export function getFrameworkGuidance(cwd: string): string {
   const hasVite =
-    fs.existsSync(path.join(cwd, 'vite.config.ts')) ||
-    fs.existsSync(path.join(cwd, 'vite.config.js')) ||
-    fs.existsSync(path.join(cwd, 'vite.config.mjs')) ||
-    fs.existsSync(path.join(cwd, 'vite.config.cjs'));
+    fs.existsSync(path.join(cwd, "vite.config.ts")) ||
+    fs.existsSync(path.join(cwd, "vite.config.js")) ||
+    fs.existsSync(path.join(cwd, "vite.config.mjs")) ||
+    fs.existsSync(path.join(cwd, "vite.config.cjs"));
 
-  if (!hasVite) return '';
+  if (!hasVite) return "";
 
   return [
-    '## Vite 8 / Rolldown Guidance',
-    'This project uses Vite. Note that Vite 8 relies on Rolldown as the underlying bundler.',
-    'When configuring `manualChunks`, follow Rolldown\'s chunking conventions.',
-    'Keep chunking logic simple and avoid aggressive over-splitting to prevent circular dependencies or chunking errors.',
-  ].join('\n');
+    "## Vite 8 / Rolldown Guidance",
+    "This project uses Vite. Note that Vite 8 relies on Rolldown as the underlying bundler.",
+    "When configuring `manualChunks`, follow Rolldown's chunking conventions.",
+    "Keep chunking logic simple and avoid aggressive over-splitting to prevent circular dependencies or chunking errors.",
+  ].join("\n");
 }
 
 /**
@@ -92,11 +92,11 @@ export async function gatherReferencesForTargets(
   targets: ReferenceTarget[],
   getLspManager: () => LspManager | null,
 ): Promise<string> {
-  if (targets.length === 0) return '';
+  if (targets.length === 0) return "";
   const limited = targets.slice(0, MAX_TARGETS);
 
   const lsp = getLspManager();
-  if (!lsp) return '';
+  if (!lsp) return "";
 
   // Load the parser adapter once. Used for symbol-line lookup when
   // the caller didn't pre-specify symbols.
@@ -116,17 +116,19 @@ export async function gatherReferencesForTargets(
 
     const ext = path.extname(target.file);
     const language = languageIdFromExtension(ext);
-    if (language === 'generic') continue;
+    if (language === "generic") continue;
 
     let symbolsForTarget: Array<{ name: string; line: number }> = [];
     if (target.symbols && target.symbols.length > 0) {
-      symbolsForTarget = target.symbols.slice(0, MAX_SYMBOLS_PER_FILE).map((name) => ({
-        name,
-        line: locateSymbolLine(target.file, name) ?? 1,
-      }));
+      symbolsForTarget = target.symbols
+        .slice(0, MAX_SYMBOLS_PER_FILE)
+        .map((name) => ({
+          name,
+          line: locateSymbolLine(target.file, name) ?? 1,
+        }));
     } else if (adapter) {
       try {
-        if (adapter.name === 'tree-sitter') {
+        if (adapter.name === "tree-sitter") {
           // The parser may not have pre-loaded this language yet.
           // We load it best-effort; failure just means the regex
           // extractor runs instead.
@@ -135,9 +137,12 @@ export async function gatherReferencesForTargets(
           };
           if (ts.loadLanguage) await ts.loadLanguage(language);
         }
-        const source = fs.readFileSync(target.file, 'utf-8');
+        const source = fs.readFileSync(target.file, "utf-8");
         const symbols = adapter.extractSymbols(source, language);
-        symbolsForTarget = pickTopSymbols(symbols).map((s) => ({ name: s.name, line: s.line }));
+        symbolsForTarget = pickTopSymbols(symbols).map((s) => ({
+          name: s.name,
+          line: s.line,
+        }));
       } catch {
         // safe: this target gets no symbols → skipped below
         continue;
@@ -158,22 +163,22 @@ export async function gatherReferencesForTargets(
       const formatted = formatReferences(cwd, target.file, refs);
       if (formatted.length === 0) continue;
       symbolLines.push(
-        `- \`${sym.name}\` (${fileRel}:${sym.line}) → ${formatted.slice(0, MAX_REFS_PER_SYMBOL).join(', ')}`,
+        `- \`${sym.name}\` (${fileRel}:${sym.line}) → ${formatted.slice(0, MAX_REFS_PER_SYMBOL).join(", ")}`,
       );
     }
 
     if (symbolLines.length > 0) {
-      blocks.push(`### ${fileRel}\n${symbolLines.join('\n')}`);
+      blocks.push(`### ${fileRel}\n${symbolLines.join("\n")}`);
     }
   }
 
-  if (blocks.length === 0) return '';
+  if (blocks.length === 0) return "";
   return [
-    '## Cross-file references (LSP-derived, auto-collected)',
-    'These are symbols defined in files this run is likely to mutate, with their other call sites. Update all sites when renaming or changing a signature.',
-    '',
+    "## Cross-file references (LSP-derived, auto-collected)",
+    "These are symbols defined in files this run is likely to mutate, with their other call sites. Update all sites when renaming or changing a signature.",
+    "",
     ...blocks,
-  ].join('\n');
+  ].join("\n");
 }
 
 /* ──────────────────────── Helpers ──────────────────────── */
@@ -188,8 +193,8 @@ function pickTopSymbols(symbols: SymbolInfo[]): SymbolInfo[] {
 /** Find the 1-based line where `symbolName` is declared. Returns null on miss. */
 function locateSymbolLine(filePath: string, symbolName: string): number | null {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const lines = content.split('\n');
+    const content = fs.readFileSync(filePath, "utf-8");
+    const lines = content.split("\n");
     // Look for a word boundary match preceded by a likely declaration
     // keyword. This is a heuristic — the LSP only needs a line/column
     // anywhere inside the identifier to resolve references.
@@ -204,7 +209,7 @@ function locateSymbolLine(filePath: string, symbolName: string): number | null {
 }
 
 function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 interface LspLocation {
@@ -212,14 +217,18 @@ interface LspLocation {
   range: { start: { line: number; character: number } };
 }
 
-function formatReferences(cwd: string, originFile: string, refs: unknown): string[] {
+function formatReferences(
+  cwd: string,
+  originFile: string,
+  refs: unknown,
+): string[] {
   if (!Array.isArray(refs)) return [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const ref of refs as LspLocation[]) {
     if (!ref?.uri || !ref.range?.start) continue;
     let abs = ref.uri;
-    if (abs.startsWith('file://')) abs = decodeURIComponent(abs.slice(7));
+    if (abs.startsWith("file://")) abs = decodeURIComponent(abs.slice(7));
     // Skip the origin file itself — those references are local and
     // already obvious to the model from the file it's about to edit.
     if (path.resolve(abs) === path.resolve(originFile)) continue;
@@ -232,7 +241,10 @@ function formatReferences(cwd: string, originFile: string, refs: unknown): strin
   return out;
 }
 
-async function callWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+async function callWithTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+): Promise<T | null> {
   let timer: NodeJS.Timeout | null = null;
   try {
     return await Promise.race([
