@@ -27,18 +27,28 @@ import {
   clearDoneItems,
   type TodoList,
 } from "../context/todo.js";
+import { getWorkspaceStateDir } from "../config.js";
 import {
   executeTodoRead,
   executeTodoWrite,
   TodoWriteError,
 } from "../agent/tool-executor.js";
 
+const originalFixoHome = process.env.FIXO_HOME;
+const testFixoHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-todo-state-"));
+process.env.FIXO_HOME = testFixoHome;
+test.after(() => {
+  if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+  else process.env.FIXO_HOME = originalFixoHome;
+  fs.rmSync(testFixoHome, { recursive: true, force: true });
+});
+
 function mkTmp(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
 function listPath(cwd: string): string {
-  return path.join(cwd, ".fixo", "todo_list.json");
+  return path.join(getWorkspaceStateDir(cwd), "todo", "todo_list.json");
 }
 
 test("addItem appends an item with a fresh id and pending status", () => {

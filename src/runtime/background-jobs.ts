@@ -26,6 +26,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isCommandSafe } from "../agent/command-parser.js";
 import { WorkspaceGuard } from "../workspace-guard.js";
+import { getWorkspaceStateDir } from "../config.js";
 import { recordTelemetry, telemetry } from "../agent/telemetry.js";
 
 /* ──────────────────────── Constants ──────────────────────── */
@@ -168,7 +169,8 @@ export class BackgroundJobRegistry {
 
   constructor(cwd: string, opts: BackgroundJobRegistryOptions = {}) {
     this.cwd = cwd;
-    this.snapshotDir = opts.snapshotDir ?? path.join(cwd, ".fixo", "jobs");
+    this.snapshotDir =
+      opts.snapshotDir ?? path.join(getWorkspaceStateDir(cwd), "jobs");
     fs.mkdirSync(this.snapshotDir, { recursive: true });
     this.startSnapshotFlusher();
     if (!opts.disableReaper) this.startReaper();

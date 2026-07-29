@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { createRequire } from "node:module";
+import { getWorkspaceStateDir } from "./config.js";
 
 export interface ProjectFacts {
   packageManager: "npm" | "pnpm" | "yarn" | "unknown";
@@ -363,7 +364,7 @@ export function readSessionHistory(cwd: string): string[] {
 }
 
 export function memoryDir(cwd: string): string {
-  return path.join(cwd, ".fixo");
+  return path.join(getWorkspaceStateDir(cwd), "memory");
 }
 
 export function ensureProjectMemory(cwd: string): ProjectFacts {

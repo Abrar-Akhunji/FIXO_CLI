@@ -24,9 +24,9 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import crypto from "node:crypto";
 import type { ChatContentBlock } from "../shared/types.js";
+import { getStateDir } from "../config.js";
 import { loadTodoList, saveTodoList, type TodoList } from "../context/todo.js";
 import { recordTelemetry, telemetry } from "../agent/telemetry.js";
 
@@ -84,7 +84,7 @@ export interface SessionSnapshot {
 /* ──────────────────────── path helpers ──────────────────────── */
 
 function sessionsRoot(): string {
-  return path.join(os.homedir(), ".fixocli", "sessions");
+  return path.join(getStateDir(), "sessions");
 }
 
 function hashCwd(cwd: string): string {

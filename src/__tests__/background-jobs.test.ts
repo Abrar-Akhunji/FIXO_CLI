@@ -13,6 +13,16 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { BackgroundJobRegistry } from "../runtime/background-jobs.js";
+import { getWorkspaceStateDir } from "../config.js";
+
+const originalFixoHome = process.env.FIXO_HOME;
+const testFixoHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-jobs-state-"));
+process.env.FIXO_HOME = testFixoHome;
+test.after(() => {
+  if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+  else process.env.FIXO_HOME = originalFixoHome;
+  fs.rmSync(testFixoHome, { recursive: true, force: true });
+});
 
 function mkTmp(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -201,7 +211,7 @@ test("list returns jobs newest-first", async () => {
   }
 });
 
-test("snapshot file is fsynced to <cwd>/.fixo/jobs/<jobId>.json", async () => {
+test("snapshot file is fsynced to the external workspace state directory", async () => {
   const cwd = mkTmp("bg-test-");
   try {
     const reg = new BackgroundJobRegistry(cwd, { disableReaper: true });
@@ -219,7 +229,7 @@ test("snapshot file is fsynced to <cwd>/.fixo/jobs/<jobId>.json", async () => {
     // Trigger a wait long enough for the flusher to fire — but
     // for test speed, just verify the file appears at exit.
     await new Promise((r) => setTimeout(r, 6_000));
-    const dir = path.join(cwd, ".fixo", "jobs");
+    const dir = path.join(getWorkspaceStateDir(cwd), "jobs");
     const files = fs.readdirSync(dir).filter((n) => n.endsWith(".json"));
     assert.ok(files.some((f) => f.startsWith(out.jobId!)));
     reg.shutdown();

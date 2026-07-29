@@ -32,6 +32,7 @@ import {
 const IGNORE_DIRS = new Set([
   "node_modules",
   ".git",
+  ".fixo",
   "dist",
   "build",
   ".next",
@@ -220,6 +221,7 @@ function scanDirectory(
     // Hardcoded global structural blacklist to prevent token explosion
     const blacklist = [
       ".git",
+      ".fixo",
       "node_modules",
       "dist",
       "build",

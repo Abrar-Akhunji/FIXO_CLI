@@ -29,6 +29,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import type { Interface as ReadlineInterface } from "node:readline";
 
 import {
@@ -36,7 +37,11 @@ import {
   classifyComplexityModel,
 } from "../planner.js";
 import { GitManager } from "../git/git-manager.js";
-import { getAgentPoolConfig, loadConfig } from "../config.js";
+import {
+  getAgentPoolConfig,
+  getWorkspaceStateDir,
+  loadConfig,
+} from "../config.js";
 import { telemetry, recordTelemetry } from "./telemetry.js";
 import type { SingleAgent } from "./single-agent.js";
 import type { ConversationManager } from "./conversation.js";
@@ -45,29 +50,32 @@ import { colors as c } from "../ui/colors.js";
 import { MODEL_DAG_VERIFIED } from "./providers-manager.js";
 import { confirm, isCancel } from "@clack/prompts";
 
-function snapshotWorkspace(dir: string): Set<string> {
-  const walk = (currentDir: string): string[] => {
-    let results: string[] = [];
-    try {
-      const list = fs.readdirSync(currentDir, { withFileTypes: true });
-      for (const dirent of list) {
-        if (dirent.name === ".git" || dirent.name === "node_modules") continue;
-        const full = path.join(currentDir, dirent.name);
-        results.push(full);
-        if (dirent.isDirectory()) {
-          results = results.concat(walk(full));
-        }
-      }
-    } catch (e) {
-      if (process.env.DEBUG)
-        console.warn(
-          `[task-router] snapshotWorkspace error reading ${currentDir}:`,
-          e,
-        );
+function gitStatus(cwd: string): Map<string, string> {
+  try {
+    const output = execFileSync(
+      "git",
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const status = new Map<string, string>();
+    for (const record of output.split("\0")) {
+      if (record.length < 4) continue;
+      status.set(path.resolve(cwd, record.slice(3)), record.slice(0, 2));
     }
-    return results;
-  };
-  return new Set(walk(dir));
+    return status;
+  } catch {
+    return new Map();
+  }
+}
+
+function newUntrackedPaths(
+  cwd: string,
+  baseline: ReadonlyMap<string, string>,
+): string[] {
+  const current = gitStatus(cwd);
+  return Array.from(current)
+    .filter(([file, status]) => status === "??" && !baseline.has(file))
+    .map(([file]) => file);
 }
 
 export interface RouteDeps {
@@ -114,22 +122,9 @@ export interface RouteResult {
  */
 
 function writeLastRunSummary(cwd: string, success: boolean, reason: string) {
-  const fixoDir = path.join(cwd, ".fixo");
-  if (!fs.existsSync(fixoDir)) {
-    fs.mkdirSync(fixoDir, { recursive: true });
-  }
-
-  const gitignorePath = path.join(cwd, ".gitignore");
-  if (fs.existsSync(gitignorePath)) {
-    const gitignoreContent = fs.readFileSync(gitignorePath, "utf8");
-    if (!gitignoreContent.includes(".fixo/")) {
-      fs.appendFileSync(gitignorePath, "\n.fixo/\n");
-    }
-  } else {
-    fs.writeFileSync(gitignorePath, ".fixo/\n");
-  }
-
-  const summaryFile = path.join(fixoDir, "last-run-summary.json");
+  const metadataDir = getWorkspaceStateDir(cwd);
+  fs.mkdirSync(metadataDir, { recursive: true, mode: 0o700 });
+  const summaryFile = path.join(metadataDir, "last-run-summary.json");
   fs.writeFileSync(
     summaryFile,
     JSON.stringify(
@@ -188,6 +183,19 @@ export async function routeAndExecute(
     return await runSimplePath(
       context,
       "Resume from tool-limit pause",
+      startTime,
+      deps,
+    );
+  } else if (isContinue) {
+    context.systemPromptOverride =
+      (context.systemPromptOverride
+        ? context.systemPromptOverride + "\n\n"
+        : "") +
+      "DIRECTIVE: The user has asked you to continue. Review the conversation history and proceed with the next logical step. If there is no clear next step, ask the user what they want to do.";
+    (context as any).isResume = true;
+    return await runSimplePath(
+      context,
+      "Generic continuation",
       startTime,
       deps,
     );
@@ -286,7 +294,7 @@ async function runComplexPath(
   const { cwd, mode: currentMode } = context;
   const git = new GitManager(cwd);
 
-  const preRunSnapshot = snapshotWorkspace(cwd);
+  const preRunStatus = gitStatus(cwd);
 
   console.log(
     `\n${c.cyan}[Routing Engine] Complex task detected (${reason}). Routing to Orchestrator...${c.reset}`,
@@ -324,10 +332,10 @@ async function runComplexPath(
     }
     console.log(`${c.cyan}${borderBottom}${c.reset}\n`);
 
-    const fixoDir = path.join(cwd, ".fixo");
-    fs.mkdirSync(fixoDir, { recursive: true });
+    const metadataDir = getWorkspaceStateDir(cwd);
+    fs.mkdirSync(metadataDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
-      path.join(fixoDir, "last-dag.json"),
+      path.join(metadataDir, "last-dag.json"),
       JSON.stringify({ task: input, dag }, null, 2),
       "utf-8",
     );
@@ -458,20 +466,11 @@ async function runComplexPath(
         }
       }
 
-      // Phase 6.2 — Rollback orphaned files/directories (untracked paths not present before run).
-      // Phase 5.2 — skip paths owned by successful subtasks so partial-commit doesn't offer to
-      // delete files we just committed.
-      const postRunSnapshot = snapshotWorkspace(cwd);
-      const newPaths: string[] = [];
-      for (const p of postRunSnapshot) {
-        if (!preRunSnapshot.has(p) && !successFiles.has(p)) newPaths.push(p);
-      }
-
-      const topLevelNew = newPaths.filter(
-        (p) =>
-          !newPaths.some(
-            (parent) => p !== parent && p.startsWith(parent + path.sep),
-          ),
+      // Only Git can tell us which files were newly created without walking
+      // the entire tree. Existing TaskSession ledgers cover tool mutations;
+      // this baseline covers untracked files created by commands or workers.
+      const topLevelNew = newUntrackedPaths(cwd, preRunStatus).filter(
+        (file) => !successFiles.has(file),
       );
 
       if (topLevelNew.length > 0) {
@@ -493,7 +492,7 @@ async function runComplexPath(
 
         if (isCancel(shouldDelete) || !shouldDelete) {
           console.log(
-            `${c.yellow}Orphaned paths kept. You can manually delete them if needed:\n.fixo/last-dag.json and .fixo/memory.db${c.reset}`,
+            `${c.yellow}Orphaned paths kept. You can manually delete them if needed.${c.reset}`,
           );
         } else {
           for (const p of topLevelNew) {
@@ -617,19 +616,7 @@ async function runComplexPath(
       }
     }
 
-    // Phase 6.2 — Rollback orphaned files/directories (untracked paths not present before run) on hard crash
-    const postRunSnapshot = snapshotWorkspace(cwd);
-    const newPaths: string[] = [];
-    for (const p of postRunSnapshot) {
-      if (!preRunSnapshot.has(p)) newPaths.push(p);
-    }
-
-    const topLevelNew = newPaths.filter(
-      (p) =>
-        !newPaths.some(
-          (parent) => p !== parent && p.startsWith(parent + path.sep),
-        ),
-    );
+    const topLevelNew = newUntrackedPaths(cwd, preRunStatus);
 
     if (topLevelNew.length > 0) {
       console.log(
@@ -650,7 +637,7 @@ async function runComplexPath(
 
       if (isCancel(shouldDelete) || !shouldDelete) {
         console.log(
-          `${c.yellow}Orphaned paths kept. You can manually delete them if needed:\n.fixo/last-dag.json and .fixo/memory.db${c.reset}`,
+          `${c.yellow}Orphaned paths kept. You can manually delete them if needed.${c.reset}`,
         );
       } else {
         for (const p of topLevelNew) {

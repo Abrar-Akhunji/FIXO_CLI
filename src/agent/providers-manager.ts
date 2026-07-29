@@ -15,8 +15,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import crypto from "node:crypto";
+import { getStateDir } from "../config.js";
 import {
   getProviderKeyVault,
   resetProviderKeyVault,
@@ -222,11 +222,11 @@ type ProvidersStore = Record<string, ProviderEntry>;
 /* ──────────────────────── ProvidersManager ──────────────────────── */
 
 function getProvidersFilePath(): string {
-  return path.join(os.homedir(), ".fixocli", "providers.json");
+  return path.join(getStateDir(), "providers.json");
 }
 
 function getMachineKey(): Buffer {
-  const p = path.join(os.homedir(), ".fixocli", ".machine_key");
+  const p = path.join(getStateDir(), ".machine_key");
   if (fs.existsSync(p)) {
     return Buffer.from(fs.readFileSync(p, "utf-8").trim(), "hex");
   }
@@ -296,12 +296,12 @@ function loadStore(): ProvidersStore {
 }
 
 function saveStore(store: ProvidersStore): void {
-  const dir = path.join(os.homedir(), ".fixocli");
+  const dir = getStateDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const filePath = getProvidersFilePath();
-  const toSave = JSON.parse(JSON.stringify(store)); // deep copy
+  const toSave = structuredClone(store); // deep copy
   for (const k of Object.keys(toSave)) {
     if (toSave[k].apiKey) {
       toSave[k].apiKey = encryptKey(toSave[k].apiKey);
@@ -344,7 +344,7 @@ type ProviderModelsCacheStore = Record<string, ProviderModelsCacheEntry>;
 const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function getModelsCachePath(): string {
-  return path.join(os.homedir(), ".fixocli", "models-cache.json");
+  return path.join(getStateDir(), "models-cache.json");
 }
 
 function loadModelsCache(): ProviderModelsCacheStore {
@@ -360,7 +360,7 @@ function loadModelsCache(): ProviderModelsCacheStore {
 }
 
 function saveModelsCache(store: ProviderModelsCacheStore): void {
-  const dir = path.join(os.homedir(), ".fixocli");
+  const dir = getStateDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
@@ -419,7 +419,7 @@ function parseModelsResponse(payload: unknown): string[] | null {
 }
 
 function getModelHintsPath(): string {
-  return path.join(os.homedir(), ".fixocli", "model-hints.json");
+  return path.join(getStateDir(), "model-hints.json");
 }
 
 function loadModelProviderHints(): Map<string, string> {
@@ -433,7 +433,7 @@ function loadModelProviderHints(): Map<string, string> {
 }
 
 function persistModelProviderHints(hints: Map<string, string>): void {
-  const dir = path.join(os.homedir(), ".fixocli");
+  const dir = getStateDir();
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     getModelHintsPath(),

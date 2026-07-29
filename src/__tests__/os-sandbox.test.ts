@@ -74,7 +74,7 @@ test(
       ? "platform is supported; this case is not applicable"
       : false,
   },
-  () => {
+  (t) => {
     assert.throws(
       () =>
         runSandboxed("echo hi", {
@@ -94,7 +94,7 @@ test(
       ? "OS sandbox binary not installed on this host"
       : false,
   },
-  () => {
+  (t) => {
     const ws = mkWorkspace();
     try {
       const target = path.join(ws.root, "allowed.txt");
@@ -104,6 +104,12 @@ test(
         allowNetwork: true,
         timeout: 10_000,
       });
+      if (
+        result.stderr.includes("sandbox_apply: Operation not permitted")
+      ) {
+        t.skip("host sandbox prevents sandbox-exec from applying its profile");
+        return;
+      }
       assert.equal(
         result.status,
         0,

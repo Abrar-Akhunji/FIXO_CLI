@@ -4,6 +4,7 @@ import type { AgentContext } from "../../types.js";
 import { reviewWorkspace } from "../../review.js";
 import { runProjectTests } from "../../test-runner.js";
 import { loadPlan, renderPlan, savePlan } from "../../planner.js";
+import { getWorkspaceStateDir } from "../../config.js";
 
 import { colors } from "../colors.js";
 
@@ -126,7 +127,7 @@ export const planCommand: CommandHandler = async (ctx) => {
 };
 
 export const runPlanCommand: CommandHandler = async (ctx) => {
-  const dagFile = path.join(ctx.cwd, ".fixo", "last-dag.json");
+  const dagFile = path.join(getWorkspaceStateDir(ctx.cwd), "last-dag.json");
   if (fs.existsSync(dagFile)) {
     try {
       const { task, dag } = JSON.parse(fs.readFileSync(dagFile, "utf-8"));

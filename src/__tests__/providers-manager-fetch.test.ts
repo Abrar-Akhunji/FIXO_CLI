@@ -27,8 +27,10 @@ function mkHome(): {
 } {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-models-cache-"));
   const originalHome = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   const originalFetch = globalThis.fetch;
   process.env.HOME = tmp;
+  process.env.FIXO_HOME = tmp;
   ProvidersManager.resetVault();
   return {
     home: tmp,
@@ -36,6 +38,8 @@ function mkHome(): {
     restore: () => {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
+      if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+      else process.env.FIXO_HOME = originalFixoHome;
       globalThis.fetch = originalFetch;
       try {
         fs.rmSync(tmp, { recursive: true, force: true });
@@ -48,7 +52,7 @@ function mkHome(): {
 }
 
 function modelsCachePath(home: string): string {
-  return path.join(home, ".fixocli", "models-cache.json");
+  return path.join(home, "models-cache.json");
 }
 
 function mockFetchOk(

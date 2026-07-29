@@ -17,14 +17,18 @@ import {
  *  the real `~/.fixocli/telemetry.jsonl` during tests. */
 function withTempHome<T>(fn: () => T): T {
   const original = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-telemetry-"));
   process.env.HOME = tmp;
+  process.env.FIXO_HOME = tmp;
   try {
     clearTelemetry(); // ensure clean slate
     return fn();
   } finally {
     if (original === undefined) delete process.env.HOME;
     else process.env.HOME = original;
+    if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+    else process.env.FIXO_HOME = originalFixoHome;
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
     } catch {
@@ -92,12 +96,13 @@ test("readRecentEvents — honours the limit", () => {
   });
 });
 
-test("recordTelemetry — returns false when the file cannot be written", () => {
-  // Simulate a read-only filesystem by setting HOME to a path that
-  // cannot be created.
+test("recordTelemetry — returns false when the state directory cannot be written", () => {
+  // Simulate an inaccessible state root rather than relying on HOME alone.
   const original = process.env.HOME;
-  process.env.HOME =
-    "/this/path/definitely/does/not/exist/and/cannot/be/created";
+  const originalFixoHome = process.env.FIXO_HOME;
+  const inaccessiblePath = "/this/path/definitely/does/not/exist/and/cannot/be/created";
+  process.env.HOME = inaccessiblePath;
+  process.env.FIXO_HOME = inaccessiblePath;
   try {
     const ok = recordTelemetry(
       telemetry.toolCall({ tool: "x", status: "completed" }),
@@ -106,6 +111,8 @@ test("recordTelemetry — returns false when the file cannot be written", () => 
   } finally {
     if (original === undefined) delete process.env.HOME;
     else process.env.HOME = original;
+    if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+    else process.env.FIXO_HOME = originalFixoHome;
   }
 });
 

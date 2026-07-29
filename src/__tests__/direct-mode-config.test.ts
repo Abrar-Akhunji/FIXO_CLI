@@ -30,12 +30,16 @@ import {
 function mkHome(): { home: string; restore: () => void } {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-direct-cfg-"));
   const originalHome = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   process.env.HOME = tmp;
+  process.env.FIXO_HOME = tmp;
   return {
     home: tmp,
     restore: () => {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
+      if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+      else process.env.FIXO_HOME = originalFixoHome;
       try {
         fs.rmSync(tmp, { recursive: true, force: true });
       } catch {
@@ -56,7 +60,7 @@ test("getDefaultConfig — fresh install defaults to direct mode", () => {
 test("loadConfig — back-compat: pre-v1.1 config with FreeLLMAPI key is inferred as proxy", () => {
   const ctx = mkHome();
   try {
-    const cfgDir = path.join(ctx.home, ".fixocli");
+    const cfgDir = ctx.home;
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       path.join(cfgDir, "config.json"),
@@ -89,7 +93,7 @@ test("loadConfig — back-compat: pre-v1.1 config with FreeLLMAPI key is inferre
 test("loadConfig — back-compat: pre-v1.1 config with no FreeLLMAPI key is inferred as direct", () => {
   const ctx = mkHome();
   try {
-    const cfgDir = path.join(ctx.home, ".fixocli");
+    const cfgDir = ctx.home;
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       path.join(cfgDir, "config.json"),
@@ -115,7 +119,7 @@ test("loadConfig — back-compat: pre-v1.1 config with no FreeLLMAPI key is infe
 test("loadConfig — explicit provider_mode field is always honored over inference", () => {
   const ctx = mkHome();
   try {
-    const cfgDir = path.join(ctx.home, ".fixocli");
+    const cfgDir = ctx.home;
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       path.join(cfgDir, "config.json"),

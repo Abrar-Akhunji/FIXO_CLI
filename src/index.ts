@@ -30,7 +30,6 @@ import yaml from "js-yaml";
 import { C } from "./ui/colors.js";
 import {
   renderLogo,
-  renderCommandGrid,
   renderSessionHeader,
 } from "./ui/index.js";
 
@@ -256,7 +255,6 @@ function loadProjectConfig(cwd: string): ProjectConfig | undefined {
 async function main(): Promise<void> {
   // ──── Step 0: Print the lava logo (the new UI is the only UI) ────
   renderLogo();
-  renderCommandGrid();
 
   // Node version check (major >= 20)
   const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
@@ -415,18 +413,15 @@ async function main(): Promise<void> {
 
   // ──── Step 3: Load project config ────
   const cwd = process.cwd();
-
-  // Phase 7: Cleanup stale/orphaned metadata from previous abnormal exits
-  try {
-    const fixoDir = path.join(cwd, ".fixo");
-    const stagingDir = path.join(fixoDir, "staging");
-    const lastDagFile = path.join(fixoDir, "last-dag.json");
-    if (fs.existsSync(stagingDir))
-      fs.rmSync(stagingDir, { recursive: true, force: true });
-    if (fs.existsSync(lastDagFile)) fs.rmSync(lastDagFile, { force: true });
-  } catch (e) {
-    if (process.env.DEBUG)
-      console.warn("[boot] Failed to cleanup stale metadata:", e);
+  
+  const os = await import("os");
+  const home = os.homedir();
+  if (cwd === home || cwd === "/") {
+    console.error(
+      `${C.RED}Error: FixO CLI cannot be run directly from the home directory (~) or root (/).\n` +
+      `Please navigate to a specific project directory before running FixO.${C.RESET}`
+    );
+    process.exit(1);
   }
 
   const projectConfig = loadProjectConfig(cwd);

@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 import { WorkspaceGuard } from "../workspace-guard.js";
+import { getWorkspaceStateDir } from "../config.js";
 import { redactSecrets } from "./redaction.js";
 import type { PolicyProfile } from "./policy.js";
 
@@ -68,7 +69,7 @@ export class TaskSession {
     this.guard = new WorkspaceGuard(this.cwd);
     this.policy = opts.policy ?? "shell-confirm";
     this.startedAt = new Date().toISOString();
-    this.runDir = path.join(this.cwd, ".fixo", "runs", this.id);
+    this.runDir = path.join(getWorkspaceStateDir(this.cwd), "runs", this.id);
     fs.mkdirSync(this.runDir, { recursive: true });
     fs.mkdirSync(path.join(this.runDir, "snapshots"), { recursive: true });
     this.summary = {
@@ -281,7 +282,7 @@ export function hashFile(file: string): string | null {
 
 export function gcRuns(cwd: string, keepLimit = 50): void {
   try {
-    const root = path.join(cwd, ".fixo", "runs");
+    const root = path.join(getWorkspaceStateDir(cwd), "runs");
     if (!fs.existsSync(root)) return;
     const runs = fs.readdirSync(root).sort().reverse();
     if (runs.length <= keepLimit) return;
@@ -298,7 +299,7 @@ export function gcRuns(cwd: string, keepLimit = 50): void {
 }
 
 export function listRuns(cwd: string, limit = 10): TaskSessionSummary[] {
-  const root = path.join(cwd, ".fixo", "runs");
+  const root = path.join(getWorkspaceStateDir(cwd), "runs");
   if (!fs.existsSync(root)) return [];
   return fs
     .readdirSync(root)
@@ -314,7 +315,7 @@ export function listRuns(cwd: string, limit = 10): TaskSessionSummary[] {
 }
 
 export function showRun(cwd: string, id: string): string {
-  const file = path.join(cwd, ".fixo", "runs", id, "run.json");
+  const file = path.join(getWorkspaceStateDir(cwd), "runs", id, "run.json");
   if (!fs.existsSync(file)) return `Run not found: ${id}`;
   const run = JSON.parse(fs.readFileSync(file, "utf-8")) as TaskSessionSummary;
   return [
@@ -330,7 +331,7 @@ export function showRun(cwd: string, id: string): string {
 }
 
 export function undoRun(cwd: string, id: string): string {
-  const file = path.join(cwd, ".fixo", "runs", id, "run.json");
+  const file = path.join(getWorkspaceStateDir(cwd), "runs", id, "run.json");
   if (!fs.existsSync(file)) return `Run not found: ${id}`;
   const runDir = path.dirname(file);
   const changesFile = path.join(runDir, "changes.json");

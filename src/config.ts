@@ -1,6 +1,7 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import type { PolicyProfile } from "./runtime/policy.js";
 
 export const DEFAULT_API_URL = "https://freellm-for-fixo.vercel.app/v1";
@@ -431,9 +432,50 @@ export interface FreeLLMConfig {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/** Returns the FixO CLI config directory (`~/.fixocli/`). */
-export function getConfigDir(): string {
+/**
+ * Returns the root used for FixO-owned state.
+ *
+ * `FIXO_HOME` is intentionally first so automated runs, containers, and tests
+ * can isolate all mutable state without changing the operating-system home.
+ * The platform locations follow the common XDG/AppData conventions. Existing
+ * installations retain the legacy `~/.fixocli` location when no standard
+ * location is available.
+ */
+export function getStateDir(): string {
+  const override = process.env.FIXO_HOME?.trim();
+  if (override) return path.resolve(override);
+
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? process.env.LOCALAPPDATA;
+    if (appData) return path.join(appData, "FixO CLI");
+  }
+
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "FixO CLI");
+  }
+
+  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+  if (xdgDataHome) return path.join(path.resolve(xdgDataHome), "fixo-cli");
+
   return path.join(os.homedir(), ".fixocli");
+}
+
+/**
+ * Returns a stable external runtime directory for one workspace. Runtime
+ * metadata belongs here, never inside a user's repository.
+ */
+export function getWorkspaceStateDir(cwd: string): string {
+  const workspaceId = crypto
+    .createHash("sha256")
+    .update(path.resolve(cwd))
+    .digest("hex")
+    .slice(0, 32);
+  return path.join(getStateDir(), "workspaces", workspaceId);
+}
+
+/** Returns the FixO CLI configuration directory. Kept as a compatibility alias. */
+export function getConfigDir(): string {
+  return getStateDir();
 }
 
 /** Returns the full path to the config file (`~/.fixocli/config.json`). */

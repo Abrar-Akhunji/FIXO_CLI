@@ -776,15 +776,4 @@ export async function isCommandSafe(
   return { safe: true };
 }
 
-// ──── Backwards-compatible exports ───────────────────────────────
 
-/**
- * @deprecated Direct tree-sitter initialisation is no longer required.
- * `parseShellCommand` now handles initialisation internally via the
- * `ParserFactory` singleton. This export is kept for callers that still
- * need to explicitly warm the parser at startup; it is a no-op once
- * the factory has already initialised.
- */
-export async function initTreeSitter(): Promise<void> {
-  await ParserFactory.getParser();
-}

@@ -13,12 +13,22 @@ import {
   readSessionHistory,
   retrieveRelevantFacts,
 } from "../project-memory.js";
+import { getWorkspaceStateDir } from "../config.js";
 import { initializePlugins, loadedPlugins } from "../agent/tool-executor.js";
+
+const originalFixoHome = process.env.FIXO_HOME;
+const testFixoHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-memory-state-"));
+process.env.FIXO_HOME = testFixoHome;
+test.after(() => {
+  if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+  else process.env.FIXO_HOME = originalFixoHome;
+  fs.rmSync(testFixoHome, { recursive: true, force: true });
+});
 
 test("SQLite Migration from legacy memory.md", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-mem-"));
-  const fixoDir = path.join(tempDir, ".fixo");
-  fs.mkdirSync(fixoDir);
+  const fixoDir = path.join(getWorkspaceStateDir(tempDir), "memory");
+  fs.mkdirSync(fixoDir, { recursive: true });
 
   // Write legacy memory.md
   fs.writeFileSync(

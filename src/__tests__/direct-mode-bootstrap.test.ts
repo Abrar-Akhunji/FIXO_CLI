@@ -32,14 +32,18 @@ type FetchFn = typeof globalThis.fetch;
 function mkHome(): { home: string; restore: () => void } {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-direct-mode-"));
   const originalHome = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   const originalFetch = globalThis.fetch;
   process.env.HOME = tmp;
+  process.env.FIXO_HOME = tmp;
   ProvidersManager.resetVault();
   return {
     home: tmp,
     restore: () => {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
+      if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+      else process.env.FIXO_HOME = originalFixoHome;
       globalThis.fetch = originalFetch;
       try {
         fs.rmSync(tmp, { recursive: true, force: true });

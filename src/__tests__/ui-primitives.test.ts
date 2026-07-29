@@ -36,7 +36,6 @@ import {
   renderRoutingBanner,
   renderAIResponse,
   renderCostLine,
-  renderCommandGrid,
   renderModeSelector,
   startInlineToolSpinner,
   type CLIState,
@@ -129,11 +128,11 @@ test("getLavaLogo returns 6 lines, each coloured in LAVA", () => {
   }
 });
 
-test("getTagline includes v2.0.0 + 4 keywords in SNOW4", () => {
+test("getTagline includes version + 4 keywords in SNOW4", () => {
   const t = getTagline();
   assert.ok(t.startsWith(C.SNOW4));
   assert.ok(t.endsWith(C.RESET));
-  assert.ok(t.includes("v2.0.0"));
+  assert.match(t, /v\d+\.\d+\.\d+/);
   assert.ok(t.includes("autonomous"));
   assert.ok(t.includes("free"));
   assert.ok(t.includes("multi-provider"));
@@ -144,7 +143,7 @@ test("renderLogo writes logo + tagline + blank line to stdout", () => {
   renderLogo();
   const out = captured;
   assert.ok(out.includes(C.LAVA));
-  assert.ok(out.includes("v2.0.0"));
+  assert.match(out, /v\d+\.\d+\.\d+/);
   // The whole thing ends with a blank line.
   assert.ok(out.endsWith("\n\n"));
 });
@@ -382,20 +381,6 @@ test("renderCostLine formats the four stats with toLocaleString and dim colour",
   assert.ok(captured.includes("3 tool calls"));
   assert.ok(captured.includes("6.2s"));
   assert.ok(captured.includes(C.SNOW4));
-});
-
-/* ──────────────────────── Command grid ──────────────────────── */
-
-test("renderCommandGrid prints the title + 12 default commands + a horizontal rule", () => {
-  renderCommandGrid();
-  assert.ok(captured.includes("QUICK REFERENCE"));
-  assert.ok(captured.includes("/help"));
-  assert.ok(captured.includes("/diagnose"));
-  // The lava command name (padded to 14 cols) starts with the
-  // lava escape and the /help substring; just check the prefix.
-  assert.ok(captured.includes(`${C.LAVA}/help`));
-  // The horizontal rule is at least 10 chars of `─`.
-  assert.ok(/─{10,}/.test(captured));
 });
 
 /* ──────────────────────── Mode selector ──────────────────────── */

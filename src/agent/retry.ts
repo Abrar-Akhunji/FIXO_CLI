@@ -16,6 +16,8 @@
  *     misbehaving observer can never break the retry chain).
  */
 
+import { setTimeout as sleep } from "timers/promises";
+
 export type JitterStrategy = "full" | "equal" | "none";
 
 export interface RetryPolicy {
@@ -111,29 +113,18 @@ export function defaultIsRetryable(err: unknown): boolean {
  * The internal timer is cleared synchronously when the signal fires,
  * so no Node.js timer handle leaks.
  */
-export function abortableSleep(
+export async function abortableSleep(
   ms: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(abortError(signal.reason));
-      return;
+  try {
+    await sleep(ms, undefined, { signal });
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw abortError(signal?.reason);
     }
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      cleanup();
-      reject(abortError(signal?.reason));
-    };
-    const cleanup = (): void => {
-      signal?.removeEventListener("abort", onAbort);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
+    throw err;
+  }
 }
 
 function abortError(reason: unknown): Error {

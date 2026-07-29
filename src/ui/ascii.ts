@@ -12,7 +12,21 @@
  * glyphs in the supplementary plane.
  */
 
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { C } from "./colors.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const pkgPath = join(__dirname, "..", "..", "package.json");
+let cliVersion = "2.0.0";
+try {
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+  if (pkg.version) cliVersion = pkg.version;
+} catch {
+  // fallback if package.json is missing or malformed
+}
 
 const LOGO_LINES: ReadonlyArray<string> = [
   " ███████╗██╗██╗  ██╗ ██████╗      ██████╗██╗     ██╗",
@@ -23,9 +37,6 @@ const LOGO_LINES: ReadonlyArray<string> = [
   " ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝      ╚═════╝╚══════╝╚═╝",
 ];
 
-const TAGLINE =
-  " v2.0.0  ·  autonomous  ·  free  ·  multi-provider  ·  freellmapi";
-
 /** Returns the logo lines, each pre-coloured in LAVA. */
 export function getLavaLogo(): string {
   return LOGO_LINES.map((line) => `${C.LAVA}${line}${C.RESET}`).join("\n");
@@ -33,6 +44,7 @@ export function getLavaLogo(): string {
 
 /** Returns just the tagline (used by tests and by `renderLogo`). */
 export function getTagline(): string {
+  const TAGLINE = ` v${cliVersion}  ·  autonomous  ·  free  ·  multi-provider  ·  freellmapi`;
   return `${C.SNOW4}${TAGLINE}${C.RESET}`;
 }
 

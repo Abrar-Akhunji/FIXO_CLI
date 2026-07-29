@@ -26,10 +26,12 @@ test("getDefaultConfig: toolCalls budget defaults to soft=50, hard=100, autoExte
 test("loadConfig: missing toolCalls in config.json falls back to defaults", () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-cfg-"));
   const originalHome = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   process.env.HOME = tempHome;
+  process.env.FIXO_HOME = tempHome;
   try {
     // Write a config that pre-dates the toolCalls field.
-    const cfgDir = path.join(tempHome, ".fixocli");
+    const cfgDir = tempHome;
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       path.join(cfgDir, "config.json"),
@@ -48,7 +50,10 @@ test("loadConfig: missing toolCalls in config.json falls back to defaults", () =
     assert.equal(loaded.preferences.safety.toolCalls.hardLimit, 100);
     assert.equal(loaded.preferences.safety.toolCalls.autoExtend, true);
   } finally {
-    process.env.HOME = originalHome;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+    else process.env.FIXO_HOME = originalFixoHome;
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
 });
@@ -56,9 +61,11 @@ test("loadConfig: missing toolCalls in config.json falls back to defaults", () =
 test("loadConfig: partial toolCalls overrides merge with defaults", () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-cfg-"));
   const originalHome = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   process.env.HOME = tempHome;
+  process.env.FIXO_HOME = tempHome;
   try {
-    const cfgDir = path.join(tempHome, ".fixocli");
+    const cfgDir = tempHome;
     fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       path.join(cfgDir, "config.json"),
@@ -76,7 +83,10 @@ test("loadConfig: partial toolCalls overrides merge with defaults", () => {
     assert.equal(loaded.preferences.safety.toolCalls.hardLimit, 100);
     assert.equal(loaded.preferences.safety.toolCalls.autoExtend, true);
   } finally {
-    process.env.HOME = originalHome;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+    else process.env.FIXO_HOME = originalFixoHome;
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
 });

@@ -30,7 +30,11 @@ import {
 } from "./auto-verifier.js";
 import { buildRepoMap } from "./repo-map.js";
 import type { AgentContext, AgentResult } from "../types.js";
-import { loadConfig, getAgentLoopGuardConfig } from "../config.js";
+import {
+  getAgentLoopGuardConfig,
+  getWorkspaceStateDir,
+  loadConfig,
+} from "../config.js";
 import { recordTelemetry, telemetry } from "./telemetry.js";
 import {
   buildProjectInstructionsBlock,
@@ -241,6 +245,7 @@ function buildSystemPrompt(
   repoMap: string,
   context: AgentContext,
   enableTools = true,
+  intent: "CHAT_ONLY" | "MUTATION" | "TRIVIAL" = "MUTATION"
 ): string {
   const parts: string[] = [];
   if (enableTools) {
@@ -290,7 +295,7 @@ function buildSystemPrompt(
   }
 
   // Add verification command
-  if (context.checkCommand) {
+  if (context.checkCommand && intent === "MUTATION") {
     parts.push(`Verification command: \`${context.checkCommand}\``);
   }
 
@@ -299,25 +304,25 @@ function buildSystemPrompt(
     parts.push(``, `## Project Instructions`, context.systemPromptOverride);
   }
 
-  // Add FIXO.md block (project-local instructions from the
-  // configured lookup chain). Telemetry is emitted in a
-  // microtask so the system-prompt build remains sync.
-  const { block: fixoBlock, result: fixoResult } =
-    buildProjectInstructionsBlock(context.cwd);
-  if (fixoBlock.length > 0) {
-    parts.push(fixoBlock);
-    void recordFixoMdLoad(fixoResult);
-  }
+  if (intent === "MUTATION") {
+    // Add FIXO.md block
+    const { block: fixoBlock, result: fixoResult } =
+      buildProjectInstructionsBlock(context.cwd);
+    if (fixoBlock.length > 0) {
+      parts.push(fixoBlock);
+      void recordFixoMdLoad(fixoResult);
+    }
 
-  // Add repo map
-  parts.push(``, repoMap);
+    // Add repo map
+    if (repoMap) {
+      parts.push(``, repoMap);
+    }
 
-  // Append a one-line todo summary so the LLM always knows
-  // what the current plan is without having to call
-  // todo_read on every turn.
-  const todoSummary = summariseTodoList(loadTodoList(context.cwd));
-  if (todoSummary.length > 0) {
-    parts.push(``, `## Todo`, todoSummary);
+    // Append a one-line todo summary
+    const todoSummary = summariseTodoList(loadTodoList(context.cwd));
+    if (todoSummary.length > 0) {
+      parts.push(``, `## Todo`, todoSummary);
+    }
   }
 
   return parts.join("\n");
@@ -390,8 +395,10 @@ export class SingleAgent {
 
     // Phase 4: Read persistent summary
     try {
-      const fixoDir = path.join(context.cwd || process.cwd(), ".fixo");
-      const summaryFile = path.join(fixoDir, "last-run-summary.json");
+      const summaryFile = path.join(
+        getWorkspaceStateDir(context.cwd || process.cwd()),
+        "last-run-summary.json",
+      );
       if (fs.existsSync(summaryFile)) {
         const summaryRaw = fs.readFileSync(summaryFile, "utf8");
         fs.rmSync(summaryFile, { force: true });
@@ -514,8 +521,8 @@ export class SingleAgent {
     }
 
     const systemPrompt = referencesBlock
-      ? `${buildSystemPrompt(repoMap, context)}\n\n${referencesBlock}`
-      : buildSystemPrompt(repoMap, context);
+      ? `${buildSystemPrompt(repoMap, context, true, "MUTATION")}\n\n${referencesBlock}`
+      : buildSystemPrompt(repoMap, context, true, "MUTATION");
 
     // Auto-compact before building messages if context is near limit
     await this.autoCompactIfNeeded(
@@ -1366,11 +1373,7 @@ export class SingleAgent {
       total_tokens: 0,
     };
 
-    const repoMap = await buildRepoMap(context.cwd, {
-      maxDepth: loadConfig().preferences.repoMap?.maxDepth,
-      maxFiles: loadConfig().preferences.repoMap?.maxFiles,
-    });
-    const systemPrompt = buildSystemPrompt(repoMap, context, false);
+    const systemPrompt = buildSystemPrompt("", context, false, "CHAT_ONLY");
 
     // Auto-compact before chat if context is near limit
     await this.autoCompactIfNeeded(

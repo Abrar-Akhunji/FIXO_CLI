@@ -229,9 +229,10 @@ export class ConversationManager {
       0,
     );
     const summaryTokens = this.summary ? this.estimateTokens(this.summary) : 0;
+    const systemTokens = this.lastSystemTokens > 0 ? this.lastSystemTokens : 1500;
     return (
       historyTokens +
-      this.lastSystemTokens +
+      systemTokens +
       summaryTokens +
       this.additiveTokenSurcharge
     );

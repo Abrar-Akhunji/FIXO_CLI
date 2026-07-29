@@ -33,6 +33,16 @@ import {
 import { emptyTodoList, addItem } from "../context/todo.js";
 import { ConversationManager, SessionManager } from "../agent/conversation.js";
 
+const originalFixoHome = process.env.FIXO_HOME;
+const testFixoHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-snapshots-"));
+process.env.FIXO_HOME = testFixoHome;
+
+test.after(() => {
+  if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+  else process.env.FIXO_HOME = originalFixoHome;
+  fs.rmSync(testFixoHome, { recursive: true, force: true });
+});
+
 function mkTmp(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }

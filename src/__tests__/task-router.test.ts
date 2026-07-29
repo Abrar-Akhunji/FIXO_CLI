@@ -29,15 +29,21 @@ import type { Interface as ReadlineInterface } from "node:readline";
 
 function mkSandbox(): { cwd: string; restore: () => void } {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-task-router-"));
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-task-state-"));
   const originalHome = process.env.HOME;
+  const originalFixoHome = process.env.FIXO_HOME;
   process.env.HOME = cwd;
+  process.env.FIXO_HOME = stateRoot;
   return {
     cwd,
     restore: () => {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
+      if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+      else process.env.FIXO_HOME = originalFixoHome;
       try {
         fs.rmSync(cwd, { recursive: true, force: true });
+        fs.rmSync(stateRoot, { recursive: true, force: true });
       } catch {
         /* ignore */
       }

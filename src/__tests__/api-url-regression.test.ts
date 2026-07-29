@@ -47,7 +47,7 @@ test("setup-wizard SaaS option binds to the DEFAULT_API_URL identifier (not a li
   // setup-wizard.ts that drifts from the canonical DEFAULT_API_URL.
   assert.match(
     src,
-    /\{\s*value:\s*DEFAULT_API_URL\s*,\s*label:\s*'Cloud Hosted SaaS \(Default\)'/,
+    /\{\s*value:\s*DEFAULT_API_URL\s*,\s*label:\s*['"]Cloud Hosted SaaS \(Default\)['"]/,
     "setup-wizard SaaS option must use the DEFAULT_API_URL identifier",
   );
 });

@@ -21,3 +21,4 @@ yarn-error.log*
 # Graphify — local knowledge graph (not committed)
 graphify-out/
 .graphifyignore
+.claude/

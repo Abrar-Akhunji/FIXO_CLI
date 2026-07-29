@@ -36,6 +36,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { WorkspaceGuard } from "../workspace-guard.js";
+import { getWorkspaceStateDir } from "../config.js";
 import { getRunInventory } from "./run-inventory.js";
 
 // ---------------------------------------------------------------------------
@@ -209,8 +210,7 @@ export class AtomicStagingManager {
       syntaxHealthCheck: options.syntaxHealthCheck,
     };
     this.stagingDir = path.join(
-      this.cwd,
-      ".fixo",
+      getWorkspaceStateDir(this.cwd),
       STAGING_DIR_NAME,
       this.runId,
     );
@@ -587,7 +587,7 @@ export class AtomicStagingManager {
    */
   public static garbageCollectAll(cwd: string, ttlMs?: number): number {
     const root = path.resolve(cwd);
-    const stagingRoot = path.join(root, ".fixo", STAGING_DIR_NAME);
+    const stagingRoot = path.join(getWorkspaceStateDir(root), STAGING_DIR_NAME);
     if (!fs.existsSync(stagingRoot)) return 0;
     let removed = 0;
     let runDirs: string[];

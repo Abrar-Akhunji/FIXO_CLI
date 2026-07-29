@@ -18,6 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { getWorkspaceStateDir } from "../config.js";
 
 export type TodoStatus = "pending" | "in_progress" | "done" | "cancelled";
 
@@ -39,10 +40,9 @@ export interface TodoList {
 }
 
 const TODO_FILENAME = "todo_list.json";
-const TODO_SUBDIR = ".fixo";
 
 function todoPath(cwd: string): string {
-  return path.join(cwd, TODO_SUBDIR, TODO_FILENAME);
+  return path.join(getWorkspaceStateDir(cwd), "todo", TODO_FILENAME);
 }
 
 /* ──────────────────────── factory ──────────────────────── */

@@ -10,6 +10,15 @@ import {
   PreCommitHookRejectedError,
 } from "../runtime/staging.js";
 
+const originalFixoHome = process.env.FIXO_HOME;
+const testFixoHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-staging-state-"));
+process.env.FIXO_HOME = testFixoHome;
+test.after(() => {
+  if (originalFixoHome === undefined) delete process.env.FIXO_HOME;
+  else process.env.FIXO_HOME = originalFixoHome;
+  fs.rmSync(testFixoHome, { recursive: true, force: true });
+});
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
