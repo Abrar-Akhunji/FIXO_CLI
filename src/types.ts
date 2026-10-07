@@ -26,8 +26,26 @@ export interface AgentContext {
   allowedOutsidePaths?: Set<string>;
   /** Allow low-risk actions without repeated prompts. */
   yes?: boolean;
-  /** Execution mode: PLAN (read-only), BUILD (mutating allowed), EXPLORE (read+lsp), or SCOUT (web only) */
+  /** Execution mode: PLAN (plan file only), BUILD (mutating allowed), EXPLORE (read+lsp), or SCOUT (web only) */
   mode?: "PLAN" | "BUILD" | "EXPLORE" | "SCOUT";
+  /**
+   * Caps the tool-call budget for this run. Hitting it is an
+   * incomplete result, not a success. Set by `--max-turns`.
+   */
+  maxTurns?: number;
+  /**
+   * Shell and edit prefix rules for this run. When omitted, the
+   * rules in `~/.fixocli/config.json` are used. Deny wins.
+   */
+  permissionRules?: {
+    bash?: Array<{ pattern: string; decision: "allow" | "ask" | "deny" }>;
+    edit?: Array<{ pattern: string; decision: "allow" | "ask" | "deny" }>;
+  };
+  /**
+   * 0 for the session agent. A spawned child is 1. Depth 1
+   * cannot spawn another child.
+   */
+  subagentDepth?: number;
   /**
    * Image (or future non-text) blocks attached to the next user
    * message. Populated by the REPL's `/image` slash command. The

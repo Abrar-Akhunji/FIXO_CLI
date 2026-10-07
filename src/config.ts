@@ -71,6 +71,11 @@ export interface SemanticLoopTrapPolicy {
   hardAbortCount: number;
 }
 
+export interface ScopedPermissionRule {
+  pattern: string;
+  decision: "allow" | "ask" | "deny";
+}
+
 /**
  * Tool-call budget policy. The agent loop runs at most `softLimit`
  * tool calls per task. When `autoExtend` is enabled, the agent may
@@ -376,6 +381,15 @@ export interface FreeLLMConfig {
   };
   preferences: {
     autoCommit: boolean;
+    /**
+     * Prefix rules for shell commands and edit paths.
+     * Deny wins over allow when more than one rule matches.
+     * An empty list keeps the existing ask / --yes behavior.
+     */
+    permissionRules: {
+      bash: ScopedPermissionRule[];
+      edit: ScopedPermissionRule[];
+    };
     streaming: boolean;
     theme: "dark" | "light";
     maxRetries: number;
@@ -503,6 +517,10 @@ export function getDefaultConfig(): FreeLLMConfig {
       theme: "dark",
       maxRetries: 3,
       policy: "shell-confirm",
+      permissionRules: {
+        bash: [],
+        edit: [],
+      },
       telemetry: true,
       telemetryLocal: true,
       telemetryRemote: false,
@@ -595,6 +613,15 @@ export function loadConfig(): FreeLLMConfig {
     // `resilience` and `safety` are deep-merged so old configs that
     // predate a new field still pick up the new default.
     const parsedPreferences = parsed.preferences ?? {};
+    const parsedPermissionRules =
+      (
+        parsedPreferences as {
+          permissionRules?: {
+            bash?: ScopedPermissionRule[];
+            edit?: ScopedPermissionRule[];
+          };
+        }
+      ).permissionRules ?? {};
     const parsedResilience =
       (parsedPreferences as { resilience?: Partial<ResilienceConfig> })
         .resilience ?? {};
@@ -633,6 +660,14 @@ export function loadConfig(): FreeLLMConfig {
       preferences: {
         ...defaults.preferences,
         ...parsedPreferences,
+        permissionRules: {
+          bash: Array.isArray(parsedPermissionRules.bash)
+            ? parsedPermissionRules.bash
+            : defaults.preferences.permissionRules.bash,
+          edit: Array.isArray(parsedPermissionRules.edit)
+            ? parsedPermissionRules.edit
+            : defaults.preferences.permissionRules.edit,
+        },
         resilience: {
           ...defaults.preferences.resilience,
           ...parsedResilience,

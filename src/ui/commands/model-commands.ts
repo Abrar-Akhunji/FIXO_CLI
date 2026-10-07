@@ -4,6 +4,7 @@ import { saveConfig } from "../../config.js";
 import {
   ProvidersManager,
   PROVIDER_REGISTRY,
+  fetchProxyCatalog,
 } from "../../agent/providers-manager.js";
 
 import { C, colors } from "../colors.js";
@@ -28,7 +29,116 @@ function persistModelSelection(
   saveConfig(config);
 }
 
+async function proxyModelCommand(
+  ctx: Parameters<CommandHandler>[0],
+): Promise<void> {
+  const proxyNote = `${colors.dim}The proxy must recognize this model id.${colors.reset}`;
+  if (ctx.args.length > 0 && ctx.args[0] !== "list") {
+    ctx.state.currentModel = ctx.args.join(" ").trim();
+    persistModelSelection(ctx.config, ctx.state.currentModel, "auto");
+    ctx.conversation.setContextLimit(ctx.state.currentModel);
+    console.log(
+      `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
+    );
+    console.log(proxyNote);
+    return;
+  }
+
+  let ids: string[] = [];
+  let failed = false;
+  const apiUrl = ctx.config.apiUrl?.trim();
+  const apiKey = ctx.config.freellmapi_api_key?.trim();
+  if (!apiUrl || !apiKey) {
+    failed = true;
+  } else {
+    try {
+      ids = await fetchProxyCatalog(apiUrl, apiKey);
+    } catch {
+      failed = true;
+    }
+  }
+
+  if (ctx.args[0] === "list") {
+    console.log(
+      `\n${colors.bold}${colors.cyan}Proxy catalog${colors.reset}`,
+    );
+    if (failed) {
+      console.log(
+        `${colors.yellow}The proxy catalog could not be loaded. auto is available.${colors.reset}`,
+      );
+    }
+    console.log(`    ${colors.cyan}•${colors.reset} auto`);
+    for (const id of ids) {
+      console.log(`    ${colors.cyan}•${colors.reset} ${id}`);
+    }
+    return;
+  }
+
+  if (failed) {
+    console.log(
+      `\n${colors.yellow}The proxy catalog could not be loaded. Only auto is available.${colors.reset}`,
+    );
+  }
+
+  ctx.rl.pause();
+  const picked = await p.select({
+    message: `Current model: ${colors.cyan}${ctx.state.currentModel}${colors.reset} — proxy catalog:`,
+    options: [
+      { value: "auto", label: "auto", hint: "proxy routes the request" },
+      ...ids.map((id) => ({ value: id, label: id, hint: "" })),
+      {
+        value: "__manual__",
+        label: "Enter model ID manually…",
+        hint: "proxy must recognize it",
+      },
+    ],
+    initialValue:
+      ctx.state.currentModel === "auto" || ids.includes(ctx.state.currentModel)
+        ? ctx.state.currentModel
+        : "auto",
+  });
+  ctx.rl.resume();
+
+  if (p.isCancel(picked)) {
+    console.log(
+      `\n${colors.dim}Model unchanged: ${colors.cyan}${ctx.state.currentModel}${colors.reset}`,
+    );
+    return;
+  }
+
+  if (picked === "__manual__") {
+    ctx.rl.pause();
+    const manual = await p.text({
+      message: "Enter model ID:",
+      placeholder: "auto, or an id from the proxy catalog",
+      validate: (v) => (!v.trim() ? "Model ID is required" : undefined),
+    });
+    ctx.rl.resume();
+    if (!p.isCancel(manual) && manual) {
+      ctx.state.currentModel = manual.trim();
+      persistModelSelection(ctx.config, ctx.state.currentModel, "auto");
+      ctx.conversation.setContextLimit(ctx.state.currentModel);
+      console.log(
+        `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
+      );
+      console.log(proxyNote);
+    }
+    return;
+  }
+
+  ctx.state.currentModel = picked as string;
+  persistModelSelection(ctx.config, ctx.state.currentModel, "auto");
+  ctx.conversation.setContextLimit(ctx.state.currentModel);
+  console.log(
+    `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
+  );
+}
+
 export const modelCommand: CommandHandler = async (ctx) => {
+  if (ctx.config.provider_mode !== "direct") {
+    await proxyModelCommand(ctx);
+    return;
+  }
   if (ctx.args[0] === "list") {
     // Print full model table grouped by provider
     // Uses live-fetched cached models when available, otherwise falls
@@ -39,19 +149,26 @@ export const modelCommand: CommandHandler = async (ctx) => {
     console.log(`${colors.dim}${"─".repeat(60)}${colors.reset}`);
     for (const def of PROVIDER_REGISTRY) {
       const hasKey = ProvidersManager.has(def.name);
-      const keyStatus = hasKey
-        ? `${colors.green}[key ✓]${colors.reset}`
-        : `${colors.dim}[no key]${colors.reset}`;
-      const cached = ProvidersManager.getCachedModels(def.name);
-      const modelList = cached?.models?.length ? cached.models : def.models;
-      const sourceTag =
-        cached?.source === "live"
-          ? ""
-          : ` ${colors.dim}[unverified]${colors.reset}`;
+      if (!hasKey) {
+        console.log(
+          `\n  ${C.SNOW}${colors.bold}${def.displayName}${colors.reset} ${colors.dim}[no key]${colors.reset}`,
+        );
+        console.log(
+          `    ${colors.dim}Add a key with /providers add ${def.name}${colors.reset}`,
+        );
+        continue;
+      }
+      const fetched = await ProvidersManager.fetchRemoteModels(def.name);
       console.log(
-        `\n  ${C.SNOW}${colors.bold}${def.displayName}${colors.reset} ${keyStatus}${sourceTag}`,
+        `\n  ${C.SNOW}${colors.bold}${def.displayName}${colors.reset} ${colors.green}[key ✓]${colors.reset}`,
       );
-      for (const model of modelList) {
+      if (fetched.models.length === 0) {
+        console.log(
+          `    ${colors.yellow}${def.displayName} did not return models.${colors.reset}`,
+        );
+        continue;
+      }
+      for (const model of fetched.models) {
         console.log(`    ${colors.cyan}•${colors.reset} ${model}`);
       }
     }
@@ -116,15 +233,26 @@ export const modelCommand: CommandHandler = async (ctx) => {
 
     if (pickedProvider === "all") {
       ctx.rl.pause();
-      const allOptions = PROVIDER_REGISTRY.flatMap((def) =>
-        def.models.map((m) => ({
-          value: m,
-          label: `${m}`,
-          hint:
-            def.displayName +
-            (ProvidersManager.has(def.name) ? " [key ✓]" : ""),
-        })),
-      );
+      const allOptions: Array<{ value: string; label: string; hint: string }> =
+        [];
+      for (const def of PROVIDER_REGISTRY) {
+        if (!ProvidersManager.has(def.name)) continue;
+        const fetched = await ProvidersManager.fetchRemoteModels(def.name);
+        for (const model of fetched.models) {
+          allOptions.push({
+            value: model,
+            label: model,
+            hint: def.displayName,
+          });
+        }
+      }
+      if (allOptions.length === 0) {
+        ctx.rl.resume();
+        console.log(
+          `\n${colors.yellow}No connected provider returned models. Add a key with /providers add <name>.${colors.reset}`,
+        );
+        return;
+      }
       const picked = await p.select({
         message: "Select a model from the flat list:",
         options: [
@@ -172,23 +300,26 @@ export const modelCommand: CommandHandler = async (ctx) => {
 
     const def = PROVIDER_REGISTRY.find((p) => p.name === pickedProvider)!;
     const hasKey = ProvidersManager.has(def.name);
-    const keyStatus = hasKey
-      ? `${colors.green}[key ✓]${colors.reset}`
-      : `${colors.red}[no key]${colors.reset}`;
+    if (!hasKey) {
+      console.log(
+        `\n${colors.yellow}No API key for ${def.displayName}. Run /providers add ${def.name}.${colors.reset}`,
+      );
+      return;
+    }
 
-    // Prefer the cached live model list; fall back to the
-    // registry list (tagged `[unverified]`) when no fresh
-    // cache exists. Drops the synthetic "(free)" suffix
-    // since we no longer know that without provider
-    // metadata.
-    const cached = ProvidersManager.getCachedModels(def.name);
-    const modelList: string[] = cached?.models?.length
-      ? cached.models
-      : def.models;
+    const fetched = await ProvidersManager.fetchRemoteModels(def.name);
+    if (fetched.models.length === 0) {
+      console.log(
+        `\n${colors.yellow}${def.displayName} did not return models.${colors.reset}`,
+      );
+      return;
+    }
+    const modelList = fetched.models;
+    const keyStatus = `${colors.green}[key ✓]${colors.reset}`;
     const sourceSuffix =
-      cached?.source === "live"
-        ? ""
-        : ` ${colors.dim}[unverified]${colors.reset}`;
+      fetched.source === "cache"
+        ? ` ${colors.dim}[cached]${colors.reset}`
+        : "";
 
     ctx.rl.pause();
     const picked = await p.select({

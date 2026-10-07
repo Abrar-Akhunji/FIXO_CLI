@@ -26,6 +26,10 @@ import {
   type PolicyProfile,
   decidePolicy,
 } from "../runtime/policy.js";
+import {
+  loadConfig,
+  type ScopedPermissionRule,
+} from "../config.js";
 
 export type PermissionDecision = "allow" | "ask" | "deny";
 
@@ -182,6 +186,65 @@ export function buildArgString(
     .join(" ");
 }
 
+const EDIT_RULE_TOOLS: ReadonlySet<string> = new Set([
+  "write_file",
+  "str_replace",
+  "apply_patch",
+  "replace_range",
+  "insert_after",
+  "rename_file",
+  "delete_file",
+]);
+
+/**
+ * Prefix match on a path or command boundary. `src` matches
+ * `src/app.ts` and does not match `src-other`. `npm test` matches
+ * `npm test --watch`.
+ */
+export function permissionPrefixMatch(value: string, pattern: string): boolean {
+  const text = value.trim();
+  const prefix = pattern.trim();
+  if (!prefix) return false;
+  if (text === prefix) return true;
+  if (prefix.endsWith("/") || prefix.endsWith(" ")) return text.startsWith(prefix);
+  return text.startsWith(`${prefix} `) || text.startsWith(`${prefix}/`);
+}
+
+/**
+ * Deny wins over allow, and allow wins over ask. No match returns null.
+ */
+export function resolveScopedDecision(
+  rules: ScopedPermissionRule[] | undefined,
+  value: string,
+): PermissionDecision | null {
+  if (!rules || rules.length === 0) return null;
+  const matched = rules.filter((rule) =>
+    permissionPrefixMatch(value, rule.pattern),
+  );
+  if (matched.length === 0) return null;
+  if (matched.some((rule) => rule.decision === "deny")) return "deny";
+  if (matched.some((rule) => rule.decision === "allow")) return "allow";
+  if (matched.some((rule) => rule.decision === "ask")) return "ask";
+  return null;
+}
+
+export function scopedDecisionForTool(
+  tool: string,
+  args: Record<string, unknown>,
+  rules?: { bash?: ScopedPermissionRule[]; edit?: ScopedPermissionRule[] },
+): PermissionDecision | null {
+  const table = rules ?? loadConfig().preferences.permissionRules;
+  if (tool === "run_command" || tool === "run_command_async") {
+    const command = String(args.command ?? args.cmd ?? "");
+    return resolveScopedDecision(table.bash, command);
+  }
+  if (EDIT_RULE_TOOLS.has(tool)) {
+    const target = String(args.path ?? args.file ?? args.to ?? args.from ?? "");
+    return resolveScopedDecision(table.edit, target);
+  }
+  return null;
+}
+
 /** Match a tool call against the rule list (first match wins). */
 export function matchPermission(
   tool: string,
@@ -215,16 +278,37 @@ export function checkPermission(
   args: Record<string, unknown>,
   cwd: string,
   profile: PolicyProfile,
+  scopedRules?: { bash?: ScopedPermissionRule[]; edit?: ScopedPermissionRule[] },
 ): PermissionCheckResult {
   const file = loadPermissionsFile(cwd);
   const rules = file?.rules ?? [];
-  // 1. First-match-wins rule check.
+  const scoped = scopedDecisionForTool(tool, args, scopedRules);
+  // 1. First-match-wins rule check. A config deny still wins.
   const match = matchPermission(tool, args, rules);
+  if (scoped === "deny" || match?.decision === "deny") {
+    return {
+      decision: "deny",
+      reason:
+        scoped === "deny"
+          ? `${tool} denied by permission rule`
+          : (match?.reason ?? `${tool} matched a deny rule`),
+      matchedRule: scoped === "deny" ? "permissionRules" : (match?.pattern ?? null),
+      source: "rule",
+    };
+  }
   if (match) {
     return {
       decision: match.decision,
       reason: match.reason ?? `${tool} matched rule ${match.pattern}`,
       matchedRule: match.pattern,
+      source: "rule",
+    };
+  }
+  if (scoped === "allow" || scoped === "ask") {
+    return {
+      decision: scoped,
+      reason: `${tool} matched permissionRules`,
+      matchedRule: "permissionRules",
       source: "rule",
     };
   }

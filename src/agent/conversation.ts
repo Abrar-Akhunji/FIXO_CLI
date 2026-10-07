@@ -152,6 +152,7 @@ export class ConversationManager {
     messagesBefore: number;
     tokensFreed: number;
   } | null = null;
+  private consecutiveCompactionCount: number = 0;
   /**
    * Represents exact tokens reported by the API that exceed our local
    * heuristic estimation, or tokens consumed by parallel DAG sub-agents
@@ -351,10 +352,22 @@ export class ConversationManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * Reset consecutive compaction tracking when new turns occur.
+   */
+  resetConsecutiveCompactionCount(): void {
+    this.consecutiveCompactionCount = 0;
+  }
+
+  getConsecutiveCompactionCount(): number {
+    return this.consecutiveCompactionCount;
+  }
+
+  /**
    * Add a user message and the corresponding assistant response as a single
    * conversational turn, then prune if the budget is exceeded.
    */
   addTurn(userMessage: string, assistantResponse: string): void {
+    this.resetConsecutiveCompactionCount();
     this.history.push(
       { role: "user", content: sanitizeUserContent(userMessage) },
       { role: "assistant", content: sanitizeUserContent(assistantResponse) },
@@ -367,6 +380,9 @@ export class ConversationManager {
    * non-standard messages), then prune if the budget is exceeded.
    */
   addMessage(message: ChatMessage): void {
+    if (message.role === "user") {
+      this.resetConsecutiveCompactionCount();
+    }
     let sanitizedContent: string | ChatContentBlock[] | null = null;
     if (typeof message.content === "string") {
       sanitizedContent = sanitizeUserContent(message.content);
@@ -451,6 +467,33 @@ export class ConversationManager {
   }
 
   /**
+   * Emergency eviction to guarantee conversation fits under a specific token limit.
+   * Evicts oldest turns from history until tokens <= targetTokens or only MIN_MESSAGES_TO_KEEP remain.
+   */
+  emergencyPruneToTarget(targetTokens: number): void {
+    while (
+      this.getTotalTokens() > targetTokens &&
+      this.history.length > MIN_MESSAGES_TO_KEEP
+    ) {
+      let nextUserIndex = -1;
+      for (let i = 1; i < this.history.length; i++) {
+        if (this.history[i].role === "user") {
+          nextUserIndex = i;
+          break;
+        }
+      }
+      if (
+        nextUserIndex !== -1 &&
+        this.history.length - nextUserIndex >= MIN_MESSAGES_TO_KEEP
+      ) {
+        this.history.splice(0, nextUserIndex);
+      } else {
+        this.history.shift();
+      }
+    }
+  }
+
+  /**
    * Prune large tool outputs in older messages to free context space.
    * Keeps the last TAIL_TURNS * 2 messages untouched.
    */
@@ -518,6 +561,14 @@ export class ConversationManager {
     this.pruneToFitBudget();
   }
 
+  /**
+   * Replace history exactly. Used by `/rewind`, which must keep
+   * the turns the user named even when they would not fit a prune.
+   */
+  replaceHistory(messages: ChatMessage[]): void {
+    this.history = messages.map((msg) => ({ ...msg }));
+  }
+
   // ---------------------------------------------------------------------------
   // Compaction & Summarization
   // ---------------------------------------------------------------------------
@@ -565,6 +616,20 @@ export class ConversationManager {
       return false;
     }
 
+    this.consecutiveCompactionCount += 1;
+
+    // Loop breaker: if compaction has run repeatedly without user turns,
+    // force emergency eviction down to 50% of context limit to break infinite build↔compaction loop.
+    if (this.consecutiveCompactionCount > 2) {
+      this.emergencyPruneToTarget(this.contextLimit * 0.5);
+      this.consecutiveCompactionCount = 0;
+      this._lastCompactionInfo = {
+        messagesBefore: this.history.length,
+        tokensFreed: 1000,
+      };
+      return true;
+    }
+
     const messagesBefore = this.history.length;
     const tokensBefore = this.getTotalTokens();
 
@@ -582,19 +647,19 @@ export class ConversationManager {
       return false;
     }
 
-    // Step 3: Format history for summarization
+    // Step 3: Format history for summarization with expanded limits
     const formattedHistory = toCompact
       .map((msg) => {
         const role = msg.role.toUpperCase();
         if (msg.role === "tool") {
-          const content = (msg.content ?? "").slice(0, 500);
+          const content = (msg.content ?? "").slice(0, 2000);
           return `TOOL_RESULT (${msg.tool_call_id ?? "unknown"}): ${content}`;
         }
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           const tools = msg.tool_calls
             .map(
               (tc) =>
-                `  → ${tc.function?.name}(${(tc.function?.arguments ?? "").slice(0, 100)}...)`,
+                `  → ${tc.function?.name}(${(tc.function?.arguments ?? "").slice(0, 1000)})`,
             )
             .join("\n");
           return `${role}: ${msg.content || "(tool calls)"}\n${tools}`;
@@ -636,11 +701,22 @@ export class ConversationManager {
       // Replace history with only the preserved tail messages
       this.history = [...preserved];
 
-      const tokensAfter =
+      let tokensAfter =
         this.getTotalTokens() + this.estimateTokens(this.summary);
+      let tokensFreed = Math.max(0, tokensBefore - tokensAfter);
+
+      // Progress Guard: if compaction didn't free at least 1,000 tokens OR
+      // if tokensAfter is still above 75% of context limit, execute Emergency Pruning
+      // to guarantee headroom and break the infinite build↔compaction loop.
+      if (tokensFreed < 1000 || tokensAfter > this.contextLimit * 0.75) {
+        this.emergencyPruneToTarget(this.contextLimit * 0.6);
+        tokensAfter = this.getTotalTokens() + this.estimateTokens(this.summary);
+        tokensFreed = Math.max(0, tokensBefore - tokensAfter);
+      }
+
       this._lastCompactionInfo = {
         messagesBefore,
-        tokensFreed: Math.max(0, tokensBefore - tokensAfter),
+        tokensFreed,
       };
 
       return true;
@@ -648,7 +724,10 @@ export class ConversationManager {
       console.warn(
         `[Context Compaction] Failed to compact: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return false;
+      // Emergency fallback: even if summarizer client fails, prune history
+      // so caller doesn't overflow context on the next turn.
+      this.emergencyPruneToTarget(this.contextLimit * 0.6);
+      return true;
     }
   }
 
@@ -691,6 +770,39 @@ export interface SessionData {
    * filename and sessionId stable so resume URLs stay valid.
    */
   label?: string;
+  /** Workspace this session was saved from. Absent on older files. */
+  cwd?: string;
+}
+
+/**
+ * A turn is one user message plus the assistant and tool messages
+ * that follow it, up to the next user message.
+ */
+export function countUserTurns(history: readonly ChatMessage[]): number {
+  return history.reduce((n, msg) => (msg.role === "user" ? n + 1 : n), 0);
+}
+
+/**
+ * Keep turns 1..turn and drop every later turn. Does not touch files.
+ * `turn` is 1-based. Messages before the first user message stay.
+ */
+export function rewindToTurn(
+  history: readonly ChatMessage[],
+  turn: number,
+): ChatMessage[] {
+  if (!Number.isInteger(turn) || turn < 1) {
+    throw new Error("turn must be a positive integer");
+  }
+  let seen = 0;
+  const kept: ChatMessage[] = [];
+  for (const msg of history) {
+    if (msg.role === "user") {
+      seen += 1;
+      if (seen > turn) break;
+    }
+    kept.push({ ...msg });
+  }
+  return kept;
 }
 
 import fs from "node:fs";
@@ -718,6 +830,7 @@ export class SessionManager {
     },
     sessionId?: string,
     label?: string,
+    cwd?: string,
   ): string {
     const id = sessionId || crypto.randomUUID();
     const dir = this.getSessionsDir();
@@ -731,6 +844,7 @@ export class SessionManager {
       modifiedFiles,
       tokenUsage,
       label,
+      cwd: cwd ? path.resolve(cwd) : undefined,
     };
     // Atomic write: tmp + rename, matching the snapshot writer so a
     // mid-write Ctrl+C never leaves a half-written session file behind.
@@ -743,7 +857,7 @@ export class SessionManager {
     return id;
   }
 
-  static listSessions(): Array<{
+  static listSessions(cwd?: string): Array<{
     sessionId: string;
     timestamp: string;
     model: string;
@@ -751,8 +865,10 @@ export class SessionManager {
     summary: string;
     totalTokens: number;
     label?: string;
+    cwd?: string;
   }> {
     const dir = this.getSessionsDir();
+    const wanted = cwd ? path.resolve(cwd) : undefined;
     const results: Array<{
       sessionId: string;
       timestamp: string;
@@ -761,6 +877,7 @@ export class SessionManager {
       summary: string;
       totalTokens: number;
       label?: string;
+      cwd?: string;
     }> = [];
     try {
       const files = fs.readdirSync(dir);
@@ -769,6 +886,7 @@ export class SessionManager {
           try {
             const raw = fs.readFileSync(path.join(dir, file), "utf-8");
             const data = JSON.parse(raw) as SessionData;
+            if (wanted && data.cwd !== wanted) continue;
             results.push({
               sessionId: data.sessionId,
               timestamp: data.timestamp,
@@ -777,6 +895,7 @@ export class SessionManager {
               summary: data.summary,
               totalTokens: data.tokenUsage?.total_tokens || 0,
               label: data.label,
+              cwd: data.cwd,
             });
           } catch (err: any) {
             console.warn(
@@ -797,6 +916,26 @@ export class SessionManager {
     return results.sort(
       (a, b) =>
         new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
+  }
+
+  /**
+   * Load by full id or by a unique id prefix.
+   */
+  static findSession(idOrPrefix: string): SessionData {
+    const id = idOrPrefix.trim();
+    if (!id) throw new Error("Session id is empty");
+    const exact = path.join(this.getSessionsDir(), `session_${id}.json`);
+    if (fs.existsSync(exact)) return this.loadSession(id);
+    const matches = this.listSessions().filter((s) =>
+      s.sessionId.startsWith(id),
+    );
+    if (matches.length === 1) return this.loadSession(matches[0].sessionId);
+    if (matches.length === 0) {
+      throw new Error(`Session file not found for ID: ${id}`);
+    }
+    throw new Error(
+      `Session id '${id}' matches ${matches.length} sessions. Pass a longer id.`,
     );
   }
 

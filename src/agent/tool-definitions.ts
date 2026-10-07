@@ -593,4 +593,63 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "ask_user_question",
+      description:
+        "Ask the user one multiple-choice question and wait for the choice. Use this instead of asking in prose. A prose question ends the turn. In a non-interactive session the tool returns an error and you must continue from the task or state your assumption.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "The question to show the user.",
+          },
+          options: {
+            type: "array",
+            items: { type: "string" },
+            description: "Choices the user can pick. At least one.",
+          },
+        },
+        required: ["question", "options"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "spawn_subagent",
+      description:
+        "Spawn an isolated worker for one subtask. Inherits the parent model, policy, and yes flag. general-purpose and statusline-setup run in BUILD. Explore runs in EXPLORE. Plan runs in PLAN. Returns a summary, never the raw tool log.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: {
+            type: "string",
+            description:
+              "The specific subtask instruction for the subagent to perform.",
+          },
+          type: {
+            type: "string",
+            enum: ["general-purpose", "statusline-setup", "Explore", "Plan"],
+            description:
+              "general-purpose and statusline-setup mutate (BUILD). Explore is read-only exploration. Plan is read-only planning. Default general-purpose.",
+          },
+          contextFiles: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional list of files the subagent is allowed to read for initial context.",
+          },
+          runInBackground: {
+            type: "boolean",
+            description:
+              "If true, spawns the subagent in background and returns a job ID immediately. Default false.",
+          },
+        },
+        required: ["task"],
+      },
+    },
+  },
 ];

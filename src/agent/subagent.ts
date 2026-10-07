@@ -3,8 +3,8 @@
  *
  * Phase 3.2: lets the parent agent delegate a sub-task to a
  * fresh WorkerAgent whose conversation history is *not* shared
- * with the parent. The subagent runs in BUILD mode (mutating
- * allowed) regardless of the parent's mode, and returns a
+ * with the parent. The child mode follows the request type:
+ * Explore → EXPLORE, Plan → PLAN, otherwise BUILD. It returns a
  * structured {@link SubagentResult} whose `transcript` field
  * carries only the final summary — never the raw tool log —
  * so the parent's context never bloats.
@@ -13,8 +13,9 @@
  *   - `selectedFiles` is replaced with the caller-supplied
  *     `contextFiles` (default: empty). The parent cannot leak
  *     its own pin-set into the subagent.
- *   - The subagent always runs in BUILD mode and inherits the
- *     parent's `cwd` and `policy`.
+ *   - The child inherits `cwd`, `model`, `policy`, and `verbose`.
+ *     It does not inherit `yes`, allow-all, or allow rules.
+ *     Deny rules are copied. `systemPromptOverride` is dropped.
  *   - The subagent's own policy/permission engine still gates
  *     every tool call — there is no escape hatch.
  *   - If `runInBackground` is true, the spawn is fire-and-forget
@@ -23,6 +24,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { AgentContext } from "../types.js";
+import { loadConfig } from "../config.js";
 import { WorkerAgent } from "./worker-agent.js";
 import { recordTelemetry, telemetry } from "./telemetry.js";
 
@@ -98,24 +100,20 @@ export async function spawnSubagent(
     ...internalOpts,
   };
   const start = Date.now();
+  if ((parentCtx.subagentDepth ?? 0) >= 1) {
+    return {
+      success: false,
+      summary:
+        "Error: spawn_subagent is limited to depth 1. This agent is already a subagent.",
+      tokensUsed: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      toolCallCount: 0,
+      durationMs: 0,
+      type: req.type,
+      transcript: "",
+    };
+  }
   const id = `subagent_${randomUUID().slice(0, 8)}`;
-  // The subagent inherits the parent's cwd and policy but
-  // gets a *fresh* AgentContext. selectedFiles is replaced
-  // with the caller's contextFiles (default empty) so the
-  // parent cannot leak its pin-set.
-  const subagentCtx: AgentContext = {
-    task: req.task,
-    model: parentCtx.model,
-    cwd: parentCtx.cwd,
-    verbose: parentCtx.verbose,
-    selectedFiles: req.contextFiles ? [...req.contextFiles] : [],
-    systemPromptOverride: undefined, // never inherit the parent's override
-    checkCommand: undefined,
-    policy: parentCtx.policy,
-    yes: parentCtx.yes,
-    // Phase 3.2 hard rule: subagents are always mutating.
-    mode: "BUILD",
-  };
+  const subagentCtx = buildSubagentContext(req, parentCtx);
   if (req.runInBackground) {
     // Fire-and-forget. The caller polls by jobId.
     void runSubagentInBackground(id, req, subagentCtx, opts, start);
@@ -143,8 +141,8 @@ async function runSubagentInline(
   const subtask = {
     id,
     title: req.task.slice(0, 80),
-    description: req.task,
-    persona: "code" as const,
+    description: `${typeInstruction(req.type)}\n\n${req.task}`,
+    persona: personaForSubagentType(req.type),
     dependencies: [],
     files: req.contextFiles ?? [],
     status: "running" as const,
@@ -240,10 +238,13 @@ export function _resetBackgroundSubagents(): void {
  * is constructed inside `spawnSubagent`.
  *
  * Invariants locked by Phase 3.2:
- *   - `mode` is forced to 'BUILD'
+ *   - general-purpose and statusline-setup use mode 'BUILD'
+ *   - Explore uses 'EXPLORE'; Plan uses 'PLAN'
  *   - `selectedFiles` is replaced by `req.contextFiles` (or [])
- *   - `systemPromptOverride` is dropped
- *   - `cwd`, `policy`, `yes`, `model`, `verbose` are inherited
+ *   - `systemPromptOverride` and `checkCommand` are dropped
+ *   - `cwd`, `policy`, `model`, `verbose` are inherited
+ *   - `yes` is always false. Allow rules are dropped. Deny rules stay.
+ *   - `subagentDepth` is the parent depth plus one
  */
 export function buildSubagentContext(
   req: SubagentRequest,
@@ -258,9 +259,54 @@ export function buildSubagentContext(
     systemPromptOverride: undefined,
     checkCommand: undefined,
     policy: parentCtx.policy,
-    yes: parentCtx.yes,
-    mode: "BUILD",
+    yes: false,
+    mode: modeForSubagentType(req.type),
+    permissionRules: inheritedDenyRules(parentCtx),
+    subagentDepth: (parentCtx.subagentDepth ?? 0) + 1,
   };
+}
+
+function inheritedDenyRules(
+  parentCtx: AgentContext,
+): NonNullable<AgentContext["permissionRules"]> {
+  const source =
+    parentCtx.permissionRules ?? loadConfig().preferences.permissionRules;
+  const keep = (
+    rules: NonNullable<AgentContext["permissionRules"]>["bash"],
+  ) => (rules ?? []).filter((rule) => rule.decision === "deny");
+  return {
+    bash: keep(source?.bash),
+    edit: keep(source?.edit),
+  };
+}
+
+function typeInstruction(type: SubagentType): string {
+  if (type === "Explore") {
+    return "You are an Explore subagent. Read and search only. Do not edit files or run mutating commands.";
+  }
+  if (type === "Plan") {
+    return "You are a Plan subagent. Write only the plan file. Do not edit the repository.";
+  }
+  if (type === "statusline-setup") {
+    return "You are a status-line setup subagent. Change only what the task names.";
+  }
+  return "You are a general-purpose subagent. Complete only the task below.";
+}
+
+function modeForSubagentType(
+  type: SubagentType,
+): NonNullable<AgentContext["mode"]> {
+  if (type === "Explore") return "EXPLORE";
+  if (type === "Plan") return "PLAN";
+  return "BUILD";
+}
+
+function personaForSubagentType(
+  type: SubagentType,
+): "code" | "doc" | "reviewer" {
+  if (type === "Explore" || type === "Plan") return "reviewer";
+  if (type === "statusline-setup") return "doc";
+  return "code";
 }
 
 /* ──────────────────────── helpers ──────────────────────── */

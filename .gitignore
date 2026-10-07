@@ -22,3 +22,6 @@ yarn-error.log*
 graphify-out/
 .graphifyignore
 .claude/
+
+# Third-party reference checkouts. Do not commit.
+inspiration/

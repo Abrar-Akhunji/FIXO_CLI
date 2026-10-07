@@ -19,6 +19,8 @@ export interface CommandState {
   stats: SessionStats;
   isTaskRunning: boolean;
   currentRunningAgent: SingleAgent | null;
+  /** Set by `/plan` after approval. The REPL sends it once, in BUILD. */
+  pendingFollowUp?: string;
 }
 
 export interface CommandContext {

@@ -328,10 +328,8 @@ function maskKey(key: string): string {
 /**
  * On-disk cache of the live model list returned by each provider's
  * `/models` endpoint. The cache is per-provider and bounded by
- * `MODELS_CACHE_TTL_MS`. Live fetches refresh the entry; stale or
- * missing entries fall back to the registry `models[]` array with
- * a `registry-fallback` source tag so the UI can show an
- * `[unverified]` hint.
+ * `MODELS_CACHE_TTL_MS`. Live fetches refresh the entry. A missing
+ * key does not write the static registry into this cache.
  */
 export interface ProviderModelsCacheEntry {
   models: string[];
@@ -416,6 +414,40 @@ function parseModelsResponse(payload: unknown): string[] | null {
     )
     .filter((s): s is string => typeof s === "string" && s.length > 0);
   return ids.length > 0 ? ids : null;
+}
+
+/** Model ids from an OpenAI-style `{ data: [{ id }] }` catalog body. */
+export function parseProxyCatalog(payload: unknown): string[] {
+  return parseModelsResponse(payload) ?? [];
+}
+
+/**
+ * Live model ids for the FreeLLMAPI proxy. Throws when the catalog
+ * cannot be read. Does not substitute a built-in provider list.
+ */
+export async function fetchProxyCatalog(
+  apiUrl: string,
+  apiKey: string,
+): Promise<string[]> {
+  const root = apiUrl.replace(/\/+$/, "");
+  const resp = await fetch(`${root}/models`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!resp.ok) {
+    throw new Error(`Catalog request failed (${resp.status})`);
+  }
+  let payload: unknown;
+  try {
+    payload = await resp.json();
+  } catch {
+    throw new Error("Catalog response was not JSON");
+  }
+  const ids = parseProxyCatalog(payload);
+  if (ids.length === 0) {
+    throw new Error("Catalog response had no model ids");
+  }
+  return ids;
 }
 
 function getModelHintsPath(): string {
@@ -666,76 +698,27 @@ export const ProvidersManager = {
    * wider stack frame.
    *
    * Resolution order:
-   *   1. live fetch (success → cache + return `source: 'live'`).
-   *   2. fresh cache hit (within TTL) → `source: 'cache'`.
-   *   3. registry `models[]` fallback → `source: 'registry-fallback'`.
+   *   1. no key → empty list, no fetch, no cache write.
+   *   2. live fetch (success → cache + return `source: 'live'`).
+   *   3. fresh live cache → `source: 'cache'`.
+   *   4. otherwise empty `unavailable`. The static registry is not
+   *      offered as a selectable catalog.
    *
    * Never throws — failure modes degrade through the layers above.
    */
   async fetchRemoteModels(name: string): Promise<{
     models: string[];
-    source: "live" | "cache" | "registry-fallback";
+    source: "live" | "cache" | "no-key" | "unavailable";
     fetchedAt: string;
   }> {
+    const nowIso = new Date().toISOString();
     const def = this.getDefinition(name);
     if (!def) {
-      const fallback = this.getCachedModels(name);
-      if (fallback) {
-        return {
-          models: fallback.models,
-          source: "cache",
-          fetchedAt: fallback.fetchedAt,
-        };
-      }
-      return {
-        models: [],
-        source: "registry-fallback",
-        fetchedAt: new Date().toISOString(),
-      };
+      return { models: [], source: "unavailable", fetchedAt: nowIso };
     }
 
-    const registryFallback = (): {
-      models: string[];
-      source: "registry-fallback";
-      fetchedAt: string;
-    } => {
-      const now = new Date().toISOString();
-      // Persist a synthetic entry tagged registry-fallback so the
-      // /model picker can render the `[unverified]` hint without
-      // having to know whether a live fetch was ever attempted.
-      const store = loadModelsCache();
-      store[name] = {
-        models: def.models.slice(),
-        fetchedAt: now,
-        source: "registry-fallback",
-      };
-      // safe: cache persistence is a perf optimisation only — losing
-      // it means the next /model call re-runs the fallback, never
-      // user-visible breakage. ENOSPC / read-only $HOME are the only
-      // realistic causes.
-      try {
-        saveModelsCache(store);
-      } catch {
-        /* safe: see above */
-      }
-      return {
-        models: def.models.slice(),
-        source: "registry-fallback",
-        fetchedAt: now,
-      };
-    };
-
-    // No key on disk → cannot live-fetch; fall through to cache → registry.
     if (!this.has(name)) {
-      const cached = this.getCachedModels(name);
-      if (cached) {
-        return {
-          models: cached.models,
-          source: "cache",
-          fetchedAt: cached.fetchedAt,
-        };
-      }
-      return registryFallback();
+      return { models: [], source: "no-key", fetchedAt: nowIso };
     }
 
     const liveResult = await this.withDirectCredential(name, async (cred) => {
@@ -762,14 +745,14 @@ export const ProvidersManager = {
     if (liveResult) return liveResult;
 
     const cached = this.getCachedModels(name);
-    if (cached) {
+    if (cached?.source === "live" && cached.models.length > 0) {
       return {
         models: cached.models,
         source: "cache",
         fetchedAt: cached.fetchedAt,
       };
     }
-    return registryFallback();
+    return { models: [], source: "unavailable", fetchedAt: nowIso };
   },
 
   /**

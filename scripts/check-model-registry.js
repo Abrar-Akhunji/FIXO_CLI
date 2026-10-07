@@ -39,11 +39,11 @@ function loadRegistry() {
   // Crude block matcher — looks for `{ … name: '…' … models: [...] … }`
   // delimited by `},` between top-level object literals in the const
   // array. Sufficient for a manually-run script.
-  const blockRe = /\{\s*name:\s*'([^']+)'[\s\S]*?baseUrl:\s*'([^']+)'[\s\S]*?models:\s*\[([\s\S]*?)\][\s\S]*?\}/g;
+  const blockRe = /\{\s*name:\s*['"]([^'"]+)['"][\s\S]*?baseUrl:\s*['"]([^'"]+)['"][\s\S]*?models:\s*\[([\s\S]*?)\][\s\S]*?\}/g;
   let m;
   while ((m = blockRe.exec(src))) {
     const [, name, baseUrl, modelsLit] = m;
-    const models = [...modelsLit.matchAll(/'([^']+)'/g)].map((mm) => mm[1]);
+    const models = [...modelsLit.matchAll(/['"]([^'"]+)['"]/g)].map((mm) => mm[1]);
     if (name && baseUrl && models.length > 0) {
       out.push({ name, baseUrl, models });
     }

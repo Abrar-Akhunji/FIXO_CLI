@@ -1,6 +1,6 @@
 /**
  * Single-Agent with Tool Calling — replaces the 7-stage pipeline.
- * One agent, 5 tools, 2–3 LLM calls for most tasks instead of 6+.
+ * One agent, the tool catalogue, and a short tool loop for most tasks.
  *
  * Architecture:
  *   User Input → Complexity Check → Agentic Tool Loop → Result
@@ -41,11 +41,14 @@ import {
   recordFixoMdLoad,
 } from "../context/fixo-md.js";
 import { loadTodoList, summariseTodoList } from "../context/todo.js";
+import { skillsBlockForTask } from "./skills.js";
+import { scopedDecisionForTool } from "./permissions.js";
 import { C } from "../ui/colors.js";
 import {
   MarkdownStreamRenderer,
   renderMarkdown,
 } from "../ui/markdown-stream.js";
+import { consumeAssistantWorktreeText } from "../runtime/worktree.js";
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
@@ -117,6 +120,31 @@ const colors = {
   gray: C.SNOW3,
   magenta: C.PURPLE,
 };
+
+/**
+ * Apply worktree annotations in BUILD, then strip them so the
+ * stored and displayed text does not run them a second time.
+ * PLAN, EXPLORE, SCOUT, and READ_ONLY only strip.
+ */
+function publishAssistantText(
+  text: string,
+  cwd: string,
+  mode: string | undefined,
+): string {
+  const consumed = consumeAssistantWorktreeText(cwd, text, mode);
+  for (const result of consumed.results) {
+    if (result.ok) {
+      console.log(
+        `${colors.dim}Worktree ready: ${result.detail}${colors.reset}`,
+      );
+    } else if (result.error) {
+      console.log(
+        `${colors.yellow}Worktree failed: ${result.error}${colors.reset}`,
+      );
+    }
+  }
+  return consumed.text;
+}
 
 export function evaluateInputIntent(task: string): "CHAT_ONLY" | "MUTATION" {
   const cleanTask = task.toLowerCase().trim();
@@ -241,32 +269,45 @@ function buildUserContent(context: AgentContext): string | ChatContentBlock[] {
   return blocks;
 }
 
-function buildSystemPrompt(
+export function describeActiveTools(mode?: string): string {
+  return getActiveTools(mode)
+    .map((tool) => {
+      const summary = (tool.function.description ?? "").split("\n")[0]?.trim() ?? "";
+      const clipped = summary.length > 160 ? `${summary.slice(0, 157)}...` : summary;
+      return `- **${tool.function.name}** — ${clipped}`;
+    })
+    .join("\n");
+}
+
+export function buildSystemPrompt(
   repoMap: string,
   context: AgentContext,
   enableTools = true,
-  intent: "CHAT_ONLY" | "MUTATION" | "TRIVIAL" = "MUTATION"
+  intent: "CHAT_ONLY" | "MUTATION" | "TRIVIAL" = "MUTATION",
+  toolMode?: string,
 ): string {
   const parts: string[] = [];
   if (enableTools) {
+    const modeNote =
+      toolMode === "PLAN"
+        ? `\nPLAN mode is active. The only file you may write is \`.fixo/last-plan.json\`. Mutating shell commands are rejected.`
+        : "";
     parts.push(
       `You are FixO CLI, an autonomous AI coding agent. You help developers by reading, writing, and modifying code files in their workspace.`,
       ``,
       `## Capabilities`,
       `You have access to these tools:`,
-      `- **read_file(path)** — Read a file's contents`,
-      `- **write_file(path, content)** — Create or overwrite a file`,
-      `- **run_command(command)** — Execute a shell command (npm test, git status, etc.)`,
-      `- **search_code(query)** — Search for patterns in the codebase`,
-      `- **list_dir(path)** — List directory contents`,
+      describeActiveTools(toolMode),
+      modeNote,
       ``,
       `## Guidelines`,
       `1. ALWAYS read existing files before modifying them to understand current code.`,
       `2. For new files, write complete contents — never use placeholders like "// ... rest of the file". For edits to existing files, follow the Editing Discipline below.`,
       `3. After making changes, run the verification command if one is configured.`,
       `4. Keep your text responses concise. Focus on what you did and why.`,
-      `5. If the task is ambiguous, ask a clarifying question instead of guessing.`,
+      `5. If the task is ambiguous, call ask_user_question. A question written only in prose ends the turn.`,
       `6. Preserve existing code comments and formatting unless asked to change them.`,
+      `7. Do not stop while todo items are still pending or in progress. Finish them or mark them done.`,
       ``,
       `## Editing Discipline`,
       `Pick the narrowest tool that fits the change. Rewriting a file you only need to tweak burns tokens, defeats the LSP pre-save granularity, and risks clobbering concurrent edits.`,
@@ -305,6 +346,11 @@ function buildSystemPrompt(
   }
 
   if (intent === "MUTATION") {
+    const skills = skillsBlockForTask(context.cwd, context.task);
+    if (skills.length > 0) {
+      parts.push(``, `## Skills`, skills);
+    }
+
     // Add FIXO.md block
     const { block: fixoBlock, result: fixoResult } =
       buildProjectInstructionsBlock(context.cwd);
@@ -455,7 +501,11 @@ export class SingleAgent {
         totalUsage,
         this.abortController.signal,
       );
-      const fullResponse = streamRes.responseText;
+      const fullResponse = publishAssistantText(
+        streamRes.responseText,
+        context.cwd,
+        context.mode,
+      );
       conversation.addTurn(context.task, fullResponse);
 
       return {
@@ -520,9 +570,11 @@ export class SingleAgent {
       }
     }
 
+    const role = classifyExecutionRole(context.task);
+    const toolMode = role === "READ_ONLY" ? "READ_ONLY" : context.mode;
     const systemPrompt = referencesBlock
-      ? `${buildSystemPrompt(repoMap, context, true, "MUTATION")}\n\n${referencesBlock}`
-      : buildSystemPrompt(repoMap, context, true, "MUTATION");
+      ? `${buildSystemPrompt(repoMap, context, true, "MUTATION", toolMode)}\n\n${referencesBlock}`
+      : buildSystemPrompt(repoMap, context, true, "MUTATION", toolMode);
 
     // Auto-compact before building messages if context is near limit
     await this.autoCompactIfNeeded(
@@ -582,13 +634,7 @@ export class SingleAgent {
       // Staging is best-effort cleanup; never block the run.
     }
 
-    // Pillar 5 / Protection 2 — classify the task and gate
-    // mutation tools. Read-only / review / analysis tasks run
-    // without write_file, apply_patch, etc. visible to the LLM.
-    const role = classifyExecutionRole(context.task);
-    const activeTools = getActiveTools(
-      role === "READ_ONLY" ? "READ_ONLY" : context.mode,
-    );
+    const activeTools = getActiveTools(toolMode);
     if (role === "READ_ONLY") {
       console.log(
         `${colors.dim}🛡  Read-only role — mutation tools hidden.${colors.reset}`,
@@ -600,8 +646,14 @@ export class SingleAgent {
     // detector is not warning, the budget silently lifts to
     // `hardLimit`. The hard limit is the absolute ceiling.
     const budget = safety.toolCalls;
-    let toolCallLimit = Math.max(1, budget.softLimit);
-    const toolCallHardLimit = Math.max(toolCallLimit, budget.hardLimit);
+    const turnCap =
+      typeof context.maxTurns === "number" && context.maxTurns > 0
+        ? Math.floor(context.maxTurns)
+        : null;
+    let toolCallLimit = Math.max(1, turnCap ?? budget.softLimit);
+    const toolCallHardLimit = turnCap
+      ? toolCallLimit
+      : Math.max(toolCallLimit, budget.hardLimit);
     /**
      * Investigation budget — applies when the agent has only invoked
      * read-only tools so far. Audits, reviews, and "find vulnerabilities"
@@ -668,6 +720,12 @@ export class SingleAgent {
     const indicator = this.activeAnimation!;
 
     let lastUsage: any = null;
+    let todoReminderUsed = false;
+
+    const openTodos = () =>
+      loadTodoList(context.cwd).items.filter(
+        (item) => item.status === "pending" || item.status === "in_progress",
+      );
 
     try {
       while (toolCallCount < toolCallLimit) {
@@ -678,6 +736,7 @@ export class SingleAgent {
         // (hardLimit * investigationMultiplier) while only read-only
         // tools have fired.
         if (
+          turnCap === null &&
           budget.autoExtend &&
           toolCallCount + 1 >= toolCallLimit &&
           pendingSafetyDirective === null
@@ -747,6 +806,7 @@ export class SingleAgent {
         }
 
         let result;
+        let turnOverflowRetries = 0;
         try {
           result = await this.client.chat(messages, context.model, {
             tools: activeTools,
@@ -755,8 +815,26 @@ export class SingleAgent {
           });
           resolvedModel = result.model;
         } catch (err: any) {
-          // Handle context overflow — auto-compact and retry once
+          // Handle context overflow — auto-compact and retry
           if (ConversationManager.isContextOverflowError(err)) {
+            turnOverflowRetries += 1;
+            if (turnOverflowRetries > 2) {
+              console.log(
+                `${colors.yellow}⚠ Context overflow persisted after compaction. Performing emergency pruning.${colors.reset}`,
+              );
+              conversation.emergencyPruneToTarget(conversation.getContextLimit() * 0.5);
+              messages.length = 0;
+              messages.push(
+                { role: "system", content: systemPrompt },
+                ...conversation.getMessages(),
+                { role: "user", content: buildUserContent(context) },
+              );
+              if (turnOverflowRetries > 3) {
+                throw new Error("Context window overflow: conversation could not be reduced below model limit.");
+              }
+              continue;
+            }
+
             indicator.setPhase({
               id: "reasoning",
               label: "Context full…",
@@ -801,11 +879,51 @@ export class SingleAgent {
         // No tool calls → potentially run the auto-verifier, then
         // either continue the loop (one repair pass) or return.
         if (!result.tool_calls || result.tool_calls.length === 0) {
-          const response = result.content ?? "";
+          const response = publishAssistantText(
+            result.content ?? "",
+            context.cwd,
+            role === "READ_ONLY" ? "READ_ONLY" : context.mode,
+          );
 
           // Print the response (already received in non-streaming mode)
           if (response) {
             renderMarkdown(response);
+          }
+
+          const trackTodos = toolMode === "BUILD" || toolMode === undefined;
+          const pendingTodos = trackTodos ? openTodos() : [];
+          if (pendingTodos.length > 0 && !todoReminderUsed) {
+            todoReminderUsed = true;
+            messages.push({ role: "assistant", content: response });
+            messages.push({
+              role: "user",
+              content:
+                `Open todos remain (${pendingTodos.length}). Finish them or mark them done before you stop.\n` +
+                pendingTodos
+                  .map((item) => `- ${item.id}: ${item.content}`)
+                  .join("\n"),
+            });
+            toolCallCount += 1;
+            continue;
+          }
+          if (pendingTodos.length > 0 && todoReminderUsed) {
+            indicator.stop();
+            this.activeAnimation = null;
+            const incomplete = `incomplete: open todos remain`;
+            console.log(
+              `${colors.yellow}⚠  ${incomplete}${colors.reset}`,
+            );
+            conversation.addTurn(context.task, incomplete);
+            taskSession.finish("error", incomplete);
+            return {
+              success: false,
+              response: incomplete,
+              modifiedFiles,
+              tokensUsed: totalUsage,
+              toolCallCount,
+              durationMs: Date.now() - startTime,
+              model: resolvedModel,
+            };
           }
 
           // Phase 2.2 — automatic verifier.
@@ -839,6 +957,30 @@ export class SingleAgent {
             }
             // outcome === 'passing' or 'no-command' → fall through
             // to the success return below.
+          } else if (
+            verifyGate.reason === "budget-exhausted" &&
+            autoVerifyRepairsUsed > 0 &&
+            modifiedFiles.length > 0
+          ) {
+            const { runProjectTests } = await import("../test-runner.js");
+            const verifyOutput = runProjectTests(context.cwd);
+            if (classifyVerifyOutput(verifyOutput) === "failing") {
+              indicator.stop();
+              this.activeAnimation = null;
+              const incomplete = `incomplete: verification failed`;
+              console.log(`${colors.yellow}⚠  ${incomplete}${colors.reset}`);
+              conversation.addTurn(context.task, incomplete);
+              taskSession.finish("error", incomplete);
+              return {
+                success: false,
+                response: incomplete,
+                modifiedFiles,
+                tokensUsed: totalUsage,
+                toolCallCount,
+                durationMs: Date.now() - startTime,
+                model: resolvedModel,
+              };
+            }
           }
 
           indicator.stop();
@@ -861,15 +1003,22 @@ export class SingleAgent {
         }
 
         // Execute tool calls (same as non-streaming)
+        const assistantText = result.content
+          ? publishAssistantText(
+              result.content,
+              context.cwd,
+              role === "READ_ONLY" ? "READ_ONLY" : context.mode,
+            )
+          : result.content;
         const assistantMsg: ChatMessage = {
           role: "assistant",
-          content: result.content,
+          content: assistantText,
           tool_calls: result.tool_calls,
         };
         messages.push(assistantMsg);
 
-        if (result.content) {
-          console.log(`${colors.dim}${result.content}${colors.reset}`);
+        if (assistantText) {
+          console.log(`${colors.dim}${assistantText}${colors.reset}`);
         }
 
         for (const toolCall of result.tool_calls) {
@@ -999,6 +1148,14 @@ export class SingleAgent {
             console.log(
               `  ${colors.red}✗ Permission denied for ${toolCall.function.name}${colors.reset}`,
             );
+            const ruleDenied =
+              scopedDecisionForTool(
+                toolCall.function.name,
+                parsedArgs,
+                context.permissionRules,
+              ) === "deny";
+            const nonInteractive =
+              !ruleDenied && !rl && !context.yes && !this.allowAll;
             dashboard.emit({
               type: "tool-finish",
               tool: toolCall.function.name,
@@ -1009,7 +1166,12 @@ export class SingleAgent {
             event = {
               tool: toolCall.function.name,
               args: parsedArgs,
-              result: `Error: User denied permission to execute ${toolCall.function.name}.`,
+              result: ruleDenied
+                ? `Error: ${toolCall.function.name} denied by permission rule. Deny wins over allow and over --yes.`
+                : nonInteractive
+                  ? `Error: Mutating tool ${toolCall.function.name} is denied in a non-interactive session. Re-run with --yes to allow workspace edits.`
+                  : `Error: User denied permission to execute ${toolCall.function.name}.`,
+              ok: false,
               isWrite: false,
             };
           } else {
@@ -1068,13 +1230,18 @@ export class SingleAgent {
                 policy: context.policy,
                 allowWithoutPrompt: context.yes,
                 safety,
+                model: context.model,
+                mode: context.mode,
+                rl,
+                subagentDepth: context.subagentDepth,
+                permissionRules: context.permissionRules,
               },
             );
             dashboard.emit({
               type: "tool-finish",
               tool: toolCall.function.name,
               target: parsedArgs.path ?? parsedArgs.from ?? "",
-              state: event.result.startsWith("Error:") ? "failed" : "completed",
+              state: event.ok ? "completed" : "failed",
               durationMs: Date.now() - toolStart,
             });
           }
@@ -1119,23 +1286,20 @@ export class SingleAgent {
       indicator.stop();
       this.activeAnimation = null;
 
+      const limitResponse = `incomplete: tool call limit reached (${toolCallLimit})`;
       console.log(
-        `${colors.yellow}⚠  Tool call limit reached (${toolCallLimit}).${colors.reset}`,
+        `${colors.yellow}⚠  ${limitResponse}${colors.reset}`,
       );
 
-      conversation.addTurn(
-        context.task,
-        `Task processed with ${toolCallCount} tool calls.`,
-      );
+      conversation.addTurn(context.task, limitResponse);
       if (lastUsage && lastUsage.total_tokens) {
         conversation.syncProviderTokens(lastUsage.total_tokens);
       }
 
-      const limitResponse = `Completed with ${toolCallCount} tool calls (limit reached).`;
-      taskSession.finish("success", limitResponse);
+      taskSession.finish("error", limitResponse);
 
       return {
-        success: true,
+        success: false,
         response: limitResponse,
         modifiedFiles,
         tokensUsed: totalUsage,
@@ -1144,13 +1308,28 @@ export class SingleAgent {
         model: resolvedModel,
       };
     } catch (error: unknown) {
-      if (this.markedForCancellation) {
-        indicator.markCancelled();
-      } else {
-        indicator.stop();
-      }
-      this.activeAnimation = null;
       const errorMsg = error instanceof Error ? error.message : String(error);
+      if (
+        this.markedForCancellation ||
+        errorMsg === "Task cancelled by user."
+      ) {
+        if (this.markedForCancellation) indicator.markCancelled();
+        else indicator.stop();
+        this.activeAnimation = null;
+        const incomplete = `incomplete: cancelled`;
+        taskSession.finish("error", incomplete);
+        return {
+          success: false,
+          response: incomplete,
+          modifiedFiles,
+          tokensUsed: totalUsage,
+          toolCallCount,
+          durationMs: Date.now() - startTime,
+          model: resolvedModel,
+        };
+      }
+      indicator.stop();
+      this.activeAnimation = null;
       taskSession.finish("error", errorMsg);
       throw error;
     }
@@ -1206,6 +1385,13 @@ export class SingleAgent {
       return true;
     }
 
+    // PLAN mode is enforced inside executeTool, including shell
+    // writes and the plan-file exception. Do not prompt here, and
+    // do not let --yes skip that gate by denying the call first.
+    if (context?.mode === "PLAN") {
+      return true;
+    }
+
     let isOutsideWorkspace = false;
     let resolvedOutsidePath: string | undefined;
     const guard = new WorkspaceGuard(workspaceRoot);
@@ -1223,12 +1409,30 @@ export class SingleAgent {
       }
     }
 
+    // Config rules are decided before --yes and before the
+    // non-interactive deny. Deny always blocks. An allow inside
+    // the workspace skips the prompt, including one-shot runs.
+    const scoped = scopedDecisionForTool(name, args, context?.permissionRules);
+    if (scoped === "deny") return false;
+    if (scoped === "allow" && !isOutsideWorkspace) return true;
+
+    // One-shot and other sessions without a readline must not sit
+    // on an invisible prompt. Deny the mutation and let the model
+    // read the error. --yes and session allow-all still proceed.
+    if (!rl && !allowWithoutPrompt && !this.allowAll) {
+      return false;
+    }
+
     if (!isOutsideWorkspace && (allowWithoutPrompt || this.allowAll)) {
       return true;
     }
 
     if (rl) rl.pause();
 
+    const { holdSessionScreen, releaseSessionScreen } = await import(
+      "../ui/session-screen.js"
+    );
+    holdSessionScreen();
     try {
       const message = formatPermissionPrompt(name, args);
       const options: any[] = [
@@ -1260,6 +1464,7 @@ export class SingleAgent {
       }
       return isApproved;
     } finally {
+      releaseSessionScreen();
       if (rl) rl.resume();
     }
   }
@@ -1402,7 +1607,11 @@ export class SingleAgent {
       totalUsage,
       this.abortController.signal,
     );
-    const fullResponse = streamRes.responseText;
+    const fullResponse = publishAssistantText(
+      streamRes.responseText,
+      context.cwd,
+      context.mode,
+    );
     conversation.addTurn(task, fullResponse);
 
     return {

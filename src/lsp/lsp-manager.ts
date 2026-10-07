@@ -152,10 +152,17 @@ export class LspManager {
     }
   }
 
-  async getClientAndSync(filePath: string): Promise<LspClient | null> {
+  async getClientAndSync(
+    filePath: string,
+    stagedContent?: string,
+  ): Promise<LspClient | null> {
     const client = await this.getOrStartClient(filePath);
     if (client) {
-      this.syncFileFromDisk(filePath, client);
+      if (typeof stagedContent === "string") {
+        client.syncFile(filePath, stagedContent);
+      } else {
+        this.syncFileFromDisk(filePath, client);
+      }
     }
     return client;
   }

@@ -3,17 +3,23 @@ import * as assert from "node:assert";
 import { getActiveTools } from "../agent/tool-executor.js";
 
 test("tool filtering works for different modes", async (t) => {
-  await t.test("PLAN mode restricts to read-only tools", () => {
+  await t.test("PLAN mode lists the plan-file tools and hides destructive writes", () => {
     const tools = getActiveTools("PLAN");
     const toolNames = tools.map((t) => t.function.name);
     // PLAN mode should only allow read-only tools
     assert.ok(toolNames.includes("read_file"));
     assert.ok(toolNames.includes("search_code"));
     assert.ok(toolNames.includes("web_fetch"));
-    // Write and command tools must be excluded
-    assert.ok(!toolNames.includes("write_file"));
-    assert.ok(!toolNames.includes("run_command"));
+    assert.ok(toolNames.includes("ask_user_question"));
+    assert.ok(toolNames.includes("run_command"));
+    assert.ok(toolNames.includes("write_file"));
+    assert.ok(toolNames.includes("str_replace"));
+    // Destructive and git writes stay hidden. The executor still
+    // rejects every write that is not the plan file.
     assert.ok(!toolNames.includes("delete_file"));
+    assert.ok(!toolNames.includes("commit_changes"));
+    assert.ok(!toolNames.includes("apply_patch"));
+    assert.ok(!toolNames.includes("spawn_subagent"));
   });
 
   await t.test("BUILD mode includes standard tools", () => {

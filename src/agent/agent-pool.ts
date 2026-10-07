@@ -101,7 +101,8 @@ export function computePartialCommitPlan(
 export class AgentPool {
   private concurrencyLimit: number;
   private activeRuns = 0;
-  private worker: WorkerAgent;
+  private activeWorkers = new Set<WorkerAgent>();
+  public worker?: WorkerAgent;
   private subtaskBudget: number;
   private maxAttempts: number;
 
@@ -116,7 +117,13 @@ export class AgentPool {
     this.concurrencyLimit = concurrencyLimit;
     this.subtaskBudget = subtaskBudget;
     this.maxAttempts = maxAttempts;
-    this.worker = new WorkerAgent();
+  }
+
+  /** Abort all currently running workers in the pool. */
+  public abort(): void {
+    for (const worker of this.activeWorkers) {
+      worker.abort();
+    }
   }
 
   private renderProgressDashboard(subtasks: Subtask[]): void {
@@ -291,13 +298,20 @@ export class AgentPool {
             else if (task.persona === "doc") budget = 80;
           }
 
-          const res = await this.worker.run(
-            context,
-            task,
-            budget,
-            undefined,
-            workspaceManifest,
-          );
+          const worker = this.worker ?? new WorkerAgent(context.verbose);
+          this.activeWorkers.add(worker);
+          let res;
+          try {
+            res = await worker.run(
+              context,
+              task,
+              budget,
+              undefined,
+              workspaceManifest,
+            );
+          } finally {
+            this.activeWorkers.delete(worker);
+          }
 
           if (res.tokensUsed) {
             this.tokensUsed.prompt_tokens += res.tokensUsed.prompt_tokens;

@@ -8,6 +8,8 @@ import * as contextCmds from "./context-commands.js";
 
 export const commandRegistry: Record<string, CommandHandler> = {
   "/session": sessionCmds.sessionCommand,
+  "/resume": sessionCmds.resumeCommand,
+  "/rewind": sessionCmds.rewindCommand,
   "/rename": sessionCmds.renameCommand,
   "/snapshot": sessionCmds.snapshotCommand,
 

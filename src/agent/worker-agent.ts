@@ -15,6 +15,10 @@ import { workspaceLockManager } from "../workspace-lock.js";
 import { logTelemetry } from "./telemetry.js";
 import { checkPermission } from "./permissions.js";
 import {
+  holdSessionScreen,
+  releaseSessionScreen,
+} from "../ui/session-screen.js";
+import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
   toSafetyAlertDirective,
@@ -726,6 +730,9 @@ export class WorkerAgent {
                   allowWithoutPrompt: context.yes,
                   client: this.client,
                   model: context.model,
+                  mode: context.mode,
+                  subagentDepth: context.subagentDepth,
+                  permissionRules: context.permissionRules,
                 },
               );
 
@@ -733,8 +740,11 @@ export class WorkerAgent {
                 id: toolCallId,
                 tool: toolCall.function.name,
                 arguments: parsedArgs,
-                status: "completed",
+                status: event.ok ? "completed" : "failed",
                 newContent: event.result,
+                ...(event.ok
+                  ? {}
+                  : { error: String(event.result ?? "").slice(0, 500) }),
               });
             } catch (err: any) {
               await logTelemetry({
@@ -816,21 +826,22 @@ export class WorkerAgent {
       }
     }
 
-    if (!isOutsideWorkspace && this.allowAll) return true;
-
     const check = checkPermission(
       name,
       args as Record<string, unknown>,
       context?.cwd ?? process.cwd(),
       context?.policy ?? "shell-confirm",
+      context?.permissionRules,
     );
     if (check.decision === "deny") return false;
+    if (!isOutsideWorkspace && this.allowAll) return true;
     if (!isOutsideWorkspace && context?.yes) return true;
     if (!isOutsideWorkspace && check.decision === "allow") return true;
     if (action === "read") return true;
 
     if (!rl) return false; // If needs confirmation but no interactive RL, deny.
 
+    holdSessionScreen();
     return new Promise((resolve) => {
       let promptMsg = `[Worker] Allow executing tool "${name}" with args ${JSON.stringify(args)}? (y/n/all) `;
       if (isOutsideWorkspace) {
@@ -862,6 +873,7 @@ export class WorkerAgent {
           this.allowAll = true;
         }
         resolve(isApproved);
+        releaseSessionScreen();
       });
     });
   }

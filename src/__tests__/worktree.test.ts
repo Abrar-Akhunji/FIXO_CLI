@@ -19,6 +19,7 @@ import {
   parseWorktreeAnnotations,
   removeWorktree,
   stripWorktreeAnnotations,
+  consumeAssistantWorktreeText,
 } from "../runtime/worktree.js";
 
 function mkTmpCwd(): string {
@@ -114,6 +115,38 @@ test("stripWorktreeAnnotations: removes the annotation tokens", () => {
   assert.ok(!/\[worktree:/.test(stripped));
   assert.match(stripped, /Hello/);
   assert.match(stripped, /world/);
+});
+
+test("consumeAssistantWorktreeText applies in BUILD and only strips otherwise", () => {
+  const cwd = mkTmpCwd();
+  try {
+    makeRepo(cwd);
+    const raw = "Done.\n[worktree:create branch=feature-a]\n";
+    const planned = consumeAssistantWorktreeText(cwd, raw, "PLAN");
+    assert.equal(planned.results.length, 0);
+    assert.equal(/\[worktree:/.test(planned.text), false);
+    assert.equal(
+      fs.existsSync(path.join(cwd, ".fixo", "worktrees", "feature-a")),
+      false,
+    );
+
+    const built = consumeAssistantWorktreeText(cwd, raw, "BUILD");
+    assert.equal(built.results.length, 1);
+    assert.equal(built.results[0]?.ok, true);
+    assert.equal(/\[worktree:/.test(built.text), false);
+    assert.equal(
+      fs.existsSync(path.join(cwd, ".fixo", "worktrees", "feature-a")),
+      true,
+    );
+
+    const omitted = consumeAssistantWorktreeText(
+      cwd,
+      "[worktree:create branch=feature-b]",
+    );
+    assert.equal(omitted.results[0]?.ok, true);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("stripWorktreeAnnotations: idempotent on text without annotations", () => {

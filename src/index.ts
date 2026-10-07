@@ -15,9 +15,8 @@ process.on("warning", (warning) => {
  * 2. Load global config (~/.fixocli/config.json)
  * 3. If first run → run setup wizard
  * 4. Load project config (.freellmapi.yml) if present
- * 5. Ensure proxy server is running on the configured port
- * 6. Print the session header
- * 7. Launch interactive REPL
+ * 5. Print the session header
+ * 6. Launch interactive REPL
  */
 import fs from "fs";
 import path from "path";
@@ -32,6 +31,10 @@ import {
   renderLogo,
   renderSessionHeader,
 } from "./ui/index.js";
+import {
+  headlessExitCode,
+  headlessStatusLine,
+} from "./runtime/headless-contract.js";
 
 /* ──────────────────────── CLI Args ──────────────────────── */
 
@@ -45,6 +48,8 @@ function parseArgs(): {
   task?: string;
   resume?: string;
   sandboxMode?: "guard" | "os-sandbox";
+  diagnose: boolean;
+  maxTurns?: number;
 } {
   const args = process.argv.slice(2);
   const result = {
@@ -52,11 +57,13 @@ function parseArgs(): {
     version: false,
     verbose: false,
     yes: false,
+    diagnose: false,
     model: undefined as string | undefined,
     port: undefined as number | undefined,
     task: undefined as string | undefined,
     resume: undefined as string | undefined,
     sandboxMode: undefined as "guard" | "os-sandbox" | undefined,
+    maxTurns: undefined as number | undefined,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -90,6 +97,18 @@ function parseArgs(): {
       case "-r":
         if (i + 1 < args.length) result.resume = args[++i];
         break;
+      case "--max-turns": {
+        const raw = i + 1 < args.length ? args[++i] : "";
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1) {
+          console.error(
+            `--max-turns requires a positive integer, received '${raw || ""}'.`,
+          );
+          process.exit(1);
+        }
+        result.maxTurns = n;
+        break;
+      }
       case "--task":
       case "-t":
         if (i + 1 < args.length && !result.task) {
@@ -109,6 +128,10 @@ function parseArgs(): {
             process.exit(1);
           }
         }
+        break;
+      case "--diagnose":
+      case "doctor":
+        result.diagnose = true;
         break;
       default:
         // If no flag, treat rest as task
@@ -140,8 +163,10 @@ ${C.BOLD}OPTIONS${C.RESET}
   -m, --model <name>  Set the model (default: auto)
   -p, --port <port>   Proxy server port (default: 3001)
   -t, --task <text>   Run a one-shot task
-  -r, --resume <id>   Resume a previous session snapshot by id
+  -r, --resume <id>   Resume a saved session in BUILD
+  --max-turns <n>     Stop after N tool calls. Hitting the cap is incomplete
   --sandbox-mode <m>  Override session sandbox: 'guard' (default) or 'os-sandbox'
+  -d, --diagnose      Run system telemetry diagnostics (or: fixo doctor)
 
 ${C.BOLD}INTERACTIVE COMMANDS${C.RESET}
   /help               Show all commands
@@ -153,13 +178,15 @@ ${C.BOLD}INTERACTIVE COMMANDS${C.RESET}
   /plan <task>        Generate a structured execution plan
   /run-plan           Execute the last saved plan
   /diff               Show git diff
-  /undo               Undo last AI change
+  /undo               Roll back files. Does not rewind the conversation
   /snapshot [label]   Create a named git snapshot
   /log                Show recent git commits
   /clear              Clear conversation
   /compact            Summarise & compress conversation
   /stats              Show usage statistics
   /session            Manage sessions (list|load|new)
+  /resume [id]        List or reload a saved session for this workspace
+  /rewind <turn>      Drop later conversation turns. Does not change files
   /runs               List recent FixO task ledgers
   /show-run <id>      Show details of a specific run
   /review             Review current git diff
@@ -283,6 +310,37 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (args.diagnose) {
+    const { diagnoseFailures } = await import("./agent/telemetry.js");
+    const hints = diagnoseFailures();
+    console.log(`\n${C.LAVA}${C.BOLD}FixO System Diagnostics${C.RESET}\n`);
+    if (hints.length === 0) {
+      console.log(
+        `${C.GREEN}✔ No systemic failures detected in recent telemetry.${C.RESET}\n`,
+      );
+    } else {
+      for (const hint of hints) {
+        const icon =
+          hint.severity === "error"
+            ? "✖"
+            : hint.severity === "warn"
+              ? "⚠"
+              : "ℹ";
+        const color =
+          hint.severity === "error"
+            ? C.RED
+            : hint.severity === "warn"
+              ? C.YELLOW
+              : C.SNOW4;
+        console.log(
+          `${color}${icon} [${hint.severity.toUpperCase()}] ${hint.summary} (count: ${hint.count})${C.RESET}`,
+        );
+        console.log(`  Suggestion: ${hint.suggestion}\n`);
+      }
+    }
+    process.exit(0);
+  }
+
   // ──── Step 1: Load config ────
   let config = loadConfig();
 
@@ -333,6 +391,35 @@ async function main(): Promise<void> {
         console.warn(
           `${C.YELLOW}⚠ Warning: API Key appears invalid (HTTP ${res.status}). You may need to re-run setup.${C.RESET}`,
         );
+      } else if (res.ok) {
+        const payload = await res.json().catch(() => null);
+        const { parseProxyCatalog } =
+          await import("./agent/providers-manager.js");
+        const ids = parseProxyCatalog(payload);
+        if (ids.length > 0) {
+          const known = new Set(ids);
+          const stale = (name?: string) =>
+            Boolean(name && name !== "auto" && !known.has(name));
+          let changed = false;
+          if (stale(config.defaultModel)) {
+            config.defaultModel = "auto";
+            changed = true;
+          }
+          if (config.lastSession && stale(config.lastSession.model)) {
+            config.lastSession = {
+              ...config.lastSession,
+              model: "auto",
+              updatedAt: new Date().toISOString(),
+            };
+            changed = true;
+          }
+          if (changed) {
+            saveConfig(config);
+            console.log(
+              `${C.YELLOW}Saved model is not in the proxy catalog. Switched to auto.${C.RESET}`,
+            );
+          }
+        }
       }
     } catch (_err: unknown) {
       console.warn(
@@ -453,13 +540,15 @@ async function main(): Promise<void> {
 
   // ──── Step 4: Launch ────
   if (args.task) {
-    // One-shot mode: run task and exit
+    // One-shot mode: route and run task, then exit
+    const { routeAndExecute } = await import("./agent/task-router.js");
     const { SingleAgent } = await import("./agent/single-agent.js");
     const { ConversationManager } = await import("./agent/conversation.js");
     const agent = new SingleAgent(verbose);
     const conversation = new ConversationManager();
 
-    const result = await agent.runStreaming(
+    const routed = await routeAndExecute(
+      args.task,
       {
         task: args.task,
         model: model ?? "auto",
@@ -470,9 +559,17 @@ async function main(): Promise<void> {
         checkCommand: projectConfig?.checkCommand,
         policy: projectConfig?.policy ?? config.preferences.policy,
         yes: args.yes,
+        maxTurns: args.maxTurns,
       },
-      conversation,
+      {
+        agent,
+        conversation,
+        rl: null,
+        verbose,
+        projectConfig,
+      },
     );
+    const result = routed.result;
 
     // Print final stats
     const modelPart = result.model ? `${result.model} · ` : "";
@@ -480,10 +577,28 @@ async function main(): Promise<void> {
       `\n${C.SNOW4}${modelPart}${result.tokensUsed.total_tokens} tokens · ${result.toolCallCount} tool calls · ${(result.durationMs / 1000).toFixed(1)}s${C.RESET}`,
     );
 
+    try {
+      const { SessionManager } = await import("./agent/conversation.js");
+      const sessionId = SessionManager.saveSession(
+        conversation,
+        result.model ?? model ?? "auto",
+        result.modifiedFiles,
+        result.tokensUsed,
+        undefined,
+        undefined,
+        cwd,
+      );
+      console.log(`session ${sessionId}`);
+    } catch {
+      // A missing session id does not change the completion line.
+    }
+
+    console.log(headlessStatusLine(result));
+
     const { stopLspManager } = await import("./agent/tool-executor.js");
     await stopLspManager();
 
-    process.exit(result.success ? 0 : 1);
+    process.exit(headlessExitCode(result.success));
   }
 
   // Interactive REPL mode — print the session header before

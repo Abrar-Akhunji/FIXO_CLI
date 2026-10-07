@@ -7,6 +7,7 @@ import { loadPlan, renderPlan, savePlan } from "../../planner.js";
 import { getWorkspaceStateDir } from "../../config.js";
 
 import { colors } from "../colors.js";
+import * as p from "@clack/prompts";
 
 import { type CommandHandler } from "./types.js";
 
@@ -114,16 +115,45 @@ export const fixCiCommand: CommandHandler = async () => {
 };
 
 export const planCommand: CommandHandler = async (ctx) => {
-  {
-    const task = ctx.args.join(" ").trim();
-    if (!task) {
-      console.log(`\n${colors.yellow}Usage: /plan <task>${colors.reset}`);
-      return;
-    }
-    const plan = savePlan(ctx.cwd, task);
-    console.log(`\n${renderPlan(plan)}`);
+  const task = ctx.args.join(" ").trim();
+  if (!task) {
+    console.log(`\n${colors.yellow}Usage: /plan <task>${colors.reset}`);
+    return;
   }
-  return;
+  const plan = savePlan(ctx.cwd, task);
+  console.log(`\n${renderPlan(plan)}`);
+
+  const interactive = process.stdin.isTTY === true;
+  if (!interactive) {
+    ctx.state.currentMode = "PLAN";
+    console.log(
+      `\n${colors.yellow}plan-only. Saved at .fixo/last-plan.json. Approve it in an interactive session before building.${colors.reset}`,
+    );
+    return;
+  }
+
+  ctx.rl.pause();
+  let approved = false;
+  try {
+    const choice = await p.confirm({
+      message: "Approve this plan and start building?",
+      initialValue: false,
+    });
+    approved = !p.isCancel(choice) && choice === true;
+  } finally {
+    ctx.rl.resume();
+  }
+
+  if (!approved) {
+    ctx.state.currentMode = "PLAN";
+    console.log(
+      `\n${colors.dim}Plan saved. BUILD was not started.${colors.reset}`,
+    );
+    return;
+  }
+
+  ctx.state.currentMode = "BUILD";
+  ctx.state.pendingFollowUp = `Execute the approved plan at .fixo/last-plan.json.\n\n${renderPlan(plan)}`;
 };
 
 export const runPlanCommand: CommandHandler = async (ctx) => {

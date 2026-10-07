@@ -180,7 +180,7 @@ test("renderStatusBar writes a single line with `\r` and the four pills", () => 
     branch: "main",
     contextPercent: 12,
     providersCount: 3,
-    transport: "freellmapi",
+    transport: "direct",
   };
   renderStatusBar(state);
   assert.ok(captured.startsWith("\r"));
@@ -192,7 +192,12 @@ test("renderStatusBar writes a single line with `\r` and the four pills", () => 
   assert.ok(captured.includes("ctx: 12% used"));
   assert.ok(captured.includes("88% remaining"));
   assert.ok(captured.includes("3 providers"));
-  assert.ok(captured.includes("freellmapi"));
+  assert.ok(captured.includes("direct"));
+
+  captured = "";
+  renderStatusBar({ ...state, transport: "freellmapi", providersCount: 0 });
+  assert.ok(captured.includes("proxy"));
+  assert.equal(captured.includes("0 providers"), false);
 });
 
 test("renderStatusBar clamps contextPercent above 100 and below 0", () => {

@@ -73,15 +73,210 @@ interface DatabaseSync {
 
 let dbInstance: DatabaseSync | null = null;
 let lastCwd = "";
+let memoryBackend: "sqlite" | "file" = "sqlite";
+
+/** Which store the most recent `getDb` open selected. */
+export function getMemoryBackend(): "sqlite" | "file" {
+  return memoryBackend;
+}
+
+interface MemoryFactRow {
+  id: number;
+  content: string;
+  embedding: string | null;
+}
+
+interface MemorySessionRow {
+  id: number;
+  summary: string;
+  embedding: string | null;
+}
+
+interface FileMemoryStore {
+  facts: MemoryFactRow[];
+  sessions: MemorySessionRow[];
+  nextFactId: number;
+  nextSessionId: number;
+}
+
+/**
+ * JSON store used when `node:sqlite` is missing (Node 20) or when
+ * `FIXO_MEMORY_BACKEND=file`. It implements only the SQL this module runs.
+ */
+class FileDatabaseSync implements DatabaseSync {
+  private store: FileMemoryStore;
+  private readonly filePath: string;
+
+  constructor(dbPath: string) {
+    this.filePath = path.join(path.dirname(dbPath), "memory.file.json");
+    this.store = this.load();
+  }
+
+  private emptyStore(): FileMemoryStore {
+    return { facts: [], sessions: [], nextFactId: 1, nextSessionId: 1 };
+  }
+
+  private load(): FileMemoryStore {
+    if (!fs.existsSync(this.filePath)) return this.emptyStore();
+    try {
+      const parsed = JSON.parse(
+        fs.readFileSync(this.filePath, "utf-8"),
+      ) as Partial<FileMemoryStore>;
+      if (!parsed || !Array.isArray(parsed.facts) || !Array.isArray(parsed.sessions)) {
+        return this.emptyStore();
+      }
+      return {
+        facts: parsed.facts,
+        sessions: parsed.sessions,
+        nextFactId: parsed.nextFactId || 1,
+        nextSessionId: parsed.nextSessionId || 1,
+      };
+    } catch {
+      return this.emptyStore();
+    }
+  }
+
+  private flush(): void {
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    fs.writeFileSync(this.filePath, JSON.stringify(this.store), "utf-8");
+  }
+
+  exec(sql: string): void {
+    const statements = sql
+      .split(";")
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    for (const statement of statements) {
+      if (/^CREATE\s+TABLE/i.test(statement)) continue;
+      if (/^DELETE\s+FROM\s+facts$/i.test(statement)) {
+        this.store.facts = [];
+        continue;
+      }
+      throw new Error(
+        `file memory backend: unsupported statement: ${statement.slice(0, 120)}`,
+      );
+    }
+    this.flush();
+  }
+
+  prepare(sql: string): {
+    all(...args: unknown[]): unknown[];
+    run(...args: unknown[]): void;
+    get(...args: unknown[]): unknown;
+  } {
+    const statement = sql.replace(/\s+/g, " ").trim();
+    return {
+      all: (...args: unknown[]) => this.queryAll(statement, args),
+      run: (...args: unknown[]) => {
+        this.queryRun(statement, args);
+      },
+      get: (...args: unknown[]) => this.queryGet(statement, args),
+    };
+  }
+
+  close(): void {
+    this.flush();
+  }
+
+  private queryRun(statement: string, args: unknown[]): void {
+    if (statement === "INSERT OR IGNORE INTO facts (content) VALUES (?)") {
+      const content = String(args[0] ?? "");
+      if (!this.store.facts.some((row) => row.content === content)) {
+        this.store.facts.push({
+          id: this.store.nextFactId++,
+          content,
+          embedding: null,
+        });
+      }
+      this.flush();
+      return;
+    }
+    if (statement === "UPDATE facts SET embedding = ? WHERE id = ?") {
+      const id = Number(args[1]);
+      const row = this.store.facts.find((fact) => fact.id === id);
+      if (row) row.embedding = args[0] == null ? null : String(args[0]);
+      this.flush();
+      return;
+    }
+    if (statement === "INSERT INTO session_history (summary) VALUES (?)") {
+      this.store.sessions.push({
+        id: this.store.nextSessionId++,
+        summary: String(args[0] ?? ""),
+        embedding: null,
+      });
+      this.flush();
+      return;
+    }
+    throw new Error(`file memory backend: unsupported run: ${statement}`);
+  }
+
+  private queryAll(statement: string, _args: unknown[]): unknown[] {
+    if (statement === "SELECT id, content, embedding FROM facts") {
+      return this.store.facts.map((row) => ({ ...row }));
+    }
+    if (statement === "SELECT summary FROM session_history ORDER BY id DESC") {
+      return [...this.store.sessions]
+        .sort((a, b) => b.id - a.id)
+        .map((row) => ({ summary: row.summary }));
+    }
+    if (statement === "SELECT content FROM facts ORDER BY id DESC") {
+      return [...this.store.facts]
+        .sort((a, b) => b.id - a.id)
+        .map((row) => ({ content: row.content }));
+    }
+    throw new Error(`file memory backend: unsupported all: ${statement}`);
+  }
+
+  private queryGet(statement: string, _args: unknown[]): unknown {
+    if (statement === "SELECT COUNT(*) as count FROM facts") {
+      return { count: this.store.facts.length };
+    }
+    if (statement === "SELECT COUNT(*) as count FROM session_history") {
+      return { count: this.store.sessions.length };
+    }
+    throw new Error(`file memory backend: unsupported get: ${statement}`);
+  }
+}
 
 let _DatabaseSyncCtor: (new (path: string) => DatabaseSync) | null = null;
-function getDatabaseSync(): new (path: string) => DatabaseSync {
-  if (!_DatabaseSyncCtor) {
-    const _require = createRequire(import.meta.url);
-    const sqlite = _require("node:sqlite");
-    _DatabaseSyncCtor = sqlite.DatabaseSync;
+
+function loadSqliteCtor(): new (path: string) => DatabaseSync {
+  if (_DatabaseSyncCtor) return _DatabaseSyncCtor;
+  const _require = createRequire(import.meta.url);
+  const sqlite = _require("node:sqlite") as {
+    DatabaseSync?: new (path: string) => DatabaseSync;
+  };
+  if (!sqlite?.DatabaseSync) {
+    throw new Error("node:sqlite DatabaseSync is missing");
   }
-  return _DatabaseSyncCtor!;
+  _DatabaseSyncCtor = sqlite.DatabaseSync;
+  return _DatabaseSyncCtor;
+}
+
+function openMemoryDatabase(dbPath: string): DatabaseSync {
+  if (process.env.FIXO_MEMORY_BACKEND === "file") {
+    memoryBackend = "file";
+    return new FileDatabaseSync(dbPath);
+  }
+  try {
+    const Ctor = loadSqliteCtor();
+    const db = new Ctor(dbPath);
+    memoryBackend = "sqlite";
+    return db;
+  } catch (error: unknown) {
+    memoryBackend = "file";
+    if (
+      process.env.DEBUG ||
+      process.env.VERBOSE ||
+      process.argv.includes("--verbose")
+    ) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[Memory] node:sqlite unavailable, using file store: ${msg}`,
+      );
+    }
+    return new FileDatabaseSync(dbPath);
+  }
 }
 
 export function getDb(cwd: string): DatabaseSync {
@@ -111,8 +306,7 @@ export function getDb(cwd: string): DatabaseSync {
   }
 
   lastCwd = cwd;
-  const DatabaseSync = getDatabaseSync();
-  dbInstance = new DatabaseSync(dbPath);
+  dbInstance = openMemoryDatabase(dbPath);
 
   // Initialize tables
   dbInstance.exec(`
@@ -460,7 +654,9 @@ export function doctor(cwd: string): string {
     `Build commands: ${facts.buildCommands.join(", ") || "(none)"}`,
     `Test commands: ${facts.testCommands.join(", ") || "(none)"}`,
     `TypeScript configs: ${facts.tsconfigs.join(", ") || "(none)"}`,
-    `SQLite Database: ok (.fixo/memory.db)`,
+    getMemoryBackend() === "file"
+      ? "Memory store: file (.fixo/memory.file.json)"
+      : "Memory store: sqlite (.fixo/memory.db)",
     `Stored Facts: ${factsCount}`,
     `Stored Sessions: ${sessionsCount}`,
     `Allowed commands: ${facts.allowRules.commands.join(", ") || "(none)"}`,

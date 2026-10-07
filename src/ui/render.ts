@@ -556,6 +556,14 @@ export const COMMANDS_WITH_DESC = [
   { cmd: "/stats", desc: "Show session token usage statistics" },
   { cmd: "/session", desc: "Manage sessions: list | load <uuid> | new" },
   {
+    cmd: "/resume",
+    desc: "List or reload a saved session for this workspace",
+  },
+  {
+    cmd: "/rewind",
+    desc: "Drop later conversation turns. Does not change files",
+  },
+  {
     cmd: "/todo",
     desc: "Manage todo list: list | add <text> | done <id> | remove <id> | clear",
   },
@@ -569,7 +577,10 @@ export const COMMANDS_WITH_DESC = [
   { cmd: "/run-plan", desc: "Execute the last generated plan" },
   // Git
   { cmd: "/diff", desc: "Show git diff of workspace" },
-  { cmd: "/undo", desc: "Undo last AI change" },
+  {
+    cmd: "/undo",
+    desc: "Roll back files from the last FixO commit",
+  },
   { cmd: "/log", desc: "Show recent git commits" },
   { cmd: "/snapshot", desc: "Create a named git snapshot" },
   // Quality & review
@@ -643,6 +654,16 @@ export function printHelp(): void {
     "<sub-command>",
     "Manage sessions: list | load <uuid> | new",
   );
+  line(
+    "/resume",
+    "[id]",
+    "List or reload a saved session for this workspace, in BUILD",
+  );
+  line(
+    "/rewind",
+    "<turn>",
+    "Drop conversation turns after <turn>. Does not change files",
+  );
 
   console.log(`\n${c.snow}${c.bold}⚙️  Agent Modes & Plans${c.reset}`);
   line(
@@ -655,7 +676,11 @@ export function printHelp(): void {
 
   console.log(`\n${c.snow}${c.bold}🌳 Git Operations${c.reset}`);
   line("/diff", "", "Show git diff of the workspace");
-  line("/undo", "", "Undo the last FixO auto-committed change");
+  line(
+    "/undo",
+    "",
+    "Roll back files from the last FixO commit. Does not rewind chat",
+  );
   line("/log", "", "Show recent git commits");
   line(
     "/snapshot",

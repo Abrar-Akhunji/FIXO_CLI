@@ -1,3 +1,4 @@
+import path from "node:path";
 import { colors } from "../colors.js";
 
 import { type CommandHandler } from "./types.js";
@@ -144,6 +145,132 @@ export const sessionCommand: CommandHandler = async (ctx) => {
     );
   }
   return;
+};
+
+export const resumeCommand: CommandHandler = async (ctx) => {
+  const { SessionManager } = await import("../../agent/conversation.js");
+  const query = ctx.args.join(" ").trim();
+  if (!query) {
+    const list = SessionManager.listSessions(ctx.cwd);
+    if (list.length === 0) {
+      console.log(
+        `\n${colors.dim}No saved sessions for this workspace.${colors.reset}`,
+      );
+      console.log(
+        `${colors.dim}A session is saved after each REPL task and each one-shot run.${colors.reset}`,
+      );
+      return;
+    }
+    console.log(
+      `\n${colors.cyan}${colors.bold}Sessions for this workspace:${colors.reset}`,
+    );
+    for (const s of list) {
+      const date = new Date(s.timestamp).toLocaleString();
+      const label = s.label
+        ? `${colors.cyan}${s.label}${colors.reset} `
+        : "";
+      console.log(
+        `  ${label}${colors.bold}${s.sessionId}${colors.reset} ${colors.dim}${s.model} · ${s.messageCount} msgs · ${date}${colors.reset}`,
+      );
+    }
+    console.log(
+      `${colors.dim}Reload with /resume <id>. The conversation comes back in BUILD. Files on disk stay as they are.${colors.reset}`,
+    );
+    console.log(
+      `${colors.dim}/rewind <turn> drops later conversation turns. /undo rolls files back.${colors.reset}`,
+    );
+    return;
+  }
+
+  try {
+    const data = SessionManager.findSession(query);
+    if (data.cwd && path.resolve(data.cwd) !== path.resolve(ctx.cwd)) {
+      console.log(
+        `\n${colors.red}✗ That session belongs to another workspace.${colors.reset}`,
+      );
+      return;
+    }
+    ctx.conversation.clear();
+    ctx.conversation.importHistory(data.history);
+    ctx.conversation.setSummary(data.summary || "");
+    ctx.state.currentModel = data.model;
+    ctx.conversation.setContextLimit(ctx.state.currentModel);
+    ctx.state.sessionModifiedFiles = [...(data.modifiedFiles || [])];
+    ctx.state.currentSessionId = data.sessionId;
+    ctx.state.currentSessionLabel = data.label;
+    ctx.state.currentMode = "BUILD";
+    ctx.state.stats.totalPromptTokens = data.tokenUsage?.prompt_tokens || 0;
+    ctx.state.stats.totalCompletionTokens =
+      data.tokenUsage?.completion_tokens || 0;
+    console.log(
+      `\n${colors.green}✓ Resumed ${colors.bold}${data.sessionId}${colors.reset} ${colors.dim}in BUILD${colors.reset}`,
+    );
+    console.log(
+      `${colors.dim}  ${data.history.length} messages. Files on disk were not changed.${colors.reset}`,
+    );
+    console.log(
+      `${colors.dim}  /rewind <turn> drops later turns. /undo rolls files back.${colors.reset}`,
+    );
+  } catch (err: any) {
+    console.log(
+      `\n${colors.red}✗ Failed to resume session: ${err.message}${colors.reset}`,
+    );
+  }
+};
+
+export const rewindCommand: CommandHandler = async (ctx) => {
+  const { SessionManager, rewindToTurn, countUserTurns } =
+    await import("../../agent/conversation.js");
+  const raw = ctx.args[0];
+  const turn = Number(raw);
+  if (!raw || !Number.isInteger(turn) || turn < 1) {
+    console.log(
+      `\n${colors.yellow}Usage: /rewind <turn>${colors.reset}\n` +
+        `${colors.dim}  Keeps conversation turns 1 through N and drops the rest. Does not change files. /undo rolls files back.${colors.reset}`,
+    );
+    return;
+  }
+  const history = ctx.conversation.exportHistory();
+  const total = countUserTurns(history);
+  if (total === 0) {
+    console.log(
+      `\n${colors.dim}No conversation turns to rewind. Files were not changed.${colors.reset}`,
+    );
+    return;
+  }
+  if (turn >= total) {
+    console.log(
+      `\n${colors.yellow}This session has ${total} turn${total === 1 ? "" : "s"}. No later turns to drop. Files were not changed.${colors.reset}`,
+    );
+    return;
+  }
+  ctx.conversation.replaceHistory(rewindToTurn(history, turn));
+  try {
+    SessionManager.saveSession(
+      ctx.conversation,
+      ctx.state.currentModel,
+      ctx.state.sessionModifiedFiles,
+      {
+        prompt_tokens: ctx.state.stats.totalPromptTokens,
+        completion_tokens: ctx.state.stats.totalCompletionTokens,
+        total_tokens:
+          ctx.state.stats.totalPromptTokens +
+          ctx.state.stats.totalCompletionTokens,
+      },
+      ctx.state.currentSessionId,
+      ctx.state.currentSessionLabel,
+      ctx.cwd,
+    );
+  } catch {
+    // The in-memory rewind still stands when the save fails.
+  }
+  const dropped = total - turn;
+  console.log(
+    `\n${colors.green}✓ Rewound to turn ${turn}.${colors.reset} ${colors.dim}${dropped} later turn${dropped === 1 ? "" : "s"} dropped.${colors.reset}`,
+  );
+  console.log(
+    `${colors.dim}  Conversation only. Files were not changed. /undo rolls files back.${colors.reset}`,
+  );
 };
 
 export const renameCommand: CommandHandler = async (ctx) => {

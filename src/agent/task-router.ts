@@ -86,7 +86,7 @@ export interface RouteDeps {
    */
   agent: SingleAgent;
   conversation: ConversationManager;
-  rl: ReadlineInterface;
+  rl?: ReadlineInterface | null;
   projectConfig?: ProjectConfig;
   verbose: boolean;
   /**
@@ -218,7 +218,9 @@ export async function routeAndExecute(
       );
 
       let useComplex = false;
-      if (deps.rl && process.env.NODE_ENV !== "test") {
+      if (context.yes) {
+        useComplex = true;
+      } else if (deps.rl && process.env.NODE_ENV !== "test") {
         deps.rl.pause();
         try {
           const choice = await confirm({
@@ -272,7 +274,7 @@ async function runSimplePath(
     const result = await deps.agent.runStreaming(
       context,
       deps.conversation,
-      deps.rl,
+      deps.rl ?? undefined,
     );
     return { result, route: "simple" };
   } finally {
@@ -370,7 +372,11 @@ async function runComplexPath(
     const maxAttempts = deps.projectConfig?.maxAttempts ?? 3;
     // subtaskBudget is hardcoded to 100 in the AgentPool constructor by default, but we should pass it explicitly as second arg if we want.
     // Let's pass the default values for the first two arguments and maxAttempts for the third.
-    const pool = new AgentPool(3, 100, maxAttempts);
+    const poolBudget =
+      typeof context.maxTurns === "number" && context.maxTurns > 0
+        ? Math.floor(context.maxTurns)
+        : 100;
+    const pool = new AgentPool(3, poolBudget, maxAttempts);
 
     console.log(
       `\n${c.cyan}[Agent Pool] Executing DAG of subtasks (concurrency limit: 3, max repair attempts: ${maxAttempts})...${c.reset}`,

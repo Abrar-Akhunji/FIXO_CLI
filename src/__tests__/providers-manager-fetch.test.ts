@@ -121,15 +121,15 @@ test("fetchRemoteModels — live success persists cache and returns live source"
 
 /* ──────────────────── failure → registry fallback, then cache ──────────────────── */
 
-test("fetchRemoteModels — network failure falls back to registry, then cache on re-run", async () => {
+test("fetchRemoteModels — network failure is empty, then a live cache is used", async () => {
   const ctx = mkHome();
   try {
     ProvidersManager.add("groq", "gsk-test-key-1234567890");
     globalThis.fetch = mockFetchThrows();
 
     const first = await ProvidersManager.fetchRemoteModels("groq");
-    assert.equal(first.source, "registry-fallback");
-    assert.ok(first.models.length > 0, "registry models surfaced");
+    assert.equal(first.source, "unavailable");
+    assert.deepEqual(first.models, []);
 
     // Now seed a *fresh* live cache and ensure the second call uses it.
     const cachePath = modelsCachePath(ctx.home);
@@ -180,16 +180,15 @@ test("fetchRemoteModels — stale cache (>24h old) is treated as missing", async
       mode: 0o600,
     });
 
-    // Stale + network down → should report registry fallback, not cache.
+    // Stale + network down → empty unavailable, not the static registry.
     const result = await ProvidersManager.fetchRemoteModels("anthropic");
-    assert.equal(result.source, "registry-fallback");
-    assert.notDeepEqual(result.models, ["claude-opus-3"]);
+    assert.equal(result.source, "unavailable");
+    assert.deepEqual(result.models, []);
 
-    // And `getCachedModels` should return null for the stale entry.
     assert.equal(
-      ProvidersManager.getCachedModels("anthropic")?.source,
-      "registry-fallback",
-      "after registry fallback, cache entry should be re-tagged registry-fallback",
+      ProvidersManager.getCachedModels("anthropic"),
+      null,
+      "a stale live cache stays missing",
     );
   } finally {
     ctx.restore();
@@ -220,7 +219,7 @@ test("fetchRemoteModels — zen provider sends HTTP-Referer + X-Title headers", 
 
 /* ──────────────────── no key configured ──────────────────── */
 
-test("fetchRemoteModels — unconfigured provider falls back without attempting fetch", async () => {
+test("fetchRemoteModels — unconfigured provider returns no models and does not fetch", async () => {
   const ctx = mkHome();
   try {
     let fetchCalled = false;
@@ -235,8 +234,8 @@ test("fetchRemoteModels — unconfigured provider falls back without attempting 
       false,
       "fetch must not be called when no key is configured",
     );
-    assert.equal(result.source, "registry-fallback");
-    assert.ok(result.models.length > 0);
+    assert.equal(result.source, "no-key");
+    assert.deepEqual(result.models, []);
   } finally {
     ctx.restore();
   }

@@ -1,6 +1,7 @@
 import * as p from "@clack/prompts";
 import type { FreeLLMConfig, ProviderMode } from "./config.js";
 import { getDefaultConfig, saveConfig, DEFAULT_API_URL } from "./config.js";
+import { verifyFreeLLMLogin } from "./agent/freellm-login.js";
 
 /**
  * Runs the interactive first-run setup wizard for FixO CLI.
@@ -195,34 +196,77 @@ async function runProxySetup(): Promise<FreeLLMConfig> {
     apiUrl = customUrl.trim();
   }
 
-  const apiKeyInput = await p.text({
-    message: "Enter your FreeLLMAPI API key:",
-    placeholder: "freellmapi-user-sk-...",
-    validate: (val) => {
-      if (!val.trim()) {
-        return "API key is required";
-      }
-      if (!val.trim().startsWith("freellmapi-")) {
-        return 'API key must start with "freellmapi-"';
-      }
-      return;
-    },
-  });
+  let acceptedKey = "";
+  let modelCount = 0;
+  for (;;) {
+    const apiKeyInput = await p.text({
+      message: "Enter your FreeLLMAPI API key:",
+      placeholder: "freellmapi-user-sk-...",
+      validate: (val) => {
+        if (!val.trim()) {
+          return "API key is required";
+        }
+        if (!val.trim().startsWith("freellmapi-")) {
+          return 'API key must start with "freellmapi-"';
+        }
+        return;
+      },
+    });
 
-  if (p.isCancel(apiKeyInput)) {
-    p.outro("Setup cancelled. FixO CLI requires an API key to function.");
-    process.exit(1);
+    if (p.isCancel(apiKeyInput)) {
+      p.outro("Setup cancelled. FixO CLI requires an API key to function.");
+      process.exit(1);
+    }
+
+    const check = await verifyFreeLLMLogin(apiUrl, apiKeyInput.trim());
+    if (check.ok) {
+      acceptedKey = apiKeyInput.trim();
+      modelCount = check.modelCount;
+      break;
+    }
+    if (check.reason === "unauthorized") {
+      console.log(
+        "That key was rejected by the proxy. Check the key and try again.",
+      );
+      continue;
+    }
+    if (check.reason === "empty") {
+      console.log(
+        "The proxy returned a catalog with no models. Try again.",
+      );
+      continue;
+    }
+    const saveAnyway = await p.confirm({
+      message:
+        "The proxy catalog could not be reached. Save this key anyway?",
+      initialValue: false,
+    });
+    if (p.isCancel(saveAnyway)) {
+      p.outro("Setup cancelled.");
+      process.exit(1);
+    }
+    if (saveAnyway) {
+      acceptedKey = apiKeyInput.trim();
+      break;
+    }
   }
 
   const config = getDefaultConfig();
   config.provider_mode = "proxy";
-  config.freellmapi_api_key = apiKeyInput.trim();
+  config.freellmapi_api_key = acceptedKey;
   config.apiUrl = apiUrl;
+  config.defaultModel = "auto";
   config._firstRunComplete = true;
 
   saveConfig(config);
 
-  p.outro("✓ FreeLLMAPI configuration saved to ~/.fixocli/config.json");
+  const catalogNote =
+    modelCount > 0
+      ? ` Proxy catalog has ${modelCount} models.`
+      : " Catalog was not loaded.";
+  p.outro(
+    `✓ FreeLLMAPI configuration saved to ~/.fixocli/config.json.${catalogNote} New chats use auto.`,
+  );
 
   // Proxy users can still opt-in to direct provider keys as
   // failover / hybrid usage (preserves the original v1.0 behaviour).

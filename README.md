@@ -6,7 +6,7 @@
 [![Engine](https://img.shields.io/badge/Engine-Tree--Sitter-orange.svg)](https://tree-sitter.github.io/tree-sitter/)
 [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg)]()
 
-Fixo CLI is a terminal-based autonomous coding assistant designed to execute complex programming tasks directly in your workspace. It writes implementation plans, edits code files, runs test suites, and iterates toward the goal. Tree-sitter is used today for shell-command parsing and LSP-fallback syntax checks; expanding it to the workspace symbol map is on the roadmap.
+Fixo CLI is a terminal-based autonomous coding assistant designed to execute complex programming tasks directly in your workspace. It writes implementation plans, edits code files, runs test suites, and iterates toward the goal. Tree-sitter parses shell commands and, when the vendored WASM grammars load, extracts symbols and imports for the repository map (TypeScript, JavaScript, Python, Go, and Rust). A regex extractor is the fallback.
 
 Fixo CLI ships with **13 direct providers built-in** (OpenAI, Anthropic, Google, Groq, Mistral, Cohere, OpenRouter, NVIDIA, Cerebras, SambaNova, GitHub Models, xAI, Zen) — paste your own key for any of them. The optional **FreeLLMAPI** proxy backend is available as an opt-in convenience for users who want load-balanced failover across free-tier providers without managing individual keys.
 
@@ -20,12 +20,12 @@ Here is how Fixo CLI compares against other prominent terminal and editor-based 
 | :--- | :--- | :--- | :--- | :--- |
 | **API Cost** | 💰 **BYOK or free via optional FreeLLMAPI proxy** | 💸 **Paid** (Anthropic API charges) | 💸 **Paid** (Requires personal keys) | 💸 **Paid** (Requires personal keys) |
 | **Multi-Provider Fallback**| 🔄 **Automatic failover (FreeLLMAPI proxy mode)** | ❌ None (Locked to Anthropic) | ❌ Manual (Requires editing configs) | ❌ Manual (Drops request on 429) |
-| **Workspace Indexing** | 🗂️ Depth-capped regex scan (tree-sitter symbol map planned) | 🔍 Regex / basic grep | 🗺️ Git/ctags-based map | 🔍 Basic file search |
+| **Workspace Indexing** | 🗂️ Depth-capped repository map (tree-sitter when WASM is present, regex fallback) | 🔍 Regex / basic grep | 🗺️ Git/ctags-based map | 🔍 Basic file search |
 | **Autonomy Loops** | 🤖 **Multi-agent / Planning Mode** ¹ | 🤖 Agent loops | 💬 Interactive / chat-driven | 💬 Prompt-to-action loops |
-| **Self-Correction** | 🧪 Opt-in via `/fix-tests` (automatic post-edit verification on the roadmap) | ❌ Manual trigger | ❌ Requires manual input | ❌ Requires manual input |
+| **Self-Correction** | 🧪 Automatic post-edit verification (on by default, one repair) plus `/fix-tests` | ❌ Manual trigger | ❌ Requires manual input | ❌ Requires manual input |
 | **No-Card Verification** | ✅ **Yes** (BYOK or free proxy — no card required either way) | ❌ No (Requires credit card) | ❌ No (Requires paid API keys) | ❌ No (Requires paid API keys) |
 
-¹ The multi-agent path is currently triggered by a keyword heuristic. An LLM-based complexity classifier is wired-but-dead in `src/planner.ts` and is being moved onto the live code path.
+¹ The multi-agent path is chosen by `classifyComplexityModel` in `src/planner.ts`. A keyword heuristic short-circuits trivial and already-complex tasks. Models outside the verified DAG set stay on the single-agent path unless `--yes` is set.
 
 ---
 
@@ -63,15 +63,15 @@ sequenceDiagram
     Agent-->>User: Task completed successfully!
 ```
 
-> **Note on routing:** Smart routing across models (cheaper for planning, stronger for execution) is a feature of the optional FreeLLMAPI proxy backend. In direct-provider mode, requests use the model you selected at setup — local fast/heavy-tier substitution via `preferences.modelRouting` is on the roadmap.
+> **Note on routing:** In direct-provider mode, `preferences.modelRouting` substitutes the fast, heavy, or default model you configured (`/model-routing`). The optional FreeLLMAPI proxy adds failover across providers. The diagram shows that proxy path.
 
 ---
 
 ## 🌟 Key Features
 
-* **Autonomous Agent Loop:** Fixo CLI runs an agent loop that defines planning sub-agents, writes files, runs shell commands, reads compiler output, and self-corrects until tests pass.
-* **Workspace Indexer:** Today, a depth-capped (4 levels, 200 files) directory scanner extracts exports via regex for a quick repository map. A tree-sitter-backed symbol map for TS/JS/Python/Go/Rust is on the roadmap; the WASM runtime is already vendored and used elsewhere in the codebase.
-* **Free Multi-Provider Routing:** Connects to your FreeLLMAPI server to query models like Llama 3.3, Qwen 3, and Gemini 2.5/3.1 without incurring high API costs.
+* **Autonomous Agent Loop:** Fixo CLI runs an agent loop that writes files, runs shell commands, and reads compiler output. Post-edit verification runs once by default. A failed check, a tool-call cap, a cancellation, or open todos finish as incomplete.
+* **Workspace Indexer:** A depth-capped walk (default 4 levels and 200 files, both overridable) builds a repository map. Tree-sitter extracts symbols for TypeScript, JavaScript, Python, Go, and Rust when the vendored WASM is present. Otherwise a regex extractor is used.
+* **Optional FreeLLMAPI proxy:** When you choose proxy mode in the setup wizard, the CLI uses that endpoint for load-balanced access to free-tier models. Direct BYOK is the default and does not require a proxy.
 * **Smart Cooldown & Failover:** The CLI automatically tracks rate-limited providers (429/402/404) and switches to working alternatives in the fallback chain mid-request.
 * **Resilience Stack:** Stream recovery, provider cooldown, context-budget enforcement, and a local telemetry sink work together so the agent stays productive on flaky networks and large codebases. See [Resilience](#-resilience) below.
 * **Built-in Workspace Guard:** Safely manages workspace locks, preventing concurrent file writes and ensuring git safety.
@@ -96,9 +96,9 @@ workspace are blocked outside `BUILD`.
 | `run_command_async` | 3 | Non-blocking shell execution; returns a job id. | `command`, `cwd?` | BUILD | Command-parser AST + permissions | `ask` (default-ask) |
 | `poll_command_status` | 3 | Poll a previously-spawned async job for status + ring-buffered stdout/stderr. | `id` | BUILD, EXPLORE | n/a (read-only metadata) | `ask` (default-ask) |
 | `kill_command` | 3 | Send `SIGTERM` to a running async job. | `id` | BUILD | Command-parser invariants | `ask` (default-ask) |
-| `spawn_subagent` | 3 | Context-isolated sub-orchestrator with its own conversation budget; inherits parent policy + vault. | `prompt`, `tools?` | PLAN, BUILD | Inherits all four pillars | `ask` |
+| `spawn_subagent` | 3 | Isolated worker at depth 1. The child gets the task and its type instructions, not the parent transcript. Explore and Plan cannot write the repo. Deny rules are copied. Allow-all and `--yes` are not. | `task`; `type?`, `contextFiles?`, `runInBackground?` | BUILD | Inherits deny rules | `ask` |
 | `/mcp` console | 3 | Slash command (`/mcp list`, `/mcp add`, `/mcp restart`) for MCP server management. | — | EXPLORE, BUILD | Config-only (no workspace touch) | n/a |
-| Worktree annotations | 3 | Parsed from assistant text (`[worktree:create branch=x]`, `[worktree:merge branch=x]`, `[worktree:remove path=...]`). Not a tool — a capability the executor extracts post-stream. | n/a (annotation in text) | BUILD | `execFileSync('git', …)` — no shell expansion | `ask` (parsed by the single-agent loop) |
+| Worktree annotations | 3 | The single-agent loop applies `[worktree:create branch=x]`, `[worktree:merge branch=x]`, and `[worktree:remove path=...]` from assistant text in BUILD mode, then strips them before display and storage. Read-only modes strip without running git. | n/a (annotation in text) | BUILD | `execFileSync('git', …)` — no shell expansion | applied by the single-agent loop |
 
 ### Predictive Context-Budget Gate (Phase 4)
 
@@ -331,8 +331,7 @@ cleaned up. Two sweeps run automatically:
   older than `stagingTtlMs` from the current run's directory.
 - **Global GC** — `AtomicStagingManager.garbageCollectAll(cwd, ttlMs)`
   sweeps every `<runId>/` directory. Invoked at the start of
-  every `runStreaming` lifecycle (typically < 2 ms) and also
-  exposed via the `/fixo gc` slash command for power users.
+  every `runStreaming` lifecycle (typically < 2 ms).
 
 GC is bounded and uses the metadata `createdAt` timestamp
 rather than file mtime, so the TTL is a deterministic policy
@@ -360,9 +359,9 @@ tail -100 ~/.fixocli/telemetry.jsonl | jq 'select(.event == "loopTrap")'
    - The patch is being reverted by a pre-commit hook → fix the hook.
    - The agent is confused about file paths → clarify the task.
 2. Force a manual compaction to drop the noise from the
-   conversation history:
-   ```bash
-   fixo --compact
+   conversation history (inside the interactive REPL):
+   ```text
+   /compact
    ```
 3. To disable the detector for a single session (debugging
    only), set `loopTrap.enabled` to `false` in
@@ -428,10 +427,11 @@ du -sh ~/.fixo/staging
 
 #### "A direct-provider API key was rejected"
 
-```bash
-fixo providers list
-fixo providers add openai sk-proj-...
+Manage providers inside the interactive REPL:
+```text
+/providers
 ```
+Or directly edit your local configuration at `~/.fixocli/config.json`.
 
 The vault is auto-hydrated on the next `getDirectConfig` call,
 so the new key is visible immediately — no restart required.
@@ -447,11 +447,8 @@ so the new key is visible immediately — no restart required.
 # Drop the staging directory (ephemeral)
 rm -rf ~/.fixo/staging
 
-# Drop the cached vault singleton (next call re-hydrates)
-fixo providers reset-vault
-
-# Reset to safe production defaults
-fixo config reset --section safety
+# Remove workspace state or reset safety configuration
+rm -rf ~/.fixocli/config.json
 ```
 
 See [`docs/SAFETY.md`](docs/SAFETY.md) for the full threat
@@ -489,10 +486,24 @@ event is a tagged union so refactors stay type-safe.
 
 ---
 
+## Headless completion
+
+`fixo "task"` and the REPL share one completion status. The last line of a one-shot run is one of:
+
+- `done` — the model finished. Exit code 0.
+- `incomplete: <reason>` — the tool-call cap, verification, cancellation, or open todos stopped the run. Exit code 1. `--max-turns N` replaces the soft tool-call budget for that run, and hitting it is incomplete.
+- `plan-only` — a non-interactive plan was saved and the repo was not edited.
+
+The line before that is `session <id>`. `fixo --resume <id>` reloads the session in BUILD. Inside the REPL, `/resume` lists sessions for this workspace and reloads one. `/rewind <turn>` drops later conversation turns and leaves files untouched. `/undo` rolls files back and does not rewind the chat.
+
+An interactive terminal opens a full-screen session: the transcript scrolls in the middle, and the activity row stays on screen. `FIXO_UI=readline` keeps the previous scrolling prompt. Questions and slash commands step out of that screen, then return.
+
+This checkout is a beta working tree.
+
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
-Ensure you have **Node.js (v18+)** and **npm** installed. Fixo CLI connects to FreeLLMAPI, so you should have a running FreeLLMAPI server or access to a unified proxy endpoint.
+Ensure you have **Node.js (>= 20.0.0)** and **npm** installed. The first launch runs a setup wizard. Direct provider keys (BYOK) are the recommended path. FreeLLMAPI proxy mode is optional.
 
 ### 2. Installation
 Clone the repository and install dependencies:
@@ -509,13 +520,9 @@ npm run build
 ```
 
 ### 4. Configuration
-Create a `.env` file at the root of your project:
-```env
-# URL of your FreeLLMAPI instance
-FREELLMAPI_URL=http://localhost:3001
-# Your unified API key (retrieve from FreeLLMAPI Dashboard)
-FREELLMAPI_KEY=your-unified-api-key-here
-```
+Run `fixo` (or `npm run dev`) and complete the setup wizard. Keys are saved under `~/.fixocli/`. Inside the REPL, `/providers` adds, lists, tests, and removes provider keys.
+
+Proxy mode is optional. `FIXO_API_URL` overrides the configured endpoint when it is set. The CLI does not read `FREELLMAPI_URL` or `FREELLMAPI_KEY` from a project `.env`.
 
 ### 5. Run the CLI
 Start Fixo CLI in dev mode or link it globally:

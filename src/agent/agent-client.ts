@@ -11,6 +11,7 @@ import type {
   TokenUsage,
 } from "../shared/types.js";
 import { colors } from "../ui/colors.js";
+import { reportActivity } from "../ui/activity.js";
 import { ProvidersManager } from "./providers-manager.js";
 import { providerCooldown } from "./provider-cooldown.js";
 import {
@@ -614,8 +615,8 @@ export class AgentClient {
           );
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
-            console.log(
-              `${colors.yellow}⚠  [API] Error ${response.status}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
+            reportActivity(
+              `API ${response.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${(delayMs / 1000).toFixed(1)}s`,
             );
             await sleep(delayMs);
             continue;
@@ -713,8 +714,8 @@ export class AgentClient {
         if (isNetworkError && attempt < MAX_RETRIES) {
           trackProviderError(cooldownKey, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
-          console.log(
-            `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
+          reportActivity(
+            `Network ${lastError.message.slice(0, 60)}, retry ${attempt + 1}/${MAX_RETRIES} in ${(delayMs / 1000).toFixed(1)}s`,
           );
           await sleep(delayMs);
           continue;
@@ -940,7 +941,7 @@ export class AgentClient {
           if (!choice) continue;
 
           // reasoning_content delta
-          if ((choice.delta as any).reasoning_content) {
+          if ((choice.delta as any)?.reasoning_content) {
             yield {
               type: "thinking",
               thinking: (choice.delta as any).reasoning_content,
@@ -1219,8 +1220,8 @@ export class AgentClient {
           );
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
-            console.log(
-              `${colors.yellow}⚠  [API] Error ${lastError.status}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
+            reportActivity(
+              `API ${lastError.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${(delayMs / 1000).toFixed(1)}s`,
             );
             await sleep(delayMs);
             continue;
@@ -1230,8 +1231,8 @@ export class AgentClient {
         if (isNetworkError && attempt < MAX_RETRIES) {
           trackProviderError(cooldownKey, 0, lastError.message.slice(0, 200));
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
-          console.log(
-            `${colors.yellow}⚠  [Network] ${lastError.message.slice(0, 60)}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
+          reportActivity(
+            `Network ${lastError.message.slice(0, 60)}, retry ${attempt + 1}/${MAX_RETRIES} in ${(delayMs / 1000).toFixed(1)}s`,
           );
           await sleep(delayMs);
           continue;
@@ -1441,8 +1442,8 @@ export class AgentClient {
           const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
           if (attempt < MAX_RETRIES) {
             if (this.verbose) {
-              console.log(
-                `${colors.yellow}⚠  [API] Embedding error ${response.status}. Retrying in ${(delayMs / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})${colors.reset}`,
+              reportActivity(
+                `API ${response.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${(delayMs / 1000).toFixed(1)}s`,
               );
             }
             await sleep(delayMs);
@@ -1647,16 +1648,20 @@ function translateOpenAIToAnthropic(
         });
       }
     } else if (msg.role === "tool") {
-      anthropicMessages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: msg.tool_call_id,
-            content: extractTextFromContent(msg.content),
-          },
-        ],
-      });
+      const toolBlock = {
+        type: "tool_result",
+        tool_use_id: msg.tool_call_id,
+        content: extractTextFromContent(msg.content),
+      };
+      const lastMsg = anthropicMessages[anthropicMessages.length - 1];
+      if (lastMsg && lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+        lastMsg.content.push(toolBlock);
+      } else {
+        anthropicMessages.push({
+          role: "user",
+          content: [toolBlock],
+        });
+      }
     }
   }
 

@@ -1,8 +1,6 @@
 # FIXO CLI — Stabilization & Market-Readiness Plan
 
-> Status: DRAFT for review. No implementation begins until this document is reviewed and approved.
-> Verified against local worktree (uncommitted changes present; ahead of public `main`).
-> Verification date: 2026-07-19.
+> Status: Historical draft from 2026-07-19. Later fixes landed in the working tree (tool success flag, Node 20 memory fallback, subagent context, worktree application, doc corrections). The checkboxes below were not rewritten. Trust the code and `npm test` over this plan.
 
 ## 1. Executive summary & locked decisions
 

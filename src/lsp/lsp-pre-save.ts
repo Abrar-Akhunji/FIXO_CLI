@@ -24,6 +24,7 @@
  * mock that returns canned data.
  */
 
+import fs from "node:fs";
 import type { StagedWrite } from "../runtime/staging.js";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,7 @@ export type LspPreSaveResult =
 /** Function that returns diagnostics for a file (or empty). */
 export type LspDiagnosticsProvider = (
   filePath: string,
+  pendingPath?: string,
 ) => Promise<LspDiagnostic[]>;
 
 /** Options for {@link LspPreSaveGate}. */
@@ -183,7 +185,7 @@ export class LspPreSaveGate {
     let raw: LspDiagnostic[];
     try {
       raw = await this.withTimeout(
-        this.provider(entry.targetPath),
+        this.provider(entry.targetPath, entry.pendingPath),
         this.timeoutMs,
       );
     } catch {
@@ -325,10 +327,24 @@ export class LspPreSaveBlockedError extends Error {
  * concrete `LspManager` class so tests can inject a mock.
  */
 export function makeLspProvider(lspManager: {
-  getClientAndSync(filePath: string): Promise<unknown>;
+  getClientAndSync(
+    filePath: string,
+    stagedContent?: string,
+  ): Promise<unknown>;
 }): LspDiagnosticsProvider {
-  return async (filePath: string) => {
-    const client = (await lspManager.getClientAndSync(filePath)) as {
+  return async (filePath: string, pendingPath?: string) => {
+    let stagedContent: string | undefined;
+    if (pendingPath && fs.existsSync(pendingPath)) {
+      try {
+        stagedContent = fs.readFileSync(pendingPath, "utf-8");
+      } catch {
+        /* best-effort fallback to disk */
+      }
+    }
+    const client = (await lspManager.getClientAndSync(
+      filePath,
+      stagedContent,
+    )) as {
       getDiagnostics(filePath: string): unknown[];
     } | null;
     if (!client) return [];

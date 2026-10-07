@@ -51,6 +51,26 @@ test("buildSubagentContext forces mode to BUILD regardless of parent mode", () =
   }
 });
 
+test("buildSubagentContext maps Explore and Plan onto read-only modes", () => {
+  const parent = makeParent({ mode: "BUILD" });
+  assert.equal(
+    buildSubagentContext({ task: "t", type: "Explore" }, parent).mode,
+    "EXPLORE",
+  );
+  assert.equal(
+    buildSubagentContext({ task: "t", type: "Plan" }, parent).mode,
+    "PLAN",
+  );
+  assert.equal(
+    buildSubagentContext({ task: "t", type: "statusline-setup" }, parent).mode,
+    "BUILD",
+  );
+  assert.equal(
+    buildSubagentContext({ task: "t", type: "general-purpose" }, parent).mode,
+    "BUILD",
+  );
+});
+
 test("buildSubagentContext replaces selectedFiles with contextFiles", () => {
   const parent = makeParent();
   const sub = buildSubagentContext(
@@ -70,20 +90,45 @@ test("buildSubagentContext drops parent systemPromptOverride and checkCommand", 
   assert.equal(sub.checkCommand, undefined);
 });
 
-test("buildSubagentContext inherits cwd, model, policy, verbose, yes", () => {
+test("buildSubagentContext inherits cwd, model, policy, and verbose, not allow-all", () => {
   const parent = makeParent({
     cwd: "/var/tmp/cwd-x",
     model: "claude-test",
     policy: "trusted-project",
     verbose: true,
     yes: true,
+    permissionRules: {
+      bash: [
+        { pattern: "npm", decision: "allow" },
+        { pattern: "npm publish", decision: "deny" },
+      ],
+      edit: [
+        { pattern: "src", decision: "allow" },
+        { pattern: "src/secret", decision: "deny" },
+      ],
+    },
   });
   const sub = buildSubagentContext({ task: "t", type: "Explore" }, parent);
   assert.equal(sub.cwd, "/var/tmp/cwd-x");
   assert.equal(sub.model, "claude-test");
   assert.equal(sub.policy, "trusted-project");
   assert.equal(sub.verbose, true);
-  assert.equal(sub.yes, true);
+  assert.equal(sub.yes, false);
+  assert.equal(sub.subagentDepth, 1);
+  assert.deepEqual(sub.permissionRules, {
+    bash: [{ pattern: "npm publish", decision: "deny" }],
+    edit: [{ pattern: "src/secret", decision: "deny" }],
+  });
+});
+
+test("a child cannot spawn another subagent", async () => {
+  const parent = makeParent({ subagentDepth: 1, yes: true });
+  const result = await spawnSubagent(
+    { task: "nested", type: "general-purpose" },
+    parent,
+  );
+  assert.equal(result.success, false);
+  assert.match(result.summary, /depth 1/);
 });
 
 test("buildSubagentContext with no contextFiles gets an empty selectedFiles", () => {

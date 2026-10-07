@@ -582,8 +582,7 @@ export class AtomicStagingManager {
   /**
    * Sweep every run-id directory under `<cwd>/.fixo/staging/`.
    * Returns the total number of expired entries removed. Called
-   * automatically at the start of every streaming run and is also
-   * exposed via the `/fixo gc` slash command.
+   * automatically at the start of every streaming run.
    */
   public static garbageCollectAll(cwd: string, ttlMs?: number): number {
     const root = path.resolve(cwd);

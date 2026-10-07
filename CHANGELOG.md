@@ -6,7 +6,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ---
 
-## [1.0.4] – 2025-06-26
+## [Unreleased]
+
+Working tree after tagged `1.0.8`. Includes `9b48e2e` (codebase stabilization, UI cleanup, and test suite updates) and the fixes below. Not committed or published.
+
+### Fixed
+- Tool success is a boolean on `ToolCallEvent`. The spinner, the dashboard, and worker telemetry use it, so a non-zero exit, a signal, a patch failure, or a cancelled tool is no longer shown as success.
+- Verification commands map a timeout or a null status to status 1. Auto-verify no longer treats that as a pass.
+- Project memory uses `node:sqlite` when it exists and a JSON file store (`memory.file.json`) when it does not, including Node 20. `FIXO_MEMORY_BACKEND=file` forces the file store.
+- `spawn_subagent` inherits model, policy, yes, and verbose. `Explore` runs in EXPLORE, `Plan` in PLAN, and `general-purpose` and `statusline-setup` stay in BUILD.
+- Worktree annotations in assistant text are applied in BUILD mode and stripped before the text is shown or stored. Read-only modes strip them and do not run git.
+- Explanatory tasks that only mention a change, update, or add stay read-only. An imperative mutation still selects BUILD.
+- `read_file`, `write_file`, and `delete_file` share one sensitive-path check, including `.ssh`, credentials, `authorized_keys`, and `.key` files.
+- The background-job success test polls until the process exits.
+- Removed the duplicate `engines` key in `package.json`.
+- `scripts/check-model-registry.js` accepts single- or double-quoted registry entries.
+
+### Documentation
+- README no longer lists tree-sitter repo map, auto-verify, model routing, or the complexity classifier as unfinished.
+- README, SAFETY, and the staging comment no longer advertise `/fixo gc`, `fixo providers`, or `fixo config reset`. The live REPL command is `/providers`.
+
+## [1.0.8] – 2026-06-28
+
+### Changed
+- Cleanup of unused variables and formatting for the 1.0.8 tag.
+
+## [1.0.7] – 2026-06-27
+
+### Changed
+- Default FreeLLMAPI endpoint moved to freellm-for-fixo.
+- Legacy config `apiUrl` values migrate to that endpoint.
+
+## [1.0.6] – 2026-06-27
+
+### Fixed
+- Workspace guard, LSP manager, and string-replace tool behavior.
+
+### Changed
+- Production cleanup and a smaller npm payload.
+
+## [1.0.5] – 2026-06-27
+
+### Added
+- Direct-provider BYOK is the default. The FreeLLMAPI proxy is opt-in.
+- Opt-in OS sandbox for `run_command`.
+- Task router with a live LLM complexity classifier and a keyword short-circuit.
+- Automatic post-edit verification in the single-agent loop.
+- Local fast, heavy, and default model substitution via `preferences.modelRouting`.
+- Tree-sitter symbol extraction in the repo map for TypeScript, JavaScript, Python, Go, and Rust, with configurable walk caps.
+- LSP cross-file references for pinned files.
+- Partial-work preservation when a worker pool fails, and DAG write-set conflict detection.
+- CI and ESLint gates.
+- Manual model-registry check script.
+
+### Fixed
+- Orchestrator rollback is limited to files the worker touched.
+
+### Removed
+- Dead planner façade.
+
+## [1.0.4] – 2026-06-11
 
 ### Security
 - **decryptKey** now throws on AES-256-GCM decryption failure instead of silently returning ciphertext, preventing corrupted keys from being used as live credentials.

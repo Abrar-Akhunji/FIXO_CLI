@@ -265,8 +265,31 @@ export function applyWorktreeAnnotations(
 
 /** Strip worktree annotations from a string (used to clean the assistant output). */
 export function stripWorktreeAnnotations(text: string): string {
+  ANNOTATION_RE.lastIndex = 0;
   return text
     .replace(ANNOTATION_RE, "")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+const WORKTREE_APPLY_MODES = new Set(["BUILD"]);
+
+/**
+ * Apply worktree annotations when `mode` is BUILD (or omitted),
+ * then strip them. Read-only modes strip without touching git.
+ */
+export function consumeAssistantWorktreeText(
+  cwd: string,
+  text: string,
+  mode?: string,
+): { text: string; results: WorktreeResult[] } {
+  const source = typeof text === "string" ? text : "";
+  if (!source) return { text: source, results: [] };
+  const effective = mode && mode.length > 0 ? mode : "BUILD";
+  const annotations = parseWorktreeAnnotations(source);
+  const results =
+    WORKTREE_APPLY_MODES.has(effective) && annotations.length > 0
+      ? applyWorktreeAnnotations(cwd, annotations)
+      : [];
+  return { text: stripWorktreeAnnotations(source), results };
 }

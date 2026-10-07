@@ -25,8 +25,8 @@ test("parseRetryAfter parses HTTP-date form", () => {
   const httpDate = new Date(future).toUTCString();
   const ms = parseRetryAfter(httpDate);
   assert.ok(ms !== null);
-  // Allow ±1s clock skew.
-  assert.ok(Math.abs((ms ?? 0) - 30_000) < 1_000);
+  // HTTP-Date truncates milliseconds (up to 999ms loss) plus runner execution tick; allow ±2.5s window.
+  assert.ok(Math.abs((ms ?? 0) - 30_000) < 2_500);
 });
 
 test("parseRetryAfter clamps to 24h and returns null for malformed values", () => {

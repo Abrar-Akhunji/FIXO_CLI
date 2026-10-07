@@ -23,7 +23,18 @@ export function runVerificationCommand(cwd: string, command: string): string {
   const output = redactSecrets(
     [`$ ${command}`, result.stdout ?? "", result.stderr ?? ""].join("\n"),
   ).trim();
-  return summarizeFailure(output, result.status ?? 0);
+  return summarizeFailure(output, exitStatus(result));
+}
+
+/** Map a spawnSync result to a process status. Timeout and signal are failures. */
+export function exitStatus(result: {
+  status: number | null;
+  error?: Error;
+  signal?: NodeJS.Signals | null;
+}): number {
+  if (typeof result.status === "number" && result.status !== 0) return result.status;
+  if (result.error || result.signal || result.status === null) return 1;
+  return 0;
 }
 
 export function parseCiLog(cwd: string, logPath: string): string {

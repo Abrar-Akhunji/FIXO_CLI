@@ -6,7 +6,7 @@ import { TOOL_DEFINITIONS } from "./tool-definitions.js";
 export { TOOL_DEFINITIONS };
 import fs from "fs";
 import path from "path";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { randomBytes } from "node:crypto";
 import type { ChatToolDefinition } from "../shared/types.js";
 import { colors } from "../ui/colors.js";
@@ -37,6 +37,7 @@ import {
   DEFAULT_PREDICTIVE_BUDGET_PCT,
 } from "./predictive-gate.js";
 import type { AgentClient } from "./agent-client.js";
+import type { AgentContext } from "../types.js";
 import {
   createBranch,
   commitChanges,
@@ -56,6 +57,11 @@ import {
 import { PlatformPathLockedError } from "../workspace-guard.js";
 
 import { McpBridgeManager } from "./mcp-bridge.js";
+import { planModeBlock } from "./plan-gate.js";
+import { cascadingReplace } from "./replacer.js";
+import { waitForChildExit } from "../runtime/background-jobs.js";
+import { answerAskUserQuestion } from "./ask-user.js";
+import type readline from "node:readline";
 import { LspManager } from "../lsp/lsp-manager.js";
 import { webFetch, webSearch } from "./web.js";
 import {
@@ -239,6 +245,7 @@ export const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
   "str_replace",
   "todo_write",
   "run_command_async",
+  "spawn_subagent",
 ]);
 
 /**
@@ -278,17 +285,27 @@ export function getActiveTools(mode?: string): ChatToolDefinition[] {
     const allowed = ["web_fetch", "web_search"];
     tools = tools.filter((t) => allowed.includes(t.function.name));
   } else if (mode === "PLAN") {
-    const readOnly = [
+    // Writes are still listed so the model can update the plan file.
+    // executeTool rejects every other mutation, including shell writes.
+    const allowed = [
       "read_file",
       "list_dir",
       "search_code",
+      "glob_files",
+      "extract_symbols",
+      "extract_imports",
       "lsp_goto_definition",
       "lsp_find_references",
       "lsp_hover",
       "web_fetch",
       "web_search",
+      "todo_read",
+      "ask_user_question",
+      "run_command",
+      "write_file",
+      "str_replace",
     ];
-    tools = tools.filter((t) => readOnly.includes(t.function.name));
+    tools = tools.filter((t) => allowed.includes(t.function.name));
   } else if (mode === "READ_ONLY") {
     // Pillar 5 — strip every mutation tool. The agent sees
     // only read + search + LSP navigation.
@@ -306,6 +323,30 @@ export function getActiveTools(mode?: string): ChatToolDefinition[] {
  */
 export function classifyExecutionRole(task: string): "BUILD" | "READ_ONLY" {
   const lower = task.toLowerCase();
+
+  // Explicit read-only directives always take precedence
+  const explicitReadOnly =
+    /\b(without (modif|chang|edit|alter)ing|read[\s-]only|do not (modif|chang|edit|alter))\b/;
+  if (explicitReadOnly.test(lower)) return "READ_ONLY";
+
+  // A question or explanation stays read-only even when a mutation
+  // word is only a noun ("explain the change", "how do I add a test").
+  const pureQuestion =
+    /^\s*(please\s+)?(can you\s+|could you\s+|would you\s+)?(what|why|how|explain|describe)\b/;
+  if (pureQuestion.test(lower)) return "READ_ONLY";
+
+  // Drop noun uses ("the change", "this update") so they do not
+  // force BUILD. An imperative verb still does.
+  const withoutNounMutations = lower
+    .replace(
+      /\b(the|this|that|a|an|our|their|its|those|these)\s+(fix|patch|repair|change|update|add|write|edit|create|delete|remove)s?\b/g,
+      " ",
+    )
+    .replace(/\b(changes|updates|fixes|writes|edits|additions)\b/g, " ");
+  const imperativeMutation =
+    /\b(fix|patch|repair|resolve|refactor|update|implement|add|create|delete|remove|modify|change|edit|write)\b/;
+  if (imperativeMutation.test(withoutNounMutations)) return "BUILD";
+
   // Read-only keywords — the agent must answer a question or
   // describe something, not modify files.
   const readOnlyPatterns: RegExp[] = [
@@ -327,10 +368,34 @@ export function classifyExecutionRole(task: string): "BUILD" | "READ_ONLY" {
 
 /* ──────────────────────── Tool Executor ──────────────────────── */
 
+/**
+ * True when a tool result is a failure, including command failures
+ * whose text does not start with `Error:`.
+ */
+export function isToolResultFailure(result: string): boolean {
+  const text = (result ?? "").trim();
+  if (text.startsWith("Error:")) return true;
+  if (text.startsWith("Command execution failed:")) return true;
+  if (text.startsWith("Command exited with code")) return true;
+  if (text.includes("(command failed with exit code")) return true;
+  if (text.includes("(command terminated by signal")) return true;
+  if (text.startsWith("Patch failed:")) return true;
+  if (text.startsWith("Subagent failed")) return true;
+  if (text.includes("todo_write: failed")) return true;
+  return false;
+}
+
+function settleToolEvent(event: ToolCallEvent): ToolCallEvent {
+  event.ok = !isToolResultFailure(event.result);
+  return event;
+}
+
 export interface ToolCallEvent {
   tool: string;
   args: Record<string, string>;
   result: string;
+  /** False when the tool failed, timed out, or was cancelled. */
+  ok: boolean;
   isWrite: boolean;
   affectedPath?: string;
 }
@@ -372,6 +437,16 @@ export interface ToolExecutionOptions {
    * yet started executing return an early "Task cancelled" result.
    */
   signal?: AbortSignal;
+  /**
+   * Present only for interactive sessions. `ask_user_question`
+   * uses it. A missing readline returns a tool error instead of
+   * waiting.
+   */
+  rl?: readline.Interface;
+  /** Parent subagent depth. 1 or more cannot spawn another child. */
+  subagentDepth?: number;
+  /** Parent shell and edit rules. The child keeps only the denies. */
+  permissionRules?: AgentContext["permissionRules"];
 }
 
 /* ──────────────────────── Per-process Run ID (Pillar 2) ──────────── */
@@ -610,13 +685,34 @@ export async function executeTool(
     tool: name,
     args,
     result: "",
+    ok: true,
     isWrite: false,
   };
 
   // Check for user cancellation before starting any tool work
   if (options.signal?.aborted) {
     event.result = "Error: Task cancelled by user.";
-    return event;
+    return settleToolEvent(event);
+  }
+
+  if (options.mode === "PLAN") {
+    const blocked = await planModeBlock(name, args, cwd);
+    if (blocked) {
+      event.result = blocked;
+      return settleToolEvent(event);
+    }
+  }
+
+  if (name === "ask_user_question") {
+    event.result = await answerAskUserQuestion(
+      {
+        question: args.question,
+        options: args.options as unknown as string[] | string,
+      },
+      options.rl,
+    );
+    event.isWrite = false;
+    return settleToolEvent(event);
   }
 
   // Single inline spinner shared across the whole tool invocation —
@@ -674,7 +770,7 @@ export async function executeTool(
       event.result = `Error: hook denied (${preHook.hookId ?? "unknown"}): ${reason}`;
       options.session?.record("tool_denied", { tool: name, reason, args });
       renderToolCall({ kind: "error", name, detail: `hook denied: ${reason}` });
-      return event;
+      return settleToolEvent(event);
     }
     if (
       preHook.fired &&
@@ -695,7 +791,7 @@ export async function executeTool(
           name,
           detail: `hook modify rejected: ${reason}`,
         });
-        return event;
+        return settleToolEvent(event);
       }
       for (const [k, v] of Object.entries(applied.args)) {
         if (
@@ -714,7 +810,7 @@ export async function executeTool(
     if (plugin) {
       if (options.signal?.aborted) {
         event.result = "Error: Task cancelled by user.";
-        return event;
+        return settleToolEvent(event);
       }
       const action: GateAction =
         name.includes("read") ||
@@ -740,7 +836,7 @@ export async function executeTool(
           matchedRule: decision.matchedRule,
           source: decision.source,
         });
-        return event;
+        return settleToolEvent(event);
       }
       options.session?.record("tool_started", {
         tool: name,
@@ -768,7 +864,7 @@ export async function executeTool(
         result: truncate(event.result, 2000),
         isWrite: event.isWrite,
       });
-      return event;
+      return settleToolEvent(event);
     }
 
     if (mcpManager.hasTool(name)) {
@@ -796,7 +892,7 @@ export async function executeTool(
           matchedRule: decision.matchedRule,
           source: decision.source,
         });
-        return event;
+        return settleToolEvent(event);
       }
       options.session?.record("tool_started", {
         tool: name,
@@ -819,7 +915,7 @@ export async function executeTool(
         result: truncate(event.result, 2000),
         isWrite: event.isWrite,
       });
-      return event;
+      return settleToolEvent(event);
     }
 
     if (mcpBridgeManager.hasTool(name)) {
@@ -847,7 +943,7 @@ export async function executeTool(
           matchedRule: decision.matchedRule,
           source: decision.source,
         });
-        return event;
+        return settleToolEvent(event);
       }
       options.session?.record("tool_started", {
         tool: name,
@@ -870,7 +966,7 @@ export async function executeTool(
         result: truncate(event.result, 2000),
         isWrite: event.isWrite,
       });
-      return event;
+      return settleToolEvent(event);
     }
 
     const action: GateAction =
@@ -912,7 +1008,7 @@ export async function executeTool(
         matchedRule: decision.matchedRule,
         source: decision.source,
       });
-      return event;
+      return settleToolEvent(event);
     }
     options.session?.record("tool_started", {
       tool: name,
@@ -926,7 +1022,7 @@ export async function executeTool(
       case "read_file": {
         if (options.signal?.aborted) {
           event.result = "Error: Task cancelled by user.";
-          return event;
+          return settleToolEvent(event);
         }
         const guard = new WorkspaceGuard(cwd, options?.allowedOutsidePaths);
         const resolved = guard.resolve(args.path, "file", false);
@@ -1074,7 +1170,7 @@ export async function executeTool(
             break;
           }
         }
-        event.result = executeRunCommand(
+        event.result = await executeRunCommand(
           args.command,
           args.cwd || cwd,
           cwd,
@@ -1400,6 +1496,59 @@ export async function executeTool(
         );
         break;
 
+      case "spawn_subagent":
+        setSpinner({
+          kind: "search",
+          name: "Subagent",
+          detail: truncate(args.task, 40),
+        });
+        {
+          const { spawnSubagent } = await import("./subagent.js");
+          const allowedTypes = [
+            "general-purpose",
+            "statusline-setup",
+            "Explore",
+            "Plan",
+          ] as const;
+          const requestedType = String(args.type ?? "");
+          const type = allowedTypes.includes(
+            requestedType as (typeof allowedTypes)[number],
+          )
+            ? (requestedType as (typeof allowedTypes)[number])
+            : "general-purpose";
+          const res = await spawnSubagent(
+            {
+              task: args.task || "",
+              type,
+              contextFiles: stringListArg(args.contextFiles),
+              runInBackground: flagArg(args.runInBackground),
+            },
+            {
+              task: args.task || "",
+              model: options.model ?? "auto",
+              cwd,
+              verbose,
+              selectedFiles: [],
+              policy: options.policy,
+              yes: false,
+              mode: options.mode,
+              subagentDepth: options.subagentDepth,
+              permissionRules: options.permissionRules,
+            },
+          );
+          const summary =
+            res.summary ||
+            (res.success
+              ? "Subagent completed successfully."
+              : "Subagent failed.");
+          event.result = res.success
+            ? summary
+            : summary.startsWith("Error:")
+              ? summary
+              : `Error: ${summary}`;
+        }
+        break;
+
       default:
         event.result = `Error: Unknown tool "${name}"`;
     }
@@ -1414,17 +1563,15 @@ export async function executeTool(
     }
   }
 
-  // Finalise the inline spinner — convert it to a ✔ or ✗ summary line
-  // based on whether the tool result starts with `Error:`. The brief
-  // summary is the original detail plus an elapsed-time suffix so the
-  // user sees roughly how long the call took.
+  // Finalise the inline spinner from the real success flag. Command
+  // failures, signals, and patch failures do not all start with `Error:`.
+  settleToolEvent(event);
   if (inlineSpinner) {
     const handle = inlineSpinner as InlineSpinnerHandle;
     const elapsedMs = Date.now() - toolStartedAt;
     const elapsedStr =
       elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
-    const failed =
-      typeof event.result === "string" && event.result.startsWith("Error:");
+    const failed = event.ok === false;
     if (failed) {
       handle.fail(
         `${truncate(event.result.replace(/^Error:\s*/, ""), 60)} (${elapsedStr})`,
@@ -1456,7 +1603,7 @@ export async function executeTool(
     event.result = `${event.result}\n[post-hook denied: ${reason}]`;
   }
 
-  return event;
+  return settleToolEvent(event);
 }
 
 /* ──────────────────────── Tool Implementations ──────────────────────── */
@@ -1475,16 +1622,7 @@ function executeReadFile(
     return `Error: File not found: ${filePath}`;
   }
 
-  const baseName = path.basename(resolved).toLowerCase();
-  const lowerPath = resolved.toLowerCase();
-  if (
-    baseName === ".env" ||
-    baseName.startsWith(".env.") ||
-    baseName === "id_rsa" ||
-    baseName === "providers.json" ||
-    lowerPath.includes("/.ssh/") ||
-    lowerPath.endsWith(".pem")
-  ) {
+  if (isSensitiveCredentialPath(resolved)) {
     return `Error: Access to sensitive file "${filePath}" is blocked for security reasons.`;
   }
 
@@ -1650,16 +1788,7 @@ function executeWriteFile(
   const guard = new WorkspaceGuard(cwd);
   const resolved = guard.resolve(filePath, "file", false);
 
-  const baseName = path.basename(resolved).toLowerCase();
-  const lowerPath = resolved.toLowerCase();
-  if (
-    baseName === ".env" ||
-    baseName.startsWith(".env.") ||
-    baseName === "id_rsa" ||
-    baseName === "providers.json" ||
-    lowerPath.includes("/.ssh/") ||
-    lowerPath.endsWith(".pem")
-  ) {
+  if (isSensitiveCredentialPath(resolved)) {
     return Promise.resolve(
       `Error: Access to sensitive file "${filePath}" is blocked for security reasons.`,
     );
@@ -1725,13 +1854,16 @@ function executeWriteFile(
   });
 }
 
-function executeRunCommand(
+export const FOREGROUND_COMMAND_MS = 60_000;
+
+export async function executeRunCommand(
   command: string,
   requestedCwd: string,
   workspaceRoot: string,
   session?: TaskSession,
   sandboxMode?: import("../config.js").SandboxMode,
-): string {
+  waitMs: number = FOREGROUND_COMMAND_MS,
+): Promise<string> {
   const guard = new WorkspaceGuard(workspaceRoot);
   const commandCwd = guard.resolve(requestedCwd, "command cwd", false);
   try {
@@ -1757,25 +1889,81 @@ function executeRunCommand(
         throw sandboxErr;
       }
     } else {
-      result = spawnSync(command, {
+      const child = spawn(command, {
         shell: true,
         cwd: commandCwd,
-        encoding: "utf-8",
-        timeout: 60_000, // 60 second timeout
-        maxBuffer: 1024 * 1024, // 1MB max output
         env: redactedEnv(),
       });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.setEncoding("utf-8");
+      child.stderr?.setEncoding("utf-8");
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const outcome = await waitForChildExit(child, waitMs);
+      const output = redactSecrets(
+        [stdout, stderr].filter(Boolean).join("\n"),
+      );
+      if (outcome.error) {
+        return `Command execution failed: ${outcome.error.message}\n\n${output}`.trim();
+      }
+      if (outcome.timedOut) {
+        const attached = getBackgroundJobRegistry(workspaceRoot).attach({
+          cmd: command,
+          args: [],
+          cwd: commandCwd,
+          child,
+          stdout,
+          stderr,
+        });
+        session?.record("command_finished", {
+          command,
+          cwd: guard.relative(commandCwd),
+          status: "background",
+          output: truncate(output, 4000),
+        });
+        return `Command moved to background as ${attached.jobId}. It is still running. Read it with poll_command_status. Do not sleep-poll.\n\n${output}`.trim();
+      }
+      const status = outcome.code ?? (outcome.signal ? -1 : 0);
+      session?.record("command_finished", {
+        command,
+        cwd: guard.relative(commandCwd),
+        status,
+        output: truncate(output, 4000),
+      });
+      if (outcome.signal) {
+        return `${output}\n\n(command terminated by signal ${outcome.signal})`.trim();
+      }
+      if (status !== 0) {
+        return `${output}\n\n(command failed with exit code ${status})`.trim();
+      }
+      return output || `(command completed with code ${status})`;
     }
     const output = redactSecrets(
       [result.stdout ?? "", result.stderr ?? ""].filter(Boolean).join("\n"),
     );
-    const status = result.status ?? 0;
+    if ((result as any).error) {
+      const errMsg =
+        (result as any).error.message || String((result as any).error);
+      return `Command execution failed: ${errMsg}\n\n${output}`.trim();
+    }
+    const status = result.status ?? (result.signal ? -1 : 0);
     session?.record("command_finished", {
       command,
       cwd: guard.relative(commandCwd),
       status,
       output: truncate(output, 4000),
     });
+    if (result.signal) {
+      return `${output}\n\n(command terminated by signal ${result.signal})`.trim();
+    }
+    if (status !== 0) {
+      return `${output}\n\n(command failed with exit code ${status})`.trim();
+    }
     return output || `(command completed with code ${status})`;
   } catch (error: unknown) {
     const err = error as {
@@ -1940,6 +2128,48 @@ function executeListDir(dirPath: string | undefined, cwd: string): string {
 
 /* ──────────────────────── Helpers ──────────────────────── */
 
+function stringListArg(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  if (typeof value === "string" && value.trim().startsWith("[")) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === "string");
+      }
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function flagArg(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1";
+  }
+  return false;
+}
+
+/** Shared blocklist for read, write, and delete of credential files. */
+export function isSensitiveCredentialPath(resolved: string): boolean {
+  const baseName = path.basename(resolved).toLowerCase();
+  const lowerPath = resolved.replace(/\\/g, "/").toLowerCase();
+  if (lowerPath.includes("/.ssh/")) return true;
+  if (baseName === ".env" || baseName.startsWith(".env.")) return true;
+  if (baseName === "id_rsa" || baseName.startsWith("id_rsa.")) return true;
+  if (baseName === "credentials" || baseName === "credentials.json") return true;
+  if (baseName === "providers.json") return true;
+  if (baseName === "authorized_keys" || baseName === "authorized_keys2") {
+    return true;
+  }
+  if (baseName.endsWith(".pem") || baseName.endsWith(".key")) return true;
+  return false;
+}
+
 function shortenPath(filePath: string, cwd: string): string {
   try {
     const guard = new WorkspaceGuard(cwd);
@@ -1968,7 +2198,27 @@ function executeDeleteFile(
   session?: TaskSession,
 ): string {
   const guard = new WorkspaceGuard(cwd);
-  const resolved = guard.resolve(filePath, "file", true);
+  let resolved: string;
+  try {
+    resolved = guard.resolve(filePath, "file", true);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: ${msg}`;
+  }
+
+  // Pillar 5 — refuse platform-locked paths.
+  try {
+    guard.assertNotPlatformPath(resolved);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: ${msg}`;
+  }
+
+  if (isSensitiveCredentialPath(resolved)) {
+    const filename = path.basename(resolved).toLowerCase();
+    return `Error: Cannot delete sensitive configuration or credentials file: ${filename}`;
+  }
+
   const mutation = session?.canMutate(resolved);
   if (mutation && !mutation.ok) return `Error: ${mutation.reason}`;
   session?.captureBefore(resolved);
@@ -2622,80 +2872,6 @@ export function listAllBackgroundJobs(cwd: string): JobSnapshot[] {
 
 /* ──────────────────── str_replace implementation ──────────────────── */
 
-function escapeRegExp(string: string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function findFuzzyMatches(
-  haystack: string,
-  needle: string,
-): { start: number; end: number; match: string }[] {
-  const tokens = needle.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return [];
-
-  const pattern = tokens.map(escapeRegExp).join("\\s+");
-  const regex = new RegExp(pattern, "g");
-
-  const matches: { start: number; end: number; match: string }[] = [];
-  let match;
-  while ((match = regex.exec(haystack)) !== null) {
-    matches.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      match: match[0],
-    });
-  }
-  return matches;
-}
-
-function adaptNewStringForFuzzy(oldString: string, newString: string): string {
-  const oldLeading = oldString.match(/^\s*/)?.[0] || "";
-  const oldTrailing = oldString.match(/\s*$/)?.[0] || "";
-
-  let adapted = newString;
-  if (oldLeading && adapted.startsWith(oldLeading)) {
-    adapted = adapted.substring(oldLeading.length);
-  }
-  if (oldTrailing && adapted.endsWith(oldTrailing)) {
-    adapted = adapted.substring(0, adapted.length - oldTrailing.length);
-  }
-  return adapted;
-}
-
-/**
- * Count non-overlapping occurrences of `needle` inside `haystack`.
- * Linear scan with a moving cursor — no regex, no allocation.
- */
-function countOccurrences(haystack: string, needle: string): number {
-  if (needle.length === 0) return 0;
-  let count = 0;
-  let from = 0;
-  while (true) {
-    const idx = haystack.indexOf(needle, from);
-    if (idx === -1) return count;
-    count += 1;
-    from = idx + needle.length;
-  }
-}
-
-/**
- * Apply a single in-place string replacement. Either replaces the
- * first match (default) or every match (when `replaceAll` is true).
- */
-function applyReplacement(
-  content: string,
-  oldString: string,
-  newString: string,
-  replaceAll: boolean,
-): string {
-  if (replaceAll) {
-    // Manual split/join is faster than String.prototype.replaceAll
-    // for large strings under V8 (avoids the internal RegExp).
-    return content.split(oldString).join(newString);
-  }
-  return content.replace(oldString, newString);
-}
-
 /**
  * Implementation of the `str_replace` tool. Strictly typed and
  * gated by all four safety pillars:
@@ -2766,53 +2942,20 @@ export async function executeStrReplace(
 
   // Load the current content.
   const content = fs.readFileSync(resolved, "utf-8");
-  const exactOccurrences = countOccurrences(content, args.oldString);
   const replaceAll = args.replaceAll === true;
   const expectUnique = !replaceAll && args.expectUnique !== false;
 
-  let fuzzyMatches: { start: number; end: number; match: string }[] = [];
-  if (exactOccurrences === 0) {
-    fuzzyMatches = findFuzzyMatches(content, args.oldString);
+  const replaceResult = cascadingReplace(content, args.oldString, args.newString, {
+    replaceAll,
+    expectUnique,
+  });
+
+  if (!replaceResult.success || !replaceResult.newContent) {
+    return `Error: str_replace: ${replaceResult.error ?? "oldString not found in " + args.path}`;
   }
 
-  const occurrences =
-    exactOccurrences > 0 ? exactOccurrences : fuzzyMatches.length;
-
-  if (occurrences === 0) {
-    return `Error: str_replace: oldString not found in ${args.path}. (No exact or fuzzy match found)`;
-  }
-  if (occurrences > 1 && expectUnique) {
-    const matchType = exactOccurrences > 0 ? "exact" : "fuzzy";
-    return (
-      `Error: str_replace: oldString appears ${occurrences} times (${matchType} matches) in ${args.path}. ` +
-      `Pass replaceAll=true or expectUnique=false to proceed.`
-    );
-  }
-
-  let newContent = content;
-
-  if (exactOccurrences > 0) {
-    newContent = applyReplacement(
-      content,
-      args.oldString,
-      args.newString,
-      replaceAll,
-    );
-  } else {
-    const matchesToReplace = replaceAll ? fuzzyMatches : [fuzzyMatches[0]];
-    const adaptedNewString = adaptNewStringForFuzzy(
-      args.oldString,
-      args.newString,
-    );
-    // Iterate backwards so replacement doesn't shift earlier indices
-    for (let i = matchesToReplace.length - 1; i >= 0; i--) {
-      const match = matchesToReplace[i];
-      newContent =
-        newContent.substring(0, match.start) +
-        adaptedNewString +
-        newContent.substring(match.end);
-    }
-  }
+  const newContent = replaceResult.newContent;
+  const occurrences = replaceResult.occurrences ?? 1;
 
   // Pillar 3 — LSP pre-save compilation gate. The gate's
   // `enforce` throws on `block`-mode failures; we surface the

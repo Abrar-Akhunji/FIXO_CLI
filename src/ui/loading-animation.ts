@@ -1,4 +1,6 @@
 import { C, visLen } from "./colors.js";
+import { reportActivity, setActivitySink } from "./activity.js";
+import { sessionScreenOwnsActivity } from "./session-screen.js";
 import { safeWrite, safeWriteLine } from "./render-primitives.js";
 
 export interface LoadingPhase {
@@ -15,17 +17,6 @@ export interface LoadingPhase {
   detail?: string;
   icon: string;
 }
-
-const HINTS = [
-  "Tip: Use /compact to free context tokens",
-  "Tip: Press Escape to cancel the current task",
-  "Tip: Use /plan to create a step-by-step execution plan",
-  "Tip: Use /mode PLAN for read-only exploration",
-  "Tip: Use /diff to see what FixO changed",
-  "Tip: Use /undo to revert the last change",
-  "Tip: Use /memory to teach FixO project conventions",
-  "Tip: Use /test to run project tests",
-];
 
 // Lava Flow Bar gradient
 const GRADIENT = ["░", "▒", "▓", "█", "▓", "▒", "░"];
@@ -51,21 +42,21 @@ export class LoadingAnimation {
   };
   private timer: NodeJS.Timeout | null = null;
   private frame = 0;
-  private hints: string[];
-  private hintIndex = 0;
   private startedAt = 0;
   private turnCount = 1;
   private isTTY = process.stdout.isTTY;
 
-  constructor() {
-    // Shuffle hints on creation
-    this.hints = [...HINTS].sort(() => Math.random() - 0.5);
-  }
-
   start(): void {
+    if (sessionScreenOwnsActivity()) {
+      this.startedAt = Date.now();
+      return;
+    }
     if (this.timer) return;
     this.startedAt = Date.now();
     this.frame = 0;
+    setActivitySink((line) => {
+      this.phase = { ...this.phase, detail: line };
+    });
 
     if (this.isTTY) {
       // Hide cursor
@@ -81,6 +72,11 @@ export class LoadingAnimation {
 
   setPhase(phase: Partial<LoadingPhase>): void {
     this.phase = { ...this.phase, ...phase };
+    if (sessionScreenOwnsActivity()) {
+      const detail = this.phase.detail ? ` · ${this.phase.detail}` : "";
+      reportActivity(`${this.phase.icon} ${this.phase.label}${detail}`);
+      return;
+    }
     if (!this.isTTY && this.timer === null) {
       // In non-TTY, we only log when phase changes so the user isn't spammed, but knows it's doing something.
       safeWriteLine(
@@ -94,11 +90,12 @@ export class LoadingAnimation {
   }
 
   stop(): void {
+    if (sessionScreenOwnsActivity()) return;
+    setActivitySink(null);
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
-      // Clear the two lines we used and restore cursor
-      safeWrite("\r\x1b[K\x1b[1B\r\x1b[K\x1b[1A\x1b[?25h");
+      safeWrite("\r\x1b[K\x1b[?25h");
     }
   }
 
@@ -145,21 +142,8 @@ export class LoadingAnimation {
     const paddingLen = Math.max(2, cols - visLen(mainText) - visLen(meta) - 2);
     const paddedMainLine = mainText + " ".repeat(paddingLen) + meta;
 
-    // Rotate hint every 8 seconds, but only show after 3 seconds
-    let hintLine = "";
-    if (elapsedMs > 3000) {
-      this.hintIndex =
-        Math.floor((elapsedMs - 3000) / 8000) % this.hints.length;
-      const hint = this.hints[this.hintIndex];
-      hintLine = `           ${C.SNOW4}╰─ ${hint}${C.RESET}`;
-    }
-
-    // Draw using carriage return and ansi moves to prevent scrolling
-    // \r       - return to start of line
-    // \x1b[K   - clear line
-    // \n       - move down
-    // \r\x1b[K - clear second line
-    // \x1b[1A  - move back up
-    safeWrite(`\r\x1b[K${paddedMainLine}\n\r\x1b[K${hintLine}\x1b[1A`);
+    // One row, replaced in place. A second row plus cursor-up leaves
+    // a copy behind whenever a log line moves the cursor.
+    safeWrite(`\r\x1b[K${paddedMainLine}`);
   }
 }

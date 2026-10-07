@@ -1,6 +1,6 @@
 # Operational Safety & Enterprise Hardening
 
-> **Status:** Production-ready · 234/234 tests passing · Pillar 1–4 landed
+> **Status:** Beta. Pillar 1–4 are in the tree. A fixed test count is omitted here because it goes stale; run `npm test` on the tree you have. CI on the last published main commit was not green.
 
 This document specifies the **threat model** and **safety
 architecture** of the four independent safety layers that ship
@@ -337,7 +337,7 @@ Two sweeps keep the staging directory from silently bloating:
 | Sweep | Trigger | Behaviour |
 |---|---|---|
 | `mgr.gc(now?)` | Per-run, called at the end of a streaming cycle. | Walks `<stagingDir>/`, removes entries with `createdAt < now - ttlMs`. Default TTL is **24 hours**. |
-| `AtomicStagingManager.garbageCollectAll(cwd, ttlMs?)` | Auto-invoked at the **start** of every `runStreaming` lifecycle, in <2ms typical. Also exposed via `/fixo gc` (commit 10 in the Phase 2 plan). | Walks `<cwd>/.fixo/staging/*/`, delegates to `gc()` for each run-id directory. |
+| `AtomicStagingManager.garbageCollectAll(cwd, ttlMs?)` | Auto-invoked at the **start** of every `runStreaming` lifecycle, in <2ms typical. | Walks the staging root and delegates to `gc()` for each run-id directory. |
 
 GC uses the `.meta.json` `createdAt` field (timestamp) rather
 than file mtime so the TTL is a deterministic policy decision,
@@ -797,14 +797,10 @@ ls -la ~/.fixo/staging/
 or `403 Forbidden`.
 
 **Diagnosis:**
-1. Confirm the key is configured:
-   ```bash
-   fixo providers list
-   ```
-2. Re-add the key if needed:
-   ```bash
-   fixo providers add openai sk-proj-...
-   ```
+1. Inside the REPL, list keys with `/providers` or `/providers list`.
+2. Add or replace a key with `/providers add <name>` (for example
+   `/providers add openai`). The command prompts for the key.
+   Do not pass the key as a shell argument.
 3. The vault is auto-hydrated on the next `getDirectConfig`
    call, so the new key is visible immediately.
 
@@ -820,16 +816,17 @@ third-party plugin is interfering with the vault / staging
 managers.
 
 **Response:**
+There is no `fixo providers reset-vault` or `fixo config reset` command.
+Edit `~/.fixocli/config.json` (`preferences.safety`) by hand, and remove
+ephemeral staging if you need a clean directory:
+
 ```bash
-# Drop the staging directory (ephemeral)
 rm -rf ~/.fixo/staging
-
-# Drop the cached vault singleton (next call re-hydrates)
-fixo providers reset-vault
-
-# Reset to safe production defaults
-fixo config reset --section safety
 ```
+
+Provider keys live in `~/.fixocli/providers.json`. Remove one from the
+REPL with `/providers remove <name>`. The next provider call re-reads
+the vault.
 
 ---
 
@@ -854,8 +851,9 @@ rollback logic are all inherited.
 
 1. Add the entry to `PROVIDER_REGISTRY` in
    `src/agent/providers-manager.ts`.
-2. Users add the key via `fixo providers add <name> <key>` —
-   `add()` automatically ingests into the vault.
+2. Users add the key inside the REPL with `/providers add <name>`.
+   The key is prompted for and stored in the vault. Do not put it
+   on the command line.
 3. Add the resolution rule in `AgentClient.resolveDirectConfig`
    so the new provider is selected for the appropriate model
    prefix.
@@ -942,8 +940,8 @@ node --import tsx --test src/__tests__/*.test.ts
 
 ---
 
-*Last updated with the Phase 2 safety refactor — 234/234 tests
-green, build clean, ready for production.*
+*Last updated 2026-10-07. This file describes the safety design.
+It is not a release certificate.*
 
 ---
 
@@ -978,11 +976,11 @@ gate it.
 | Tool / capability | What it does | Pillar gates |
 | :--- | :--- | :--- |
 | `run_command_async` / `poll_command_status` / `kill_command` | Non-blocking shell execution with ring-buffered I/O caps. | Pillar 1 (command-parser AST validation) + granular permissions |
-| `spawn_subagent` | Context-isolated sub-orchestrator loops. | Inherits parent's policy, vault, and workspace guard |
+| `spawn_subagent` | Context-isolated worker. `Explore` is EXPLORE, `Plan` is PLAN, other types are BUILD. | Inherits the parent model, policy, yes flag, vault, and workspace guard |
 | `/mcp` console (list / add / restart) | Interactive MCP server management. | Config-only — does not touch the workspace |
 | `PreToolUse` / `PostToolUse` hooks | Synchronised local-script execution hooks. | Hook scripts run in a constrained subprocess and cannot escape `cwd` |
 | Granular permission rules (`Tool(arg-glob)`) | Pattern-matched first-match-wins permission engine. | Default-ask for any new Phase 1–3 tool with no matching rule |
-| Worktree annotations (`[worktree:create branch=x]`) | Safe parallel-branch experiments. | Git invoked shell-free via `execFileSync` — no shell expansion |
+| Worktree annotations (`[worktree:create branch=x]`) | Applied from assistant text in BUILD mode, then stripped. Read-only modes do not run git. | Git invoked shell-free via `execFileSync` — no shell expansion |
 
 ### Phase 4 — Predictive Gates & Permission Wiring
 

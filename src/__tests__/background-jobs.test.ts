@@ -28,6 +28,20 @@ function mkTmp(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+async function waitForJobExit(
+  reg: BackgroundJobRegistry,
+  jobId: string,
+  timeoutMs = 5000,
+) {
+  const started = Date.now();
+  let snap = reg.poll({ jobId });
+  while (snap && snap.status === "running" && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    snap = reg.poll({ jobId });
+  }
+  return snap;
+}
+
 test("register spawns a short command and reports success on exit", async () => {
   const cwd = mkTmp("bg-test-");
   try {
@@ -40,9 +54,7 @@ test("register spawns a short command and reports success on exit", async () => 
     assert.equal(out.ok, true);
     assert.ok(out.jobId);
     assert.ok(typeof out.pid === "number");
-    // Wait for exit.
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    const snap = reg.poll({ jobId: out.jobId! });
+    const snap = await waitForJobExit(reg, out.jobId!);
     assert.ok(snap);
     assert.equal(snap?.status, "exited");
     assert.equal(snap?.exitCode, 0);

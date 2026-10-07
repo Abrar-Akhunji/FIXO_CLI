@@ -27,6 +27,7 @@ import { ProvidersManager } from "../agent/providers-manager.js";
 import { C, colors } from "./colors.js";
 import { COMMANDS_WITH_DESC, printHelp, formatInputPaths } from "./render.js";
 import { renderStatusBar, type CLIState } from "./render-primitives.js";
+import { SessionScreen } from "./session-screen.js";
 
 const c = colors;
 
@@ -85,46 +86,86 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         await import("../runtime/session-snapshots.js");
       const result = loadSnapshot(cwd, resume);
       if (!result.ok || !result.snapshot) {
-        console.log(
-          `\n${c.red}✗ Resume failed: ${result.error ?? "unknown error"}${c.reset}`,
-        );
-        const available = listSnapshots(cwd);
-        if (available.length > 0) {
-          console.log(
-            `\n${c.dim}Available snapshots for this workspace:${c.reset}`,
-          );
-          for (const s of available.slice(0, 5)) {
-            console.log(
-              `  ${c.cyan}${s.id}${c.reset}  ${c.dim}(${s.items} items, ${s.tokens} tokens)${c.reset}`,
-            );
-          }
+        const { SessionManager } = await import("../agent/conversation.js");
+        let saved: Awaited<ReturnType<typeof SessionManager.findSession>> | null =
+          null;
+        try {
+          saved = SessionManager.findSession(resume);
+        } catch {
+          saved = null;
         }
-        process.exit(1);
-      }
-      const snap = result.snapshot;
-      conversation.restoreFromSnapshot(
-        snap.conversation.map((m) => ({
-          role: m.role,
-          content: m.content,
-          name: m.name,
-        })),
-        snap.summary ?? "",
-        snap.tokens,
-      );
-      currentModel = snap.model;
-      conversation.setContextLimit(currentModel);
-      currentMode = snap.mode;
-      selectedFiles = [...snap.selectedFiles];
-      currentSessionId = snap.id;
-      currentSessionLabel = snap.label;
-      console.log(
-        `\n${c.green}✓ Resumed session${c.reset} ${c.dim}${snap.id}${c.reset}`,
-      );
-      console.log(
-        `  ${c.dim}messages=${snap.conversation.length} tokens=${snap.tokens} model=${snap.model} mode=${snap.mode}${c.reset}`,
-      );
-      if (snap.summary) {
-        console.log(`  ${c.dim}summary: ${snap.summary}${c.reset}`);
+        if (
+          saved &&
+          (!saved.cwd || path.resolve(saved.cwd) === path.resolve(cwd))
+        ) {
+          conversation.importHistory(saved.history);
+          conversation.setSummary(saved.summary || "");
+          currentModel = saved.model;
+          conversation.setContextLimit(currentModel);
+          currentMode = "BUILD";
+          currentSessionId = saved.sessionId;
+          currentSessionLabel = saved.label;
+          sessionModifiedFiles = [...(saved.modifiedFiles || [])];
+          console.log(
+            `\n${c.green}✓ Resumed session${c.reset} ${c.dim}${saved.sessionId}${c.reset}`,
+          );
+          console.log(
+            `  ${c.dim}messages=${saved.history.length} model=${saved.model} mode=BUILD${c.reset}`,
+          );
+        } else {
+          console.log(
+            `\n${c.red}✗ Resume failed: ${result.error ?? "unknown error"}${c.reset}`,
+          );
+          const available = listSnapshots(cwd);
+          if (available.length > 0) {
+            console.log(
+              `\n${c.dim}Available snapshots for this workspace:${c.reset}`,
+            );
+            for (const s of available.slice(0, 5)) {
+              console.log(
+                `  ${c.cyan}${s.id}${c.reset}  ${c.dim}(${s.items} items, ${s.tokens} tokens)${c.reset}`,
+              );
+            }
+          }
+          const sessions = SessionManager.listSessions(cwd);
+          if (sessions.length > 0) {
+            console.log(
+              `\n${c.dim}Saved sessions for this workspace:${c.reset}`,
+            );
+            for (const s of sessions.slice(0, 5)) {
+              console.log(
+                `  ${c.cyan}${s.sessionId}${c.reset}  ${c.dim}(${s.messageCount} msgs)${c.reset}`,
+              );
+            }
+          }
+          process.exit(1);
+        }
+      } else {
+        const snap = result.snapshot;
+        conversation.restoreFromSnapshot(
+          snap.conversation.map((m) => ({
+            role: m.role,
+            content: m.content,
+            name: m.name,
+          })),
+          snap.summary ?? "",
+          snap.tokens,
+        );
+        currentModel = snap.model;
+        conversation.setContextLimit(currentModel);
+        currentMode = "BUILD";
+        selectedFiles = [...snap.selectedFiles];
+        currentSessionId = snap.id;
+        currentSessionLabel = snap.label;
+        console.log(
+          `\n${c.green}✓ Resumed session${c.reset} ${c.dim}${snap.id}${c.reset}`,
+        );
+        console.log(
+          `  ${c.dim}messages=${snap.conversation.length} tokens=${snap.tokens} model=${snap.model} mode=BUILD${c.reset}`,
+        );
+        if (snap.summary) {
+          console.log(`  ${c.dim}summary: ${snap.summary}${c.reset}`);
+        }
       }
     } catch (err) {
       console.log(
@@ -230,6 +271,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     },
   });
 
+  const sessionScreen = SessionScreen.openIfEnabled({
+    mode: currentMode,
+    model: currentModel,
+  });
+
   // ──── Lava status bar ────
   // The new lava-redesign status bar lives directly above the REPL
   // prompt. It re-renders on every mode change and every model
@@ -312,9 +358,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         console.log(
           `${c.yellow}⚠ Live fetch unavailable — using cached list (~${ageHours}h old).${c.reset}`,
         );
+      } else if (result.source === "no-key") {
+        console.log(
+          `${c.yellow}No API key for ${name}. Run /providers add ${name}.${c.reset}`,
+        );
       } else {
         console.log(
-          `${c.yellow}⚠ Live fetch failed — using built-in registry list (marked [unverified] in /model).${c.reset}`,
+          `${c.yellow}${name} did not return models.${c.reset}`,
         );
       }
     } catch (err: any) {
@@ -360,6 +410,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   // Register synchronous exit cleanups
   const exitCleanup = () => {
+    try {
+      sessionScreen?.close();
+    } catch {
+      // The terminal is already going away.
+    }
     try {
       if (process.stdout.isTTY) {
         fs.writeSync(1, "\x1b[?2004l");
@@ -1088,6 +1143,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   // ──── REPL loop ────
   const promptForInput = (): void => {
+    sessionScreen?.setMeta({ mode: currentMode, model: currentModel });
+    sessionScreen?.resume();
     // Restore raw mode and resume streams to recover from any clack/spinner interactions
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
@@ -1196,6 +1253,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
     // ─── Slash commands ───
     if (input.startsWith("/")) {
+      sessionScreen?.suspend();
       const parts = input.split(/\s+/).filter(Boolean);
       const cmd = parts[0];
       const args = parts.slice(1);
@@ -1369,6 +1427,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             // Sync state back
             currentModel = ctx.state.currentModel;
             currentMode = ctx.state.currentMode as any;
+            const followUp = ctx.state.pendingFollowUp;
+            ctx.state.pendingFollowUp = undefined;
             currentSessionId = ctx.state.currentSessionId;
             currentSessionLabel = ctx.state.currentSessionLabel;
             sessionModifiedFiles = ctx.state.sessionModifiedFiles;
@@ -1380,6 +1440,9 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
             if (ctx.workspaceFiles) {
               workspaceFiles = ctx.workspaceFiles;
+            }
+            if (followUp && followUp.trim().length > 0) {
+              await handleInput(followUp);
             }
             return;
           }
@@ -1510,6 +1573,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // to the pre-extraction inline path. The rollback inside the
     // complex path uses git.discardChangesIn() (Phase 0.0 — scoped).
     const { routeAndExecute } = await import("../agent/task-router.js");
+    sessionScreen?.beginTask();
     const routed = await routeAndExecute(input, context, {
       agent,
       conversation,
@@ -1630,6 +1694,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         },
         currentSessionId,
         currentSessionLabel,
+        cwd,
       );
       const { saveSnapshot } = await import("../runtime/session-snapshots.js");
       saveSnapshot({

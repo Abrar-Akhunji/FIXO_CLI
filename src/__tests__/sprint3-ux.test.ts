@@ -41,10 +41,12 @@ test("Sprint 3 UX Polish Tests", async (t) => {
       };
 
       try {
+        const rl = { pause() {}, resume() {} };
         const res = await (agent as any).askPermission(
           "write_file",
           { path: "test.txt" },
           "/tmp",
+          rl,
         );
         assert.equal(res, true);
         assert.equal((agent as any).allowAll, true);

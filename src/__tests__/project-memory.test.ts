@@ -12,6 +12,8 @@ import {
   appendSessionSummary,
   readSessionHistory,
   retrieveRelevantFacts,
+  doctor,
+  getMemoryBackend,
 } from "../project-memory.js";
 import { getWorkspaceStateDir } from "../config.js";
 import { initializePlugins, loadedPlugins } from "../agent/tool-executor.js";
@@ -94,6 +96,37 @@ test("Session history append and read", () => {
   assert.equal(history.length, 2);
   assert.equal(history[0], "Session 2 failed.");
   assert.equal(history[1], "Session 1 completed successfully.");
+});
+
+test("file memory backend migrates facts and session history", () => {
+  const previous = process.env.FIXO_MEMORY_BACKEND;
+  process.env.FIXO_MEMORY_BACKEND = "file";
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-mem-file-"));
+  try {
+    const fixoDir = path.join(getWorkspaceStateDir(tempDir), "memory");
+    fs.mkdirSync(fixoDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(fixoDir, "memory.md"),
+      "- Fact from file backend.\n",
+      "utf-8",
+    );
+
+    const report = doctor(tempDir);
+    assert.equal(getMemoryBackend(), "file");
+    assert.match(report, /Memory store: file/);
+    assert.match(readMemory(tempDir), /Fact from file backend/);
+    appendMemory(tempDir, "Fact from file backend.");
+    const memory = readMemory(tempDir);
+    assert.equal(memory.split("Fact from file backend").length - 1, 1);
+
+    appendSessionSummary(tempDir, "file session");
+    assert.deepEqual(readSessionHistory(tempDir), ["file session"]);
+    assert.ok(fs.existsSync(path.join(fixoDir, "memory.file.json")));
+  } finally {
+    if (previous === undefined) delete process.env.FIXO_MEMORY_BACKEND;
+    else process.env.FIXO_MEMORY_BACKEND = previous;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("Plugin loader allowlist validation", async () => {

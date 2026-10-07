@@ -179,3 +179,45 @@ export class SkillsManager {
 }
 
 export const skillsManager = new SkillsManager();
+
+/** Hard cap so a skill cannot consume the whole context window. */
+export const SKILL_PROMPT_CAP = 8_000;
+
+export function capSkillPrompt(text: string): string {
+  if (text.length <= SKILL_PROMPT_CAP) return text;
+  return (
+    text.slice(0, SKILL_PROMPT_CAP) +
+    "\n… (skill text truncated to 8000 characters)"
+  );
+}
+
+/**
+ * Skill text for this task. Mentions of `@name` load that skill
+ * even when the workspace heuristic misses it. The result is capped.
+ */
+export function skillsBlockForTask(cwd: string, task: string): string {
+  skillsManager.initialize(cwd);
+  const parts: string[] = [];
+  const seen = new Set<string>();
+
+  const relevant = skillsManager.getRelevantSkillsPrompt(cwd, task);
+  if (relevant.trim().length > 0) {
+    parts.push(relevant.trim());
+    for (const skill of skillsManager.getSkills()) {
+      if (relevant.includes(`### Skill: ${skill.name}`)) seen.add(skill.name);
+    }
+  }
+
+  const mention = /(?:^|\s)@([A-Za-z0-9._-]+)/g;
+  for (const match of task.matchAll(mention)) {
+    const name = match[1];
+    if (!name || seen.has(name)) continue;
+    const skill = skillsManager.getSkill(name);
+    if (!skill) continue;
+    seen.add(name);
+    parts.push(`### Skill: ${skill.name}\n${skill.content}`);
+  }
+
+  if (parts.length === 0) return "";
+  return capSkillPrompt(parts.join("\n\n"));
+}

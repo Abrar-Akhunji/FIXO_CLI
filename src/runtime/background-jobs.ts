@@ -80,6 +80,47 @@ export interface RegisterResult {
   error?: string;
 }
 
+export function waitForChildExit(
+  child: ChildProcess,
+  waitMs: number,
+): Promise<{
+  timedOut: boolean;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  error?: Error;
+}> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value: {
+      timedOut: boolean;
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      error?: Error;
+    }) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      finish({ timedOut: true, code: null, signal: null });
+    }, waitMs);
+    child.once("error", (error) => {
+      finish({ timedOut: false, code: null, signal: null, error });
+    });
+    child.once("exit", (code, signal) => {
+      finish({ timedOut: false, code, signal });
+    });
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish({
+        timedOut: false,
+        code: child.exitCode,
+        signal: child.signalCode,
+      });
+    }
+  });
+}
+
 export interface PollInput {
   jobId: string;
   tailLines?: number;
@@ -285,6 +326,74 @@ export class BackgroundJobRegistry {
       telemetry.asyncSpawn({ jobId: id, cmd: input.cmd, pid: job.pid }),
     );
     return { ok: true, jobId: id, pid: job.pid };
+  }
+
+  /**
+   * Take ownership of a process that was already spawned. Used when
+   * a foreground command is still running at the wait budget.
+   */
+  attach(input: {
+    cmd: string;
+    args: string[];
+    cwd: string;
+    child: ChildProcess;
+    stdout?: string;
+    stderr?: string;
+  }): { ok: true; jobId: string } {
+    const id = `job_${randomUUID().slice(0, 8)}`;
+    const job: BackgroundJob = {
+      id,
+      cmd: input.cmd,
+      args: [...input.args],
+      cwd: input.cwd,
+      pid: input.child.pid,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      stdout: input.stdout ?? "",
+      stderr: input.stderr ?? "",
+      totalStdoutBytes: Buffer.byteLength(input.stdout ?? ""),
+      totalStderrBytes: Buffer.byteLength(input.stderr ?? ""),
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    };
+    this.jobs.set(id, job);
+    this.processes.set(id, input.child);
+    const stdoutBuf = {
+      text: job.stdout,
+      truncated: false,
+      bytes: job.totalStdoutBytes,
+    };
+    const stderrBuf = {
+      text: job.stderr,
+      truncated: false,
+      bytes: job.totalStderrBytes,
+    };
+    input.child.stdout?.setEncoding("utf-8");
+    input.child.stderr?.setEncoding("utf-8");
+    input.child.stdout?.on("data", (chunk: string) => {
+      appendCapped(stdoutBuf, chunk);
+      job.stdout = stdoutBuf.text;
+      job.stdoutTruncated = stdoutBuf.truncated;
+      job.totalStdoutBytes = stdoutBuf.bytes;
+    });
+    input.child.stderr?.on("data", (chunk: string) => {
+      appendCapped(stderrBuf, chunk);
+      job.stderr = stderrBuf.text;
+      job.stderrTruncated = stderrBuf.truncated;
+      job.totalStderrBytes = stderrBuf.bytes;
+    });
+    input.child.on("exit", (code, signal) => {
+      job.exitedAt = new Date().toISOString();
+      if (signal === "SIGTERM" || signal === "SIGKILL") job.status = "killed";
+      else if (code === 0) job.status = "exited";
+      else {
+        job.status = "failed";
+        job.failureReason = `exit code ${String(code)}`;
+      }
+      job.exitCode = code ?? undefined;
+      this.processes.delete(id);
+    });
+    return { ok: true, jobId: id };
   }
 
   /** Read a snapshot. Honours `tailLines` and `sinceBytes` for the streams. */

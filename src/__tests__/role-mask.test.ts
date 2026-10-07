@@ -55,6 +55,19 @@ test("classifyExecutionRole flags analysis / review / explanation tasks as READ_
   );
 });
 
+test("classifyExecutionRole keeps explanatory tasks read-only when a mutation word is a noun", () => {
+  assert.equal(classifyExecutionRole("explain the change"), "READ_ONLY");
+  assert.equal(
+    classifyExecutionRole("what does this update do"),
+    "READ_ONLY",
+  );
+  assert.equal(classifyExecutionRole("how do I add a test"), "READ_ONLY");
+  assert.equal(
+    classifyExecutionRole("review the diff and update the tests"),
+    "BUILD",
+  );
+});
+
 test("classifyExecutionRole flags write tasks as BUILD", () => {
   assert.equal(classifyExecutionRole("add a new test for staging.ts"), "BUILD");
   assert.equal(
