@@ -14,6 +14,14 @@ import {
 } from "./command-parser.js";
 
 export const PLAN_FILE_RELATIVE = path.join(".fixo", "last-plan.json");
+export const PLAN_MD_RELATIVE = path.join(".fixo", "plan.md");
+export const ROOT_PLAN_MD = "plan.md";
+
+export const ALLOWED_PLAN_FILES = [
+  PLAN_FILE_RELATIVE,
+  PLAN_MD_RELATIVE,
+  ROOT_PLAN_MD,
+];
 
 const MUTATING_BINS = new Set([
   "rm",
@@ -63,13 +71,12 @@ const PACKAGE_MUTATING = new Set([
 ]);
 
 export function planModeError(tool: string): string {
-  return `Error: ${tool} is blocked in PLAN mode. The only writable path is ${PLAN_FILE_RELATIVE}. Switch to BUILD after the plan is approved.`;
+  return `Error: ${tool} is blocked in PLAN mode. The only writable path is ${PLAN_FILE_RELATIVE} or ${PLAN_MD_RELATIVE}. Switch to BUILD after the plan is approved.`;
 }
 
 export function isPlanFilePath(cwd: string, target: string): boolean {
   const resolved = path.resolve(cwd, target);
-  const plan = path.resolve(cwd, PLAN_FILE_RELATIVE);
-  return resolved === plan;
+  return ALLOWED_PLAN_FILES.some((rel) => resolved === path.resolve(cwd, rel));
 }
 
 function basenameOf(binary: string): string {
@@ -136,6 +143,9 @@ export async function planModeBlock(
   args: Record<string, string>,
   cwd: string,
 ): Promise<string | null> {
+  if (name === "enter_plan_mode" || name === "exit_plan_mode") {
+    return null;
+  }
   if (name === "write_file" || name === "str_replace") {
     const target = args.path;
     if (typeof target === "string" && isPlanFilePath(cwd, target)) return null;

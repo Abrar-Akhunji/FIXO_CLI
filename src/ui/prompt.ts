@@ -1,4 +1,5 @@
 import { commandRegistry } from "./commands/index.js";
+import { stopAllLoops } from "./commands/loop-command.js";
 import type { CommandContext } from "./commands/types.js";
 /**
  * Interactive REPL shell for FixO CLI.
@@ -21,7 +22,12 @@ import { listRuns, showRun } from "../runtime/task-session.js";
 import { checkPermission } from "../agent/permissions.js";
 import { redactedEnv, redactSecrets } from "../runtime/redaction.js";
 import { buildIndex, explainIndexedTarget, findInIndex } from "../indexer.js";
-import { mcpManager, mcpBridgeManager } from "../agent/tool-executor.js";
+import {
+  mcpManager,
+  mcpBridgeManager,
+  detachCurrentForegroundCommand,
+} from "../agent/tool-executor.js";
+import { getBackgroundJobRegistry } from "../runtime/background-jobs.js";
 import { ProvidersManager } from "../agent/providers-manager.js";
 
 import { C, colors } from "./colors.js";
@@ -65,11 +71,27 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   skillsManager.initialize(cwd);
   await mcpBridgeManager.initialize(cwd);
 
+  const bgReg = getBackgroundJobRegistry(cwd);
+  const onBgJobFinished = (job: any) => {
+    const exitText =
+      job.exitCode === 0
+        ? `${c.green}exited with code 0${c.reset}`
+        : `${c.red}failed with code ${job.exitCode ?? "?"}${c.reset}`;
+    process.stdout.write(
+      `\n  ${c.dim}[bg-job]${c.reset} ${c.bold}${job.id}${c.reset} (${(job.cmd || "").slice(0, 40)}) ${exitText}\n`,
+    );
+    if (isPrompting) {
+      rl.prompt(true);
+    }
+  };
+  bgReg.on("job-finished", onBgJobFinished);
+
   const { randomUUID } = await import("node:crypto");
   let currentSessionId: string = randomUUID();
   let currentSessionLabel: string | undefined;
   let sessionModifiedFiles: string[] = [];
   let currentMode: "PLAN" | "BUILD" | "EXPLORE" | "SCOUT" = "BUILD";
+  let alwaysApprove = false;
 
   let currentModel = projectConfig?.model ?? config.defaultModel ?? "auto";
   conversation.setContextLimit(currentModel);
@@ -289,7 +311,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   // the new bar visualise the live mode.
   const buildLavaStatusState = (): CLIState => {
     const modeForState: CLIState["mode"] =
-      currentMode === "PLAN" ? "PLAN" : "BUILD";
+      alwaysApprove
+        ? "ALWAYS-APPROVE"
+        : currentMode === "PLAN"
+          ? "PLAN"
+          : "BUILD";
     let contextPercent = 0;
     try {
       const used = conversation.getTotalTokens();
@@ -442,6 +468,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       }
     }
     disableMouseReportingSync();
+    bgReg.off("job-finished", onBgJobFinished);
+    stopAllLoops();
     mcpManager.shutdown();
     mcpBridgeManager.shutdown();
     // Restore the original `process.stdin.emit` so a Ctrl-C or
@@ -528,16 +556,45 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   process.on("uncaughtException", uncaughtExceptionHandler);
 
   // ──── Suggestion Box Helpers ────
-  function clearSuggestions() {
+  function clearSuggestions(afterNewline = false) {
     if (activeSuggestionsCount > 0) {
       disableMouseReporting();
-      const currentCursor = rl.cursor;
-      readline.moveCursor(process.stdout, 0, 1);
-      readline.cursorTo(process.stdout, 0);
-      process.stdout.write("\x1b[J");
-      readline.moveCursor(process.stdout, 0, -1);
-      readline.cursorTo(process.stdout, 2 + currentCursor);
+      if (afterNewline) {
+        readline.cursorTo(process.stdout, 0);
+        process.stdout.write("\x1b[J");
+      } else {
+        const currentCursor = rl.cursor;
+        readline.moveCursor(process.stdout, 0, 1);
+        readline.cursorTo(process.stdout, 0);
+        process.stdout.write("\x1b[J");
+        readline.moveCursor(process.stdout, 0, -1);
+        readline.cursorTo(process.stdout, 2 + currentCursor);
+      }
       activeSuggestionsCount = 0;
+    }
+  }
+
+  async function promptSuspension<T>(fn: () => Promise<T>): Promise<T> {
+    clearSuggestions(true);
+    rl.pause();
+    try {
+      while (process.stdin.read() !== null) {
+        /* flush buffered input */
+      }
+    } catch {
+      /* ignore error */
+    }
+    process.stdin.off("keypress", keypressHandler);
+    try {
+      return await fn();
+    } finally {
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+        process.stdout.write("\x1b[?2004h");
+      }
+      process.stdin.on("keypress", keypressHandler);
+      process.stdin.resume();
+      rl.resume();
     }
   }
 
@@ -757,6 +814,20 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   }
 
   const keypressHandler = (_char: any, key: any) => {
+    // Intercept Ctrl+B to detach running foreground command to background pool
+    if (key && key.name === "b" && key.ctrl) {
+      const detached = detachCurrentForegroundCommand();
+      if (detached.ok) {
+        process.stdout.write(
+          `\n  ${c.cyan}⚡ Detached process to background:${c.reset} [${detached.jobId}] ${(detached.command || "").slice(0, 50)}\n`,
+        );
+        if (isPrompting) {
+          rl.prompt(true);
+        }
+        return;
+      }
+    }
+
     if (!isPrompting) return;
     // Intercept Escape to cancel a running task even when readline is in a question state
     if (key && key.name === "escape") {
@@ -1028,6 +1099,19 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     if (event === "keypress") {
       const [_char, key] = args;
 
+      if (key && key.name === "b" && key.ctrl) {
+        const detached = detachCurrentForegroundCommand();
+        if (detached.ok) {
+          process.stdout.write(
+            `\n  ${c.cyan}⚡ Detached process to background:${c.reset} [${detached.jobId}] ${(detached.command || "").slice(0, 50)}\n`,
+          );
+          if (isPrompting) {
+            rl.prompt(true);
+          }
+          return true; // swallow keypress
+        }
+      }
+
       if (isPrompting && key) {
         if (key.name === "backspace") {
           const line = rl.line;
@@ -1081,6 +1165,45 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       ) {
         currentRunningAgent.abort();
         return true;
+      }
+
+      // Shift+Tab (\x1b[Z) → cycle NORMAL (BUILD) → PLAN → ALWAYS-APPROVE (--yes)
+      const isShiftTab =
+        (key && key.name === "tab" && key.shift) ||
+        (key && key.sequence === "\x1b[Z") ||
+        args[0] === "\x1b[Z";
+
+      if (isPrompting && isShiftTab) {
+        let modeLabel = "";
+        if (alwaysApprove) {
+          // ALWAYS-APPROVE -> NORMAL (BUILD)
+          alwaysApprove = false;
+          currentMode = "BUILD";
+          modeLabel = "NORMAL (BUILD)";
+        } else if (currentMode === "PLAN") {
+          // PLAN -> ALWAYS-APPROVE
+          alwaysApprove = true;
+          currentMode = "BUILD";
+          modeLabel = "ALWAYS-APPROVE (--yes)";
+        } else {
+          // BUILD (or other) -> PLAN
+          alwaysApprove = false;
+          currentMode = "PLAN";
+          modeLabel = "PLAN";
+        }
+
+        sessionScreen?.setMeta({ mode: currentMode, model: currentModel });
+
+        const savedLine = rl.line;
+        process.stdout.write("\r\x1b[K");
+        process.stdout.write(
+          `  ${c.cyan}⚡ Mode switched: ${c.bold}${modeLabel}${c.reset}\n`,
+        );
+        drawLavaStatusBar();
+        process.stdout.write(
+          `${c.dim}─────────────────────────────────────────────────────────────────${c.reset}\n> ${savedLine}`,
+        );
+        return true; // swallow keypress
       }
 
       // Tab on empty line → cycle mode (BEFORE suggestion handling, so it always works)
@@ -1165,7 +1288,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     rl.question(promptPrefix, async (input) => {
       isPrompting = false;
       disableMouseReporting();
-      clearSuggestions();
+      clearSuggestions(true);
       const trimmed = input.trim();
 
       if (!trimmed) {
@@ -1202,12 +1325,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           msg.includes("404") ||
           msg.toLowerCase().includes("model not found")
         ) {
-          rl.pause();
-          const fallback = await p.confirm({
-            message: `Model '${currentModel}' not found or unavailable. Switch to default 'auto' model and retry?`,
-            initialValue: true,
-          });
-          rl.resume();
+          const fallback = await promptSuspension(() =>
+            p.confirm({
+              message: `Model '${currentModel}' not found or unavailable. Switch to default 'auto' model and retry?`,
+              initialValue: true,
+            }),
+          );
           if (fallback && !p.isCancel(fallback)) {
             console.log(
               `\n${c.dim}Switching to 'auto' and retrying...${c.reset}`,
@@ -1414,6 +1537,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               handleInput,
               clearSuggestions,
               refreshModelsForProvider,
+              promptSuspension: (fn) => promptSuspension(fn),
               printStats,
               listRuns,
               showRun,
@@ -1470,12 +1594,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         return;
       }
       if (check.decision === "ask") {
-        rl.pause();
-        const confirmed = await p.confirm({
-          message: `Allow execution of local shell command: ${c.cyan}${cmd}${c.reset}? (${check.reason})`,
-          initialValue: false,
-        });
-        rl.resume();
+        const confirmed = await promptSuspension(() =>
+          p.confirm({
+            message: `Allow execution of local shell command: ${c.cyan}${cmd}${c.reset}? (${check.reason})`,
+            initialValue: false,
+          }),
+        );
         if (p.isCancel(confirmed) || !confirmed) {
           console.log(`\n${c.cyan}  ⚠ Execution cancelled.${c.reset}`);
           return;
@@ -1559,6 +1683,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       checkCommand: projectConfig?.checkCommand,
       policy: projectConfig?.policy ?? config.preferences.policy,
       mode: currentMode,
+      yes: alwaysApprove,
       pendingAttachments:
         pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
     };
@@ -1615,12 +1740,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       );
       let allowed = true;
       if (preExistingEdits.length > 0) {
-        rl.pause();
-        const confirmed = await p.confirm({
-          message: `The agent modified files with pre-existing uncommitted edits: ${preExistingEdits.join(", ")}. Allow auto-commit?`,
-          initialValue: false,
-        });
-        rl.resume();
+        const confirmed = await promptSuspension(() =>
+          p.confirm({
+            message: `The agent modified files with pre-existing uncommitted edits: ${preExistingEdits.join(", ")}. Allow auto-commit?`,
+            initialValue: false,
+          }),
+        );
         if (p.isCancel(confirmed) || !confirmed) {
           allowed = false;
           console.log(

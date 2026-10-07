@@ -229,3 +229,28 @@ export const runPlanCommand: CommandHandler = async (ctx) => {
   await ctx.handleInput(plan.task);
   return;
 };
+
+export const viewPlanCommand: CommandHandler = async (ctx) => {
+  const fixoPlanMd = path.join(ctx.cwd, ".fixo", "plan.md");
+  const rootPlanMd = path.join(ctx.cwd, "plan.md");
+  if (fs.existsSync(fixoPlanMd)) {
+    console.log(`\n${colors.cyan}[Plan: .fixo/plan.md]${colors.reset}\n`);
+    console.log(fs.readFileSync(fixoPlanMd, "utf-8"));
+    return;
+  }
+  if (fs.existsSync(rootPlanMd)) {
+    console.log(`\n${colors.cyan}[Plan: plan.md]${colors.reset}\n`);
+    console.log(fs.readFileSync(rootPlanMd, "utf-8"));
+    return;
+  }
+  const plan = loadPlan(ctx.cwd);
+  if (plan) {
+    console.log(`\n${colors.cyan}[Plan: .fixo/last-plan.json]${colors.reset}\n`);
+    console.log(renderPlan(plan));
+    return;
+  }
+  console.log(
+    `\n${colors.yellow}No plan found (.fixo/plan.md, plan.md, or .fixo/last-plan.json).${colors.reset}`,
+  );
+};
+

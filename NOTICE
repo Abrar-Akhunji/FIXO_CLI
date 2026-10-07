@@ -1,0 +1,23 @@
+FixO CLI
+Copyright (c) 2026 Abrar Akhunji. All rights reserved.
+
+This software includes architectural designs and algorithmic patterns inspired by:
+1. Grok Build (https://github.com/xai-org/grok-build)
+   Licensed under the Apache License, Version 2.0 (Apache-2.0).
+   xAI, Inc.
+   Patterns referenced:
+   - 9-stage cascading surgical replacer pipeline
+   - Conversation compaction progress guard and emergency FIFO eviction
+   - Background jobs pool with interactive foreground detachment (Ctrl+B)
+
+2. OpenCode (https://github.com/anomalyco/opencode)
+   Licensed under the MIT License.
+   Copyright (c) 2025 Anomaly Innovations, Inc.
+   Patterns referenced:
+   - Centralized output truncation and disk spillover architecture (TruncationManager)
+   - Two-phase plan mode locking and gate enforcement (.fixo/plan.md)
+   - Granular named sandboxing profiles and folder trust system
+
+All algorithms, TypeScript implementations, and integration logic in FixO CLI have been
+developed via clean-room engineering specifically for FixO CLI's multi-provider and safety
+architecture.

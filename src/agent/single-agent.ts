@@ -290,7 +290,7 @@ export function buildSystemPrompt(
   if (enableTools) {
     const modeNote =
       toolMode === "PLAN"
-        ? `\nPLAN mode is active. The only file you may write is \`.fixo/last-plan.json\`. Mutating shell commands are rejected.`
+        ? `\nPLAN mode is active. You may only read files, search code, and write to \`.fixo/plan.md\`, \`plan.md\`, or \`.fixo/last-plan.json\`. Mutating shell commands and modifications to other files are rejected. Call exit_plan_mode when planning is complete.`
         : "";
     parts.push(
       `You are FixO CLI, an autonomous AI coding agent. You help developers by reading, writing, and modifying code files in their workspace.`,
@@ -558,12 +558,22 @@ export class SingleAgent {
       }
 
       try {
-        const { getFrameworkGuidance } = await import("./context-builder.js");
+        const { getFrameworkGuidance, getProjectRulesGuidance } =
+          await import("./context-builder.js");
         const frameworkBlock = getFrameworkGuidance(context.cwd);
         if (frameworkBlock) {
           referencesBlock = referencesBlock
             ? `${referencesBlock}\n\n${frameworkBlock}`
             : frameworkBlock;
+        }
+        const rulesBlock = getProjectRulesGuidance(
+          context.cwd,
+          context.yes ? true : undefined,
+        );
+        if (rulesBlock) {
+          referencesBlock = referencesBlock
+            ? `${referencesBlock}\n\n${rulesBlock}`
+            : rulesBlock;
         }
       } catch {
         // safe: dynamic import failure won't block the run
@@ -721,6 +731,7 @@ export class SingleAgent {
 
     let lastUsage: any = null;
     let todoReminderUsed = false;
+    let completionNudgeUsed = false;
 
     const openTodos = () =>
       loadTodoList(context.cwd).items.filter(
@@ -888,6 +899,32 @@ export class SingleAgent {
           // Print the response (already received in non-streaming mode)
           if (response) {
             renderMarkdown(response);
+          }
+
+          // Completion Guard: If user assigned an imperative coding/repair task,
+          // but the model responded with conversational text without calling any tools
+          // or mutating any files, nudge it to execute rather than prematurely stopping.
+          const isImperativeTask =
+            /^(fix|implement|create|add|update|refactor|write|delete|remove|modify|build|generate|make|edit|repair|patch)\b/i.test(
+              context.task.trim(),
+            );
+          if (
+            isImperativeTask &&
+            modifiedFiles.length === 0 &&
+            toolCallCount === 0 &&
+            !completionNudgeUsed &&
+            context.mode !== "PLAN" &&
+            role !== "READ_ONLY"
+          ) {
+            completionNudgeUsed = true;
+            messages.push({ role: "assistant", content: response });
+            messages.push({
+              role: "user",
+              content:
+                "You described the intended changes, but have not modified any files or executed any tools yet. Proceed with implementing the requested changes directly, or state explicitly if no code modifications are needed.",
+            });
+            toolCallCount += 1;
+            continue;
           }
 
           const trackTodos = toolMode === "BUILD" || toolMode === undefined;
@@ -1235,6 +1272,10 @@ export class SingleAgent {
                 rl,
                 subagentDepth: context.subagentDepth,
                 permissionRules: context.permissionRules,
+                context,
+                onModeChange: (newMode) => {
+                  context.mode = newMode;
+                },
               },
             );
             dashboard.emit({

@@ -124,7 +124,8 @@ export type LspPreSaveMode = "off" | "warn" | "block" | "sandbox-mock";
  *
  * Always combined with the regex/guard layer — defence in depth.
  */
-export type SandboxMode = "guard" | "os-sandbox";
+export type SandboxProfileName = "strict" | "devbox" | "read-only";
+export type SandboxMode = "guard" | "os-sandbox" | SandboxProfileName;
 
 /** Safety preferences — Pillar 1, 2, 3 surface. Pillar 4 lives in the
  *  credential vault module, not in the user-facing config. */
@@ -155,6 +156,8 @@ export interface SafetyConfig {
   toolCalls: ToolCallBudgetPolicy;
   /** OS-level sandbox for `run_command`. Defaults to `'guard'`. */
   sandboxMode?: SandboxMode;
+  /** Named sandbox profile: 'devbox' | 'strict' | 'read-only'. */
+  sandboxProfile?: SandboxProfileName;
   /**
    * Phase 2 — automatic post-edit verification. When `true` (default)
    * AND the run is in BUILD mode AND at least one file-mutating tool

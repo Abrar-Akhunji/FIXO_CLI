@@ -37,6 +37,10 @@ import {
   type ParserAdapter,
 } from "./parser-adapter.js";
 import type { LspManager } from "../lsp/lsp-manager.js";
+import {
+  loadDiscoveredRules,
+  formatProjectRulesBlock,
+} from "./project-rules.js";
 
 /** A file the run intends to mutate; symbols may be left implicit. */
 export interface ReferenceTarget {
@@ -75,6 +79,19 @@ export function getFrameworkGuidance(cwd: string): string {
     "When configuring `manualChunks`, follow Rolldown's chunking conventions.",
     "Keep chunking logic simple and avoid aggressive over-splitting to prevent circular dependencies or chunking errors.",
   ].join("\n");
+}
+
+/**
+ * Returns discovered project rules (AGENTS.md, CLAUDE.md, .cursor/rules, global rules)
+ * formatted for system prompt injection.
+ */
+export function getProjectRulesGuidance(cwd: string, trusted?: boolean): string {
+  try {
+    const rules = loadDiscoveredRules(cwd, trusted);
+    return formatProjectRulesBlock(rules);
+  } catch {
+    return "";
+  }
 }
 
 /**

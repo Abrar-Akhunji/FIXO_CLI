@@ -8,23 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-Working tree after tagged `1.0.8`. Includes `9b48e2e` (codebase stabilization, UI cleanup, and test suite updates) and the fixes below. Not committed or published.
+## [1.1.0] – 2026-10-07
+
+Beta release. This is the first version after `1.0.8` that includes the completion contract, the model catalog gate, and the session commands below.
+
+### Added
+- `/resume`, `/rewind <turn>`, `/loop`, `/usage`, `/context-window`, and `/trust`.
+- `--max-turns N`. Hitting the cap finishes as incomplete.
+- `enter_plan_mode` and `exit_plan_mode`. PLAN mode can write `.fixo/last-plan.json`, `.fixo/plan.md`, and `plan.md`.
+- Shift+Tab cycles BUILD, PLAN, and always-approve.
+- Project rules from `AGENTS.md`, `CLAUDE.md`, `.cursor/rules`, and `.fixo/rules` load after the folder is trusted.
+- Sandbox profiles `strict`, `devbox`, and `read-only`.
+- Ctrl+B detaches a foreground command. `get_command_output` reads it.
+- `/undo list`, `/undo hunk`, and `/undo hunk-<id>`.
+- A full-screen session on a TTY. `FIXO_UI=readline` keeps the scrolling prompt.
 
 ### Fixed
-- Tool success is a boolean on `ToolCallEvent`. The spinner, the dashboard, and worker telemetry use it, so a non-zero exit, a signal, a patch failure, or a cancelled tool is no longer shown as success.
-- Verification commands map a timeout or a null status to status 1. Auto-verify no longer treats that as a pass.
-- Project memory uses `node:sqlite` when it exists and a JSON file store (`memory.file.json`) when it does not, including Node 20. `FIXO_MEMORY_BACKEND=file` forces the file store.
-- `spawn_subagent` inherits model, policy, yes, and verbose. `Explore` runs in EXPLORE, `Plan` in PLAN, and `general-purpose` and `statusline-setup` stay in BUILD.
-- Worktree annotations in assistant text are applied in BUILD mode and stripped before the text is shown or stored. Read-only modes strip them and do not run git.
-- Explanatory tasks that only mention a change, update, or add stay read-only. An imperative mutation still selects BUILD.
-- `read_file`, `write_file`, and `delete_file` share one sensitive-path check, including `.ssh`, credentials, `authorized_keys`, and `.key` files.
-- The background-job success test polls until the process exits.
-- Removed the duplicate `engines` key in `package.json`.
-- `scripts/check-model-registry.js` accepts single- or double-quoted registry entries.
+- A tool-call cap, a failed check, a cancel, or open todos finish as incomplete and the one-shot process exits 1.
+- `/model` lists models from the connected proxy catalog, or from providers that have a saved key. A typed model id must be in that catalog.
+- Proxy setup checks the catalog before it saves a key.
+- API retries stay on one loader row. `/model` and `/providers` prompts suspend readline before Clack draws.
+- Tool success is a real boolean. A non-zero exit, a signal, a patch failure, or a cancel is not shown as success.
+- Verification treats a timeout as a failure.
+- Project memory uses `node:sqlite` when it exists and a JSON file when it does not, including Node 20.
+- A child subagent cannot spawn another child. It receives the task, not the parent transcript, and it copies deny rules only.
 
 ### Documentation
-- README no longer lists tree-sitter repo map, auto-verify, model routing, or the complexity classifier as unfinished.
-- README, SAFETY, and the staging comment no longer advertise `/fixo gc`, `fixo providers`, or `fixo config reset`. The live REPL command is `/providers`.
+- README describes the headless last line: `done`, `incomplete: <reason>`, or `plan-only`.
+- `NOTICE` records the Grok Build and OpenCode inspirations. The FixO code is clean-room.
 
 ## [1.0.8] – 2026-06-28
 

@@ -44,6 +44,39 @@ import path from "node:path";
 
 export type SandboxPlatform = "darwin" | "linux";
 
+export type SandboxProfileName = "strict" | "devbox" | "read-only";
+
+export interface SandboxProfile {
+  readonly name: SandboxProfileName;
+  readonly description: string;
+  readonly allowNetwork: boolean;
+  readonly readOnlyWorkspace: boolean;
+}
+
+export const SANDBOX_PROFILES: Record<SandboxProfileName, SandboxProfile> = {
+  devbox: {
+    name: "devbox",
+    description:
+      "Default developer sandbox: network enabled, workspace read-write, temp write allowed.",
+    allowNetwork: true,
+    readOnlyWorkspace: false,
+  },
+  strict: {
+    name: "strict",
+    description:
+      "Strict isolation: network disabled, workspace read-only (temp-only writes).",
+    allowNetwork: false,
+    readOnlyWorkspace: true,
+  },
+  "read-only": {
+    name: "read-only",
+    description:
+      "Read-only workspace: network enabled, workspace read-only (temp-only writes).",
+    allowNetwork: true,
+    readOnlyWorkspace: true,
+  },
+};
+
 export interface SandboxOpts {
   /** Directory the shell runs in. Must be readable. */
   cwd: string;
@@ -60,12 +93,38 @@ export interface SandboxOpts {
    * cargo fetch), so the caller usually wants `true`.
    */
   allowNetwork: boolean;
+  /** Optional profile name this configuration was derived from. */
+  profile?: SandboxProfileName;
   /** Wall-clock timeout in ms. Defaults to 60s. */
   timeout?: number;
   /** Max captured stdout/stderr bytes. Defaults to 1 MiB. */
   maxBuffer?: number;
   /** Environment for the child process. */
   env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Resolves a named sandbox profile into concrete SandboxOpts.
+ */
+export function resolveSandboxProfile(
+  workspaceRoot: string,
+  profileName: SandboxProfileName = "devbox",
+  extraOpts: Partial<SandboxOpts> = {},
+): SandboxOpts {
+  const profile = SANDBOX_PROFILES[profileName] ?? SANDBOX_PROFILES.devbox;
+  const allowedWritePaths = profile.readOnlyWorkspace
+    ? (extraOpts.allowedWritePaths ?? [])
+    : [workspaceRoot, ...(extraOpts.allowedWritePaths ?? [])];
+
+  return {
+    cwd: extraOpts.cwd ?? workspaceRoot,
+    allowedWritePaths,
+    allowNetwork: extraOpts.allowNetwork ?? profile.allowNetwork,
+    profile: profile.name,
+    timeout: extraOpts.timeout ?? 60_000,
+    maxBuffer: extraOpts.maxBuffer ?? 1024 * 1024,
+    env: extraOpts.env,
+  };
 }
 
 /**

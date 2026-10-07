@@ -29,18 +29,98 @@ function persistModelSelection(
   saveConfig(config);
 }
 
+const PROXY_CATALOG_UNREACHABLE =
+  "Proxy catalog unreachable. Run /providers to configure a direct key or check network.";
+
+async function askPrompt<T>(
+  ctx: Parameters<CommandHandler>[0],
+  run: () => Promise<T>,
+): Promise<T> {
+  if (ctx.promptSuspension) return ctx.promptSuspension(run);
+  return run();
+}
+
+async function ownerOfConnectedModel(modelId: string): Promise<string | null> {
+  for (const def of PROVIDER_REGISTRY) {
+    if (!ProvidersManager.has(def.name)) continue;
+    const fetched = await ProvidersManager.fetchRemoteModels(def.name);
+    if (fetched.models.includes(modelId)) return def.name;
+  }
+  return null;
+}
+
+async function acceptDirectModel(
+  ctx: Parameters<CommandHandler>[0],
+  modelId: string,
+): Promise<boolean> {
+  const connected = PROVIDER_REGISTRY.some((def) =>
+    ProvidersManager.has(def.name),
+  );
+  if (!connected) {
+    console.log(
+      `\n${colors.yellow}No connected providers. Connect an AI provider with an API key: /providers add <name>${colors.reset}`,
+    );
+    return false;
+  }
+  const owner = await ownerOfConnectedModel(modelId);
+  if (!owner) {
+    console.log(
+      `\n${colors.yellow}'${modelId}' is not in a connected provider catalog. Run /providers add, then choose a model that provider returns.${colors.reset}`,
+    );
+    return false;
+  }
+  ctx.state.currentModel = modelId;
+  ProvidersManager.setModelProviderHint(modelId, owner);
+  persistModelSelection(ctx.config, modelId, owner);
+  ctx.conversation.setContextLimit(modelId);
+  console.log(
+    `\n${colors.green}✓ Model set to: ${colors.bold}${modelId}${colors.reset}`,
+  );
+  return true;
+}
+
+function acceptProxyModel(
+  ctx: Parameters<CommandHandler>[0],
+  modelId: string,
+  ids: string[],
+  failed: boolean,
+): boolean {
+  if (modelId !== "auto" && (failed || !ids.includes(modelId))) {
+    console.log(
+      `\n${colors.yellow}${
+        failed
+          ? PROXY_CATALOG_UNREACHABLE
+          : `'${modelId}' is not in the proxy catalog. Choose auto or a listed id.`
+      }${colors.reset}`,
+    );
+    return false;
+  }
+  ctx.state.currentModel = modelId;
+  persistModelSelection(ctx.config, modelId, "auto");
+  ctx.conversation.setContextLimit(modelId);
+  console.log(
+    `\n${colors.green}✓ Model set to: ${colors.bold}${modelId}${colors.reset}`,
+  );
+  return true;
+}
+
 async function proxyModelCommand(
   ctx: Parameters<CommandHandler>[0],
 ): Promise<void> {
-  const proxyNote = `${colors.dim}The proxy must recognize this model id.${colors.reset}`;
   if (ctx.args.length > 0 && ctx.args[0] !== "list") {
-    ctx.state.currentModel = ctx.args.join(" ").trim();
-    persistModelSelection(ctx.config, ctx.state.currentModel, "auto");
-    ctx.conversation.setContextLimit(ctx.state.currentModel);
-    console.log(
-      `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-    );
-    console.log(proxyNote);
+    let ids: string[] = [];
+    let failed = true;
+    const apiUrl = ctx.config.apiUrl?.trim();
+    const apiKey = ctx.config.freellmapi_api_key?.trim();
+    if (apiUrl && apiKey) {
+      try {
+        ids = await fetchProxyCatalog(apiUrl, apiKey);
+        failed = false;
+      } catch {
+        failed = true;
+      }
+    }
+    acceptProxyModel(ctx, ctx.args.join(" ").trim(), ids, failed);
     return;
   }
 
@@ -63,9 +143,7 @@ async function proxyModelCommand(
       `\n${colors.bold}${colors.cyan}Proxy catalog${colors.reset}`,
     );
     if (failed) {
-      console.log(
-        `${colors.yellow}The proxy catalog could not be loaded. auto is available.${colors.reset}`,
-      );
+      console.log(`${colors.yellow}${PROXY_CATALOG_UNREACHABLE}${colors.reset}`);
     }
     console.log(`    ${colors.cyan}•${colors.reset} auto`);
     for (const id of ids) {
@@ -75,29 +153,31 @@ async function proxyModelCommand(
   }
 
   if (failed) {
-    console.log(
-      `\n${colors.yellow}The proxy catalog could not be loaded. Only auto is available.${colors.reset}`,
-    );
+    console.log(`\n${colors.yellow}${PROXY_CATALOG_UNREACHABLE}${colors.reset}`);
   }
 
-  ctx.rl.pause();
-  const picked = await p.select({
-    message: `Current model: ${colors.cyan}${ctx.state.currentModel}${colors.reset} — proxy catalog:`,
-    options: [
-      { value: "auto", label: "auto", hint: "proxy routes the request" },
-      ...ids.map((id) => ({ value: id, label: id, hint: "" })),
-      {
-        value: "__manual__",
-        label: "Enter model ID manually…",
-        hint: "proxy must recognize it",
-      },
-    ],
-    initialValue:
-      ctx.state.currentModel === "auto" || ids.includes(ctx.state.currentModel)
-        ? ctx.state.currentModel
-        : "auto",
-  });
-  ctx.rl.resume();
+  const picked = await askPrompt(ctx, () =>
+    p.select({
+      message: `Current model: ${colors.cyan}${ctx.state.currentModel}${colors.reset} — proxy catalog:`,
+      options: [
+        { value: "auto", label: "auto", hint: "proxy routes the request" },
+        ...ids.map((id) => ({ value: id, label: id, hint: "" })),
+        ...(failed
+          ? []
+          : [
+              {
+                value: "__manual__",
+                label: "Enter a catalog model id…",
+                hint: "must be in the proxy catalog",
+              },
+            ]),
+      ],
+      initialValue:
+        ctx.state.currentModel === "auto" || ids.includes(ctx.state.currentModel)
+          ? ctx.state.currentModel
+          : "auto",
+    }),
+  );
 
   if (p.isCancel(picked)) {
     console.log(
@@ -107,31 +187,20 @@ async function proxyModelCommand(
   }
 
   if (picked === "__manual__") {
-    ctx.rl.pause();
-    const manual = await p.text({
-      message: "Enter model ID:",
-      placeholder: "auto, or an id from the proxy catalog",
-      validate: (v) => (!v.trim() ? "Model ID is required" : undefined),
-    });
-    ctx.rl.resume();
+    const manual = await askPrompt(ctx, () =>
+      p.text({
+        message: "Enter model ID:",
+        placeholder: "auto, or an id from the proxy catalog",
+        validate: (v) => (!v.trim() ? "Model ID is required" : undefined),
+      }),
+    );
     if (!p.isCancel(manual) && manual) {
-      ctx.state.currentModel = manual.trim();
-      persistModelSelection(ctx.config, ctx.state.currentModel, "auto");
-      ctx.conversation.setContextLimit(ctx.state.currentModel);
-      console.log(
-        `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-      );
-      console.log(proxyNote);
+      acceptProxyModel(ctx, manual.trim(), ids, failed);
     }
     return;
   }
 
-  ctx.state.currentModel = picked as string;
-  persistModelSelection(ctx.config, ctx.state.currentModel, "auto");
-  ctx.conversation.setContextLimit(ctx.state.currentModel);
-  console.log(
-    `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-  );
+  acceptProxyModel(ctx, picked as string, ids, failed);
 }
 
 export const modelCommand: CommandHandler = async (ctx) => {
@@ -140,9 +209,7 @@ export const modelCommand: CommandHandler = async (ctx) => {
     return;
   }
   if (ctx.args[0] === "list") {
-    // Print full model table grouped by provider
-    // Uses live-fetched cached models when available, otherwise falls
-    // back to the static registry list (tagged [unverified]).
+    // Connected providers only. Unkeyed providers show the add-key line.
     console.log(
       `\n${colors.bold}${colors.cyan}Available Models by Provider${colors.reset}`,
     );
@@ -181,29 +248,45 @@ export const modelCommand: CommandHandler = async (ctx) => {
     return;
   }
   if (ctx.args.length === 0) {
-    // Redesigned interactive model picker grouped by provider
-    ctx.rl.pause();
-    const pickedProvider = await p.select({
+    const connectedDefs = PROVIDER_REGISTRY.filter((def) =>
+      ProvidersManager.has(def.name),
+    );
+    if (connectedDefs.length === 0) {
+      console.log(
+        `\n${colors.yellow}No direct AI providers connected. Run /providers add <name> to attach an API key.${colors.reset}`,
+      );
+      console.log(
+        `${colors.dim}  Available providers: ${PROVIDER_REGISTRY.map((p) => p.name).join(", ")}${colors.reset}\n`,
+      );
+      return;
+    }
+
+    // Redesigned interactive model picker grouped by connected provider
+    const pickedProvider = await askPrompt(ctx, () => p.select({
       message: `Current model: ${colors.cyan}${ctx.state.currentModel}${colors.reset} — Select AI Provider:`,
       options: [
         {
           value: "all",
           label: "Show all models (flat list)",
-          hint: "classic view",
+          hint: `${connectedDefs.length} provider${connectedDefs.length > 1 ? "s" : ""}`,
         },
-        ...PROVIDER_REGISTRY.map((def) => ({
+        ...connectedDefs.map((def) => ({
           value: def.name,
           label: def.displayName,
-          hint: ProvidersManager.has(def.name) ? " [key ✓]" : " [no key]",
+          hint: " [key ✓]",
         })),
+        {
+          value: "__add__",
+          label: "➕ Connect another provider (/providers add)…",
+          hint: "",
+        },
         { value: "__manual__", label: "Enter model ID manually…", hint: "" },
       ],
       initialValue:
-        PROVIDER_REGISTRY.find((def) =>
+        connectedDefs.find((def) =>
           def.models.includes(ctx.state.currentModel),
         )?.name || "all",
-    });
-    ctx.rl.resume();
+    }));
 
     if (p.isCancel(pickedProvider)) {
       console.log(
@@ -212,27 +295,26 @@ export const modelCommand: CommandHandler = async (ctx) => {
       return;
     }
 
+    if (pickedProvider === "__add__") {
+      await providersCommand({ ...ctx, args: [] });
+      return;
+    }
+
     if (pickedProvider === "__manual__") {
-      ctx.rl.pause();
-      const manual = await p.text({
-        message: "Enter model ID:",
-        placeholder: "e.g. gpt-4o, claude-opus-4-5, gemini-2.5-pro",
-        validate: (v) => (!v.trim() ? "Model ID is required" : undefined),
-      });
-      ctx.rl.resume();
+      const manual = await askPrompt(ctx, () =>
+        p.text({
+          message: "Enter model ID:",
+          placeholder: "a model id returned by a connected provider",
+          validate: (v) => (!v.trim() ? "Model ID is required" : undefined),
+        }),
+      );
       if (!p.isCancel(manual) && manual) {
-        ctx.state.currentModel = manual.trim();
-        persistModelSelection(ctx.config, ctx.state.currentModel);
-        ctx.conversation.setContextLimit(ctx.state.currentModel);
-        console.log(
-          `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-        );
+        await acceptDirectModel(ctx, manual.trim());
       }
       return;
     }
 
     if (pickedProvider === "all") {
-      ctx.rl.pause();
       const allOptions: Array<{ value: string; label: string; hint: string }> =
         [];
       for (const def of PROVIDER_REGISTRY) {
@@ -247,54 +329,39 @@ export const modelCommand: CommandHandler = async (ctx) => {
         }
       }
       if (allOptions.length === 0) {
-        ctx.rl.resume();
         console.log(
           `\n${colors.yellow}No connected provider returned models. Add a key with /providers add <name>.${colors.reset}`,
         );
         return;
       }
-      const picked = await p.select({
-        message: "Select a model from the flat list:",
-        options: [
-          {
-            value: ctx.state.currentModel,
-            label: `Keep current: ${ctx.state.currentModel}`,
-            hint: "no change",
-          },
-          ...allOptions,
-        ],
-        initialValue: ctx.state.currentModel,
-      });
-      ctx.rl.resume();
+      const known = new Set(allOptions.map((option) => option.value));
+      const picked = await askPrompt(ctx, () =>
+        p.select({
+          message: "Select a model from the flat list:",
+          options: [
+            ...(known.has(ctx.state.currentModel)
+              ? [
+                  {
+                    value: ctx.state.currentModel,
+                    label: `Keep current: ${ctx.state.currentModel}`,
+                    hint: "no change",
+                  },
+                ]
+              : []),
+            ...allOptions,
+          ],
+          initialValue: known.has(ctx.state.currentModel)
+            ? ctx.state.currentModel
+            : allOptions[0]?.value,
+        }),
+      );
       if (p.isCancel(picked)) {
         console.log(
           `\n${colors.dim}Model unchanged: ${colors.cyan}${ctx.state.currentModel}${colors.reset}`,
         );
         return;
       }
-      ctx.state.currentModel = picked as string;
-      // Store hint — find which provider this model belongs to
-      const owningDef = PROVIDER_REGISTRY.find(
-        (d) =>
-          d.models.includes(ctx.state.currentModel) ||
-          ProvidersManager.getCachedModels(d.name)?.models?.includes(
-            ctx.state.currentModel,
-          ),
-      );
-      if (owningDef)
-        ProvidersManager.setModelProviderHint(
-          ctx.state.currentModel,
-          owningDef.name,
-        );
-      persistModelSelection(
-        ctx.config,
-        ctx.state.currentModel,
-        owningDef?.name,
-      );
-      ctx.conversation.setContextLimit(ctx.state.currentModel);
-      console.log(
-        `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-      );
+      await acceptDirectModel(ctx, picked as string);
       return;
     }
 
@@ -321,8 +388,7 @@ export const modelCommand: CommandHandler = async (ctx) => {
         ? ` ${colors.dim}[cached]${colors.reset}`
         : "";
 
-    ctx.rl.pause();
-    const picked = await p.select({
+    const picked = await askPrompt(ctx, () => p.select({
       message: `Select a model from ${colors.bold}${def.displayName}${colors.reset} ${keyStatus}${sourceSuffix}:`,
       options: modelList.map((m) => {
         return {
@@ -334,8 +400,7 @@ export const modelCommand: CommandHandler = async (ctx) => {
       initialValue: modelList.includes(ctx.state.currentModel)
         ? ctx.state.currentModel
         : undefined,
-    });
-    ctx.rl.resume();
+    }));
 
     if (p.isCancel(picked)) {
       console.log(
@@ -357,12 +422,7 @@ export const modelCommand: CommandHandler = async (ctx) => {
     );
     return;
   }
-  ctx.state.currentModel = ctx.args.join(" ");
-  persistModelSelection(ctx.config, ctx.state.currentModel);
-  ctx.conversation.setContextLimit(ctx.state.currentModel);
-  console.log(
-    `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-  );
+  await acceptDirectModel(ctx, ctx.args.join(" ").trim());
   return;
 };
 
@@ -375,16 +435,16 @@ export const providersCommand: CommandHandler = async (ctx) => {
   // when the action is add/update. The legacy text routes
   // below remain unchanged for muscle-memory + scripting.
   if (!sub) {
-    ctx.rl.pause();
-    const pickedProvider = await p.select({
-      message: "Select an AI provider:",
-      options: PROVIDER_REGISTRY.map((def) => ({
-        value: def.name,
-        label: def.displayName,
-        hint: ProvidersManager.has(def.name) ? "[key ✓]" : "[no key]",
-      })),
-    });
-    ctx.rl.resume();
+    const pickedProvider = await askPrompt(ctx, () =>
+      p.select({
+        message: "Select an AI provider:",
+        options: PROVIDER_REGISTRY.map((def) => ({
+          value: def.name,
+          label: def.displayName,
+          hint: ProvidersManager.has(def.name) ? "[key ✓]" : "[no key]",
+        })),
+      }),
+    );
     if (p.isCancel(pickedProvider)) {
       console.log(`\n${colors.dim}/providers cancelled.${colors.reset}`);
       return;
@@ -399,8 +459,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
     }
     const hasKey = ProvidersManager.has(def.name);
 
-    ctx.rl.pause();
-    const action = await p.select({
+    const action = await askPrompt(ctx, () => p.select({
       message: `${def.displayName} — choose an action:`,
       options: [
         { value: "add", label: hasKey ? "Update API key" : "Add API key" },
@@ -416,8 +475,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
         },
         { value: "cancel", label: "Cancel" },
       ],
-    });
-    ctx.rl.resume();
+    }));
     if (p.isCancel(action) || action === "cancel") {
       console.log(`\n${colors.dim}/providers cancelled.${colors.reset}`);
       return;
@@ -427,12 +485,12 @@ export const providersCommand: CommandHandler = async (ctx) => {
       console.log(
         `${colors.dim}  Get your API key at: ${def.docsUrl}${colors.reset}`,
       );
-      ctx.rl.pause();
-      const key = await p.password({
-        message: `Enter your ${def.displayName} API key:`,
-        validate: (v) => (!v?.trim() ? "API key is required" : undefined),
-      });
-      ctx.rl.resume();
+      const key = await askPrompt(ctx, () =>
+        p.password({
+          message: `Enter your ${def.displayName} API key:`,
+          validate: (v) => (!v?.trim() ? "API key is required" : undefined),
+        }),
+      );
       if (p.isCancel(key)) {
         console.log(`\n${colors.dim}/providers cancelled.${colors.reset}`);
         return;
@@ -453,12 +511,12 @@ export const providersCommand: CommandHandler = async (ctx) => {
         );
         return;
       }
-      ctx.rl.pause();
-      const confirmed = await p.confirm({
-        message: `Remove API key for ${def.displayName}?`,
-        initialValue: false,
-      });
-      ctx.rl.resume();
+      const confirmed = await askPrompt(ctx, () =>
+        p.confirm({
+          message: `Remove API key for ${def.displayName}?`,
+          initialValue: false,
+        }),
+      );
       if (!p.isCancel(confirmed) && confirmed) {
         const removed = ProvidersManager.remove(def.name);
         console.log(
@@ -543,13 +601,13 @@ export const providersCommand: CommandHandler = async (ctx) => {
     console.log(
       `${colors.dim}  Get your API key at: ${def.docsUrl}${colors.reset}`,
     );
-    ctx.rl.pause();
-    const apiKeyInput = await p.text({
-      message: `Enter your ${def.displayName} API key:`,
-      placeholder: "sk-... or gsk_...",
-      validate: (v) => (!v.trim() ? "API key is required" : undefined),
-    });
-    ctx.rl.resume();
+    const apiKeyInput = await askPrompt(ctx, () =>
+      p.text({
+        message: `Enter your ${def.displayName} API key:`,
+        placeholder: "sk-... or gsk_...",
+        validate: (v) => (!v.trim() ? "API key is required" : undefined),
+      }),
+    );
     if (p.isCancel(apiKeyInput)) {
       console.log(`\n${colors.dim}Provider add cancelled.${colors.reset}`);
       return;
@@ -574,12 +632,12 @@ export const providersCommand: CommandHandler = async (ctx) => {
       );
       return;
     }
-    ctx.rl.pause();
-    const confirmed = await p.confirm({
-      message: `Remove API key for ${name}?`,
-      initialValue: false,
-    });
-    ctx.rl.resume();
+    const confirmed = await askPrompt(ctx, () =>
+      p.confirm({
+        message: `Remove API key for ${name}?`,
+        initialValue: false,
+      }),
+    );
     if (!p.isCancel(confirmed) && confirmed) {
       const removed = ProvidersManager.remove(name);
       console.log(

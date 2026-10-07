@@ -208,8 +208,12 @@ export class ConversationManager {
    * deepseek, gemini etc. that the FreeLLMAPI proxy fronts). Pass the
    * model name for an encoder-tuned count.
    */
-  private estimateTokens(text: string, model?: string | null): number {
+  estimateTokens(text: string, model?: string | null): number {
     return countTokens(text, model);
+  }
+
+  getLastSystemTokens(): number {
+    return this.lastSystemTokens;
   }
 
   /**
@@ -618,20 +622,25 @@ export class ConversationManager {
 
     this.consecutiveCompactionCount += 1;
 
+    const messagesBefore = this.history.length;
+    const tokensBefore = this.getTotalTokens();
+
     // Loop breaker: if compaction has run repeatedly without user turns,
-    // force emergency eviction down to 50% of context limit to break infinite build↔compaction loop.
+    // force emergency eviction down to guarantee headroom and break infinite build↔compaction loops.
     if (this.consecutiveCompactionCount > 2) {
-      this.emergencyPruneToTarget(this.contextLimit * 0.5);
+      const loopTarget = Math.min(
+        this.contextLimit * 0.5,
+        this.maxTokenBudget * 0.5,
+        Math.floor(tokensBefore * 0.6),
+      );
+      this.emergencyPruneToTarget(loopTarget);
       this.consecutiveCompactionCount = 0;
       this._lastCompactionInfo = {
         messagesBefore: this.history.length,
-        tokensFreed: 1000,
+        tokensFreed: Math.max(1000, tokensBefore - this.getTotalTokens()),
       };
       return true;
     }
-
-    const messagesBefore = this.history.length;
-    const tokensBefore = this.getTotalTokens();
 
     // Step 1: Prune tool outputs to free immediate space
     this.pruneToolOutputs();
@@ -709,7 +718,12 @@ export class ConversationManager {
       // if tokensAfter is still above 75% of context limit, execute Emergency Pruning
       // to guarantee headroom and break the infinite build↔compaction loop.
       if (tokensFreed < 1000 || tokensAfter > this.contextLimit * 0.75) {
-        this.emergencyPruneToTarget(this.contextLimit * 0.6);
+        const target = Math.min(
+          this.contextLimit * 0.6,
+          this.maxTokenBudget * 0.6,
+          Math.floor(tokensBefore * 0.7),
+        );
+        this.emergencyPruneToTarget(target);
         tokensAfter = this.getTotalTokens() + this.estimateTokens(this.summary);
         tokensFreed = Math.max(0, tokensBefore - tokensAfter);
       }
@@ -726,7 +740,12 @@ export class ConversationManager {
       );
       // Emergency fallback: even if summarizer client fails, prune history
       // so caller doesn't overflow context on the next turn.
-      this.emergencyPruneToTarget(this.contextLimit * 0.6);
+      const fallbackTarget = Math.min(
+        this.contextLimit * 0.6,
+        this.maxTokenBudget * 0.6,
+        Math.floor(tokensBefore * 0.7),
+      );
+      this.emergencyPruneToTarget(fallbackTarget);
       return true;
     }
   }

@@ -164,6 +164,11 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
             description:
               "Working directory for the command (optional, defaults to workspace root).",
           },
+          background: {
+            type: "boolean",
+            description:
+              "If true, spawns the command in the background immediately and returns a jobId without blocking.",
+          },
         },
         required: ["command"],
       },
@@ -216,6 +221,30 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
           },
         },
         required: ["jobId"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_command_output",
+      description:
+        "Retrieve output from one or more background jobs spawned with background: true or run_command_async. Specify task_ids (job IDs) and optional timeout_ms.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_ids: {
+            type: "array",
+            items: { type: "string" },
+            description: "List of background job IDs to inspect.",
+          },
+          timeout_ms: {
+            type: "number",
+            description:
+              "Maximum milliseconds to wait for completion before returning output snapshot.",
+          },
+        },
+        required: ["task_ids"],
       },
     },
   },
@@ -652,4 +681,41 @@ export const TOOL_DEFINITIONS: ChatToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "enter_plan_mode",
+      description:
+        "Switch session to PLAN mode. In PLAN mode, file modifications and mutating shell commands are blocked, allowing only reads, analysis, and writing to .fixo/plan.md or plan.md. Use this to formulate a structured multi-step plan before execution.",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description: "Why plan mode is being entered (e.g. complex architecture change).",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "exit_plan_mode",
+      description:
+        "Exit PLAN mode and return to BUILD mode after planning is complete and the user or agent is ready to apply mutations.",
+      parameters: {
+        type: "object",
+        properties: {
+          planSummary: {
+            type: "string",
+            description: "Summary of the finalized plan ready for execution.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
 ];
+

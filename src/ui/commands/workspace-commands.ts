@@ -3,6 +3,7 @@ import * as path from "path";
 import * as p from "@clack/prompts";
 import { loadImageAsBlock } from "../image-attach.js";
 import { undoRun } from "../../runtime/task-session.js";
+import { getHunkTracker } from "../../git/hunk-tracker.js";
 
 import { colors } from "../colors.js";
 
@@ -65,17 +66,73 @@ export const diffCommand: CommandHandler = async (ctx) => {
 };
 
 export const undoCommand: CommandHandler = async (ctx) => {
-  if (ctx.args[0]) {
-    console.log(`\n${undoRun(ctx.cwd, ctx.args[0])}`);
+  const arg = ctx.args[0];
+  const tracker = getHunkTracker(ctx.cwd);
+
+  if (arg === "list") {
+    const hunks = tracker.listHunks();
+    if (hunks.length === 0) {
+      console.log(`\n${colors.dim}No hunks recorded in this session.${colors.reset}`);
+      return;
+    }
+    console.log(`\n${colors.bold}Recorded Mutation Hunks:${colors.reset}`);
+    for (const h of hunks.slice(-10)) {
+      const status = h.reverted
+        ? `${colors.yellow}[reverted]${colors.reset}`
+        : `${colors.green}[active]${colors.reset}`;
+      const timeStr = new Date(h.timestamp).toLocaleTimeString();
+      console.log(
+        `  ${status} ${colors.cyan}${h.id}${colors.reset} ${h.relativePath} ${colors.dim}(${h.description}, ${timeStr})${colors.reset}`,
+      );
+    }
     return;
   }
-  ctx.rl.pause();
-  const confirmed = await p.confirm({
-    message:
-      "Are you sure you want to completely discard the last automated ctx.agent commit and restore all files?",
-    initialValue: false,
-  });
-  ctx.rl.resume();
+
+  if (arg === "hunk" || arg === "last") {
+    const res = tracker.revertLastHunk();
+    if (!res.ok) {
+      console.log(`\n${colors.yellow}⚠ ${res.message}${colors.reset}`);
+    } else {
+      console.log(`\n${colors.green}✓ ${res.message}${colors.reset}`);
+    }
+    return;
+  }
+
+  if (arg && arg.startsWith("hunk-")) {
+    const res = tracker.revertHunk(arg);
+    if (!res.ok) {
+      console.log(`\n${colors.yellow}⚠ ${res.message}${colors.reset}`);
+    } else {
+      console.log(`\n${colors.green}✓ ${res.message}${colors.reset}`);
+    }
+    return;
+  }
+
+  if (arg) {
+    console.log(`\n${undoRun(ctx.cwd, arg)}`);
+    return;
+  }
+  const confirmAction = () =>
+    p.confirm({
+      message:
+        "Are you sure you want to completely discard the last automated ctx.agent commit and restore all files?",
+      initialValue: false,
+    });
+  const confirmed = ctx.promptSuspension
+    ? await ctx.promptSuspension(confirmAction)
+    : await (async () => {
+        ctx.rl.pause();
+        try {
+          while (process.stdin.read() !== null) {
+            /* flush buffered input */
+          }
+        } catch {
+          /* ignore error */
+        }
+        const res = await confirmAction();
+        ctx.rl.resume();
+        return res;
+      })();
   if (p.isCancel(confirmed) || !confirmed) {
     console.log(`\n${colors.yellow}  ⚠ Undo cancelled.${colors.reset}`);
     return;
@@ -164,3 +221,41 @@ export const modeCommand: CommandHandler = async (ctx) => {
   }
   return;
 };
+
+export const trustCommand: CommandHandler = async (ctx) => {
+  const { isWorkspaceTrusted, trustWorkspace, untrustWorkspace } = await import(
+    "../../agent/project-rules.js"
+  );
+  const sub = (ctx.args[0] ?? "").toLowerCase();
+  if (sub === "remove" || sub === "revoke" || sub === "no") {
+    untrustWorkspace(ctx.cwd);
+    console.log(
+      `\n${colors.yellow}✓ Revoked trust for workspace: ${ctx.cwd}${colors.reset}`,
+    );
+    return;
+  }
+  if (sub === "yes" || sub === "add" || sub === "allow") {
+    trustWorkspace(ctx.cwd);
+    console.log(
+      `\n${colors.green}✓ Trusted workspace: ${ctx.cwd}${colors.reset}`,
+    );
+    return;
+  }
+  const trusted = isWorkspaceTrusted(ctx.cwd);
+  if (trusted) {
+    console.log(
+      `\n${colors.green}✓ Workspace is currently TRUSTED: ${ctx.cwd}${colors.reset}`,
+    );
+    console.log(
+      `${colors.dim}Project rules (AGENTS.md / rules/*.md) are loaded. Run /trust revoke to untrust.${colors.reset}`,
+    );
+  } else {
+    console.log(
+      `\n${colors.yellow}⚠️  Workspace is currently UNTRUSTED: ${ctx.cwd}${colors.reset}`,
+    );
+    console.log(
+      `${colors.dim}Run /trust allow to trust this folder and load its project rules.${colors.reset}`,
+    );
+  }
+};
+

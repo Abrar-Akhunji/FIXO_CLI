@@ -39,6 +39,7 @@ export interface CommandContext {
   handleInput: (input: string) => Promise<void>;
   clearSuggestions: () => void;
   refreshModelsForProvider: (name: string) => Promise<void>;
+  promptSuspension?: <T>(fn: () => Promise<T>) => Promise<T>;
 
   printStats?: (stats: SessionStats) => void;
   listRuns?: (cwd: string) => void;

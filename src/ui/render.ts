@@ -573,16 +573,23 @@ export const COMMANDS_WITH_DESC = [
   },
   // Agent modes & plans
   { cmd: "/mode", desc: "Toggle or set PLAN / BUILD execution mode" },
+  { cmd: "/trust", desc: "View or manage folder trust for project rules (AGENTS.md)" },
   { cmd: "/plan", desc: "Generate a task execution plan" },
+  { cmd: "/view-plan", desc: "View current plan (.fixo/plan.md or last-plan.json)" },
   { cmd: "/run-plan", desc: "Execute the last generated plan" },
   // Git
   { cmd: "/diff", desc: "Show git diff of workspace" },
   {
     cmd: "/undo",
-    desc: "Roll back files from the last FixO commit",
+    desc: "Roll back files from the last commit, or /undo list | hunk | <hunk-id>",
   },
   { cmd: "/log", desc: "Show recent git commits" },
   { cmd: "/snapshot", desc: "Create a named git snapshot" },
+  // Automation & Loops
+  { cmd: "/loop", desc: "Recurring prompt execution (/loop <interval> <prompt> | list | stop)" },
+  // Analytics & Context
+  { cmd: "/usage", desc: "Detailed token usage breakdown and estimated USD cost" },
+  { cmd: "/context-window", desc: "Visual context window utilization meter and breakdown" },
   // Quality & review
   { cmd: "/review", desc: "Review the current workspace diff" },
   { cmd: "/test", desc: "Run detected project checks" },
@@ -649,6 +656,9 @@ export function printHelp(): void {
     "Summarise & compress conversation (frees context tokens)",
   );
   line("/stats", "", "Show session token usage and cost savings");
+  line("/usage", "", "Detailed token breakdown and estimated USD cost");
+  line("/context-window", "", "Visual context window meter and remaining capacity");
+  line("/loop", "<interval> <prompt>", "Run prompt on a recurring schedule (e.g. /loop 30s npm test)");
   line(
     "/session",
     "<sub-command>",
@@ -678,8 +688,8 @@ export function printHelp(): void {
   line("/diff", "", "Show git diff of the workspace");
   line(
     "/undo",
-    "",
-    "Roll back files from the last FixO commit. Does not rewind chat",
+    "[list|hunk|<id>]",
+    "Roll back last commit, or /undo list | hunk | <hunk-id>",
   );
   line("/log", "", "Show recent git commits");
   line(

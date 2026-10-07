@@ -124,26 +124,38 @@ export class LoadingAnimation {
       }
     }
 
-    // Build main line
+    // Calculate available width to guarantee single-line sticky rendering
+    const cols = Math.max(40, process.stdout.columns ?? 100);
+    const elapsedSecs = (elapsedMs / 1000).toFixed(1);
+    const meta = `${C.SNOW4}(turn ${this.turnCount}) ${elapsedSecs}s${C.RESET}`;
+    const metaLen = visLen(meta);
+
+    // Base text before detail
     const phaseColor = C.LAVA;
     const icon = `${phaseColor}${this.phase.icon}${C.RESET}`;
     const label = `${C.BOLD}${phaseColor}${this.phase.label}${C.RESET}`;
-    const detail = this.phase.detail
-      ? `  ${C.SNOW4}${this.phase.detail}${C.RESET}`
-      : "";
+    const baseText = `  ${bar}  ${icon} ${label}`;
+    const baseLen = visLen(baseText);
 
-    const elapsedSecs = (elapsedMs / 1000).toFixed(1);
-    const meta = `${C.SNOW4}(turn ${this.turnCount}) ${elapsedSecs}s${C.RESET}`;
+    // Dynamically clamp detail so the total line NEVER exceeds cols - 1
+    let detailText = "";
+    if (this.phase.detail) {
+      const maxDetailLen = Math.max(0, cols - baseLen - metaLen - 6);
+      let rawDetail = this.phase.detail.replace(/[\r\n]+/g, " ").trim();
+      if (visLen(rawDetail) > maxDetailLen) {
+        rawDetail = maxDetailLen > 3 ? rawDetail.slice(0, maxDetailLen - 1) + "…" : "";
+      }
+      if (rawDetail) {
+        detailText = `  ${C.SNOW4}${rawDetail}${C.RESET}`;
+      }
+    }
 
-    const mainText = `  ${bar}  ${icon} ${label}${detail}`;
-
-    // Calculate padding to push meta to the right (assuming ~100 col terminal if not available)
-    const cols = process.stdout.columns ?? 100;
-    const paddingLen = Math.max(2, cols - visLen(mainText) - visLen(meta) - 2);
+    const mainText = `${baseText}${detailText}`;
+    const mainLen = visLen(mainText);
+    const paddingLen = Math.max(1, cols - mainLen - metaLen - 1);
     const paddedMainLine = mainText + " ".repeat(paddingLen) + meta;
 
-    // One row, replaced in place. A second row plus cursor-up leaves
-    // a copy behind whenever a log line moves the cursor.
+    // Single row, replaced in-place. Never wraps past columns.
     safeWrite(`\r\x1b[K${paddedMainLine}`);
   }
 }

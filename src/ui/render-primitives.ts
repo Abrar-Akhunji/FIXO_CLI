@@ -19,7 +19,7 @@ import { C, bold, visLen, padToVisual, providerColor, pill } from "./colors.js";
 /* ──────────────────────── Public types ──────────────────────── */
 
 export interface CLIState {
-  mode: "PLAN" | "BUILD" | "REVIEW";
+  mode: "PLAN" | "BUILD" | "REVIEW" | "ALWAYS-APPROVE";
   routing: "auto" | "single" | "multi";
   model: string;
   branch: string;
@@ -86,7 +86,10 @@ export function safeWriteLine(s: string): void {
  * ensure the cursor is on its own line first.
  */
 export function renderStatusBar(state: CLIState): void {
-  const modePill = pill(state.mode, C.LAVA, C.LAVA_BG);
+  const modePill =
+    state.mode === "ALWAYS-APPROVE"
+      ? pill(state.mode, C.GREEN, "\x1b[48;2;15;42;26m")
+      : pill(state.mode, C.LAVA, C.LAVA_BG);
   const routingPill = pill(state.routing, C.GREEN, "\x1b[48;2;15;42;26m");
   const modelPill = pill(state.model, C.BLUE, "\x1b[48;2;10;31;58m");
   const branchPill = pill(state.branch, C.SNOW3, C.VOID3);

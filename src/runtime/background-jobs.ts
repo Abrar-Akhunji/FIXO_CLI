@@ -21,6 +21,7 @@
  *     never received an `exit` event.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -200,7 +201,7 @@ function isPidAlive(pid: number): boolean {
 
 /* ──────────────────────── Registry ──────────────────────── */
 
-export class BackgroundJobRegistry {
+export class BackgroundJobRegistry extends EventEmitter {
   private readonly jobs = new Map<string, BackgroundJob>();
   private readonly processes = new Map<string, ChildProcess>();
   private readonly cwd: string;
@@ -209,6 +210,7 @@ export class BackgroundJobRegistry {
   private reaperTimer: NodeJS.Timeout | null = null;
 
   constructor(cwd: string, opts: BackgroundJobRegistryOptions = {}) {
+    super();
     this.cwd = cwd;
     this.snapshotDir =
       opts.snapshotDir ?? path.join(getWorkspaceStateDir(cwd), "jobs");
@@ -314,6 +316,7 @@ export class BackgroundJobRegistry {
       }
       job.exitCode = code ?? undefined;
       this.processes.delete(id);
+      this.emit("job-finished", job);
       recordTelemetry(
         telemetry.asyncSpawn({
           jobId: id,
@@ -392,6 +395,7 @@ export class BackgroundJobRegistry {
       }
       job.exitCode = code ?? undefined;
       this.processes.delete(id);
+      this.emit("job-finished", job);
     });
     return { ok: true, jobId: id };
   }
@@ -461,6 +465,25 @@ export class BackgroundJobRegistry {
   /** Read a job directly (no tail / sinceBytes shaping). */
   get(jobId: string): BackgroundJob | null {
     return this.jobs.get(jobId) ?? null;
+  }
+
+  /** Wait up to timeoutMs for the specified jobs to finish or return current state. */
+  async waitForJobs(
+    jobIds: string[],
+    timeoutMs: number = 30_000,
+  ): Promise<JobSnapshot[]> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const anyRunning = jobIds.some((id) => {
+        const job = this.jobs.get(id);
+        return job && job.status === "running";
+      });
+      if (!anyRunning) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return jobIds
+      .map((id) => this.poll({ jobId: id }))
+      .filter((s): s is JobSnapshot => s !== null);
   }
 
   /** Stop timers and kill all running children. Called on CLI shutdown. */
@@ -538,4 +561,58 @@ export class BackgroundJobRegistry {
     }, REAPER_INTERVAL_MS);
     this.reaperTimer.unref?.();
   }
+}
+
+const registryInstances = new Map<string, BackgroundJobRegistry>();
+
+export function getBackgroundJobRegistry(cwd: string): BackgroundJobRegistry {
+  const norm = path.resolve(cwd);
+  let reg = registryInstances.get(norm);
+  if (!reg) {
+    reg = new BackgroundJobRegistry(norm);
+    registryInstances.set(norm, reg);
+  }
+  return reg;
+}
+
+/** Test-only: inject or clear a custom registry. */
+export function setBackgroundJobRegistry(
+  cwd: string,
+  reg: BackgroundJobRegistry | null,
+): void {
+  const norm = path.resolve(cwd);
+  if (reg === null) {
+    const existing = registryInstances.get(norm);
+    if (existing) existing.shutdown();
+    registryInstances.delete(norm);
+  } else {
+    registryInstances.set(norm, reg);
+  }
+}
+
+export function shutdownAllBackgroundRegistries(): void {
+  for (const reg of registryInstances.values()) reg.shutdown();
+  registryInstances.clear();
+}
+
+export function listAllBackgroundJobs(cwd: string): JobSnapshot[] {
+  const norm = path.resolve(cwd);
+  const reg = registryInstances.get(norm);
+  if (!reg) return [];
+  return reg.list().map((j) => ({
+    id: j.id,
+    status: j.status,
+    exitCode: j.exitCode,
+    startedAt: j.startedAt,
+    exitedAt: j.exitedAt,
+    cmd: j.cmd,
+    args: j.args,
+    cwd: j.cwd,
+    stdout: j.stdoutTruncated ? `${j.stdout}\n...[truncated]` : j.stdout,
+    stderr: j.stderrTruncated ? `${j.stderr}\n...[truncated]` : j.stderr,
+    totalStdoutBytes: j.totalStdoutBytes,
+    totalStderrBytes: j.totalStderrBytes,
+    stdoutTruncated: j.stdoutTruncated,
+    stderrTruncated: j.stderrTruncated,
+  }));
 }
