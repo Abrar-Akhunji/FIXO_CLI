@@ -801,6 +801,24 @@ export function countUserTurns(history: readonly ChatMessage[]): number {
   return history.reduce((n, msg) => (msg.role === "user" ? n + 1 : n), 0);
 }
 
+/** Produce a compact, safe default name from the first user message. */
+export function suggestSessionLabel(history: readonly ChatMessage[]): string {
+  const firstUser = history.find((message) => message.role === "user");
+  if (!firstUser) return "Untitled session";
+  const content = typeof firstUser.content === "string"
+    ? firstUser.content
+    : Array.isArray(firstUser.content)
+      ? firstUser.content.flatMap((part) => typeof part === "object" && part && "text" in part ? [String(part.text)] : []).join(" ")
+      : "";
+  const cleaned = content
+    .replace(/\[[^\]]+\]/g, " ")
+    .replace(/[^\p{L}\p{N}._\- ]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "Untitled session";
+  return cleaned.length <= 64 ? cleaned : `${cleaned.slice(0, 61).trimEnd()}...`;
+}
+
 /**
  * Keep turns 1..turn and drop every later turn. Does not touch files.
  * `turn` is 1-based. Messages before the first user message stay.
@@ -991,6 +1009,15 @@ export class SessionManager {
       mode: 0o600,
     });
     fs.renameSync(tmp, filePath);
+    return true;
+  }
+
+  /** Delete one exact saved session without accepting path-like identifiers. */
+  static deleteSession(id: string): boolean {
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) return false;
+    const filePath = path.join(this.getSessionsDir(), `session_${id}.json`);
+    if (!fs.existsSync(filePath)) return false;
+    fs.unlinkSync(filePath);
     return true;
   }
 }

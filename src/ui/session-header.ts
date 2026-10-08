@@ -41,7 +41,7 @@ export interface SessionHeaderOptions {
 }
 
 function frameWidth(): number {
-  return Math.max(40, Math.min(100, (process.stdout.columns ?? 100) - 4));
+  return Math.max(16, Math.min(100, (process.stdout.columns ?? 100) - 2));
 }
 
 function modeColor(mode: SessionHeaderOptions["mode"]): string {
@@ -57,7 +57,10 @@ function modeColor(mode: SessionHeaderOptions["mode"]): string {
 
 function padInside(s: string, width: number): string {
   const v = visLen(s);
-  if (v >= width) return s;
+  if (v > width) {
+    const plain = s.replace(/\x1b\[[0-9;]*m/g, "");
+    return `${C.SNOW2}${plain.slice(0, width - 1)}…${C.RESET}`;
+  }
   return s + " ".repeat(width - v);
 }
 
@@ -79,7 +82,8 @@ function statusLabel(s: SessionHeaderOptions["status"]): string {
 export function renderSessionHeader(opts: SessionHeaderOptions): void {
   const w = frameWidth();
   const inner = w - 4; // account for the `│ ` and ` │` side padding
-  const top = `  ${C.LAVA}┌── SESSION ${"─".repeat(Math.max(0, inner - 14))}┐${C.RESET}`;
+  const title = "── SESSION ";
+  const top = `  ${C.LAVA}┌${title}${"─".repeat(Math.max(0, w - title.length - 2))}┐${C.RESET}`;
   const bottom = `  ${C.LAVA}└${"─".repeat(w - 2)}┘${C.RESET}`;
 
   const line1 = `${C.SNOW3}${statusLabel(opts.status)}${C.RESET}  ${C.SNOW4}·${C.RESET}  ${C.SNOW2}${formatDate(opts.startedAt)}${C.RESET}`;

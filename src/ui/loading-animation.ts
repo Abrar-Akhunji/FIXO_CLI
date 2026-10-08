@@ -2,6 +2,9 @@ import { C, visLen } from "./colors.js";
 import { reportActivity, setActivitySink } from "./activity.js";
 import { sessionScreenOwnsActivity } from "./session-screen.js";
 import { safeWrite, safeWriteLine } from "./render-primitives.js";
+import { renderDotMark, type DotMotion } from "./dotmatrix.js";
+
+export { renderDotMark } from "./dotmatrix.js";
 
 export interface LoadingPhase {
   id:
@@ -17,22 +20,6 @@ export interface LoadingPhase {
   detail?: string;
   icon: string;
 }
-
-// Lava Flow Bar gradient
-const GRADIENT = ["░", "▒", "▓", "█", "▓", "▒", "░"];
-const GRADIENT_COLORS = [
-  C.LAVA_DIM,
-  C.LAVA,
-  "\x1b[38;2;255;160;60m", // LAVA_GLOW
-  C.SNOW, // white-hot center
-  "\x1b[38;2;255;160;60m", // LAVA_GLOW
-  C.LAVA,
-  C.LAVA_DIM,
-];
-
-const TRACK_LENGTH = 20;
-const BAR_LENGTH = GRADIENT.length;
-const MAX_OFFSET = TRACK_LENGTH - BAR_LENGTH;
 
 export class LoadingAnimation {
   private phase: LoadingPhase = {
@@ -58,10 +45,10 @@ export class LoadingAnimation {
       this.phase = { ...this.phase, detail: line };
     });
 
-    if (this.isTTY) {
+    if (this.isTTY && process.env.FIXO_REDUCED_MOTION !== "1") {
       // Hide cursor
       safeWrite("\x1b[?25l");
-      this.timer = setInterval(() => this.draw(), 60);
+      this.timer = setInterval(() => this.draw(), 90);
     } else {
       // Non-TTY fallback
       safeWriteLine(
@@ -77,7 +64,7 @@ export class LoadingAnimation {
       reportActivity(`${this.phase.icon} ${this.phase.label}${detail}`);
       return;
     }
-    if (!this.isTTY && this.timer === null) {
+    if ((!this.isTTY || process.env.FIXO_REDUCED_MOTION === "1") && this.timer === null) {
       // In non-TTY, we only log when phase changes so the user isn't spammed, but knows it's doing something.
       safeWriteLine(
         `  ${this.phase.icon} ${this.phase.label} ${this.phase.detail ? `· ${this.phase.detail}` : ""}`,
@@ -107,22 +94,10 @@ export class LoadingAnimation {
   private draw(): void {
     const elapsedMs = Date.now() - this.startedAt;
 
-    // Calculate slider position (ping-pong)
-    const cycle = Math.floor(this.frame / MAX_OFFSET);
-    const pos = this.frame % MAX_OFFSET;
-    const offset = cycle % 2 === 0 ? pos : MAX_OFFSET - pos;
+    const motion: DotMotion = this.phase.id === "reasoning" || this.phase.id === "writing"
+      ? "bloom" : "orbit";
+    const mark = `${C.LAVA}${renderDotMark(this.frame, motion)}${C.RESET}`;
     this.frame++;
-
-    // Build the animated bar
-    let bar = "";
-    for (let i = 0; i < TRACK_LENGTH; i++) {
-      if (i >= offset && i < offset + BAR_LENGTH) {
-        const charIdx = i - offset;
-        bar += `${GRADIENT_COLORS[charIdx]}${GRADIENT[charIdx]}${C.RESET}`;
-      } else {
-        bar += " ";
-      }
-    }
 
     // Calculate available width to guarantee single-line sticky rendering
     const cols = Math.max(40, process.stdout.columns ?? 100);
@@ -134,7 +109,7 @@ export class LoadingAnimation {
     const phaseColor = C.LAVA;
     const icon = `${phaseColor}${this.phase.icon}${C.RESET}`;
     const label = `${C.BOLD}${phaseColor}${this.phase.label}${C.RESET}`;
-    const baseText = `  ${bar}  ${icon} ${label}`;
+    const baseText = `  ${mark}  ${icon} ${label}`;
     const baseLen = visLen(baseText);
 
     // Dynamically clamp detail so the total line NEVER exceeds cols - 1

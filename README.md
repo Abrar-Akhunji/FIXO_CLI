@@ -496,7 +496,15 @@ event is a tagged union so refactors stay type-safe.
 
 The line before that is `session <id>`. `fixo --resume <id>` reloads the session in BUILD. Inside the REPL, `/resume` lists sessions for this workspace and reloads one. `/rewind <turn>` drops later conversation turns and leaves files untouched. `/undo` rolls files back and does not rewind the chat.
 
-An interactive terminal opens a full-screen session: the transcript scrolls in the middle, and the activity row stays on screen. `FIXO_UI=readline` keeps the previous scrolling prompt. Questions and slash commands step out of that screen, then return.
+On an interactive TTY, FIXO opens a full-screen session with a padded bottom composer. Long drafts wrap within the input box. The chat has a visible right-side scroll rail: use the accelerated mouse wheel, click or drag the rail, or press Page Up/Page Down while the composer remains anchored. The footer reports the active session, context usage and limit, cumulative tokens, turns, tool calls, and queued follow-ups. Enter queues a follow-up for the next turn; Ctrl+C cancels the current turn and clears queued follow-ups. User prompts and FIXO replies have distinct labels; Markdown styling and code blocks remain readable.
+
+`/session` (or `/sessions`) opens the searchable session manager without leaving full-screen mode. Saved chats receive a name from their first prompt, can be renamed with `/rename`, resumed repeatedly with `/resume` or `/continue`, deleted with confirmation, and scoped to the current workspace. `/new` saves the active chat before starting a clean one. Resuming restores the transcript, model, context, token counters, turn count, and tool-call count; it never changes files on disk.
+
+Provider/model pickers, API-key entry, confirmations, and agent questions stay inside the full-screen session. Type to filter a list, use arrows or Page Up/Down to navigate, Enter to choose, and Escape to go back or dismiss. `/model` always starts with connected providers—even if the current session uses the proxy—then shows only the selected provider's catalog. The FreeLLMAPI proxy is a separate, explicitly labelled choice. `/model zen` opens Zen directly. Choosing a provider/model saves the pair and applies the transport change to the next turn without a restart. `/providers` offers **Choose a model** for connected keys; adding a key opens that provider's catalog immediately. API-key input is masked, accepts bracketed paste, and never enters chat or command history.
+
+Choose **Add custom provider…** in `/providers` (or run `/providers add-custom`) to connect any OpenAI- or Anthropic-compatible API. FIXO asks for a stable provider ID, display name, protocol, API base URL, and masked API key. Use the documented API root—for example `https://api.example.com/v1`—without `/models`, `/messages`, or `/chat/completions`; include `/v1` only when the provider documents it. Remote endpoints must use HTTPS, while local development endpoints may use HTTP on localhost. FIXO tests `GET /models` before saving, encrypts the key locally, and immediately opens a searchable picker containing only that provider's live models. Custom providers then work with `/model`, `/providers test`, key updates, session restore, and direct routing exactly like built-in providers.
+
+Set `FIXO_UI=inline` for classic terminal scrollback or when your terminal does not support alternate screens. Slash-command suggestions accept Enter or Tab (for example, `/provi` completes to `/providers`); arrow keys select another suggestion. Set `FIXO_REDUCED_MOTION=1` for static activity updates. Mouse capture for clicking suggestions in inline mode is opt-in with `FIXO_MOUSE_SUGGESTIONS=1`. External editors intentionally take over the terminal, then return to the session.
 
 This checkout is a beta working tree.
 
@@ -520,7 +528,7 @@ npm run build
 ```
 
 ### 4. Configuration
-Run `fixo` (or `npm run dev`) and complete the setup wizard. Keys are saved under `~/.fixocli/`. Inside the REPL, `/providers` adds, lists, tests, and removes provider keys.
+Run `fixo` (or `npm run dev`) and complete the setup wizard. Keys are saved under `~/.fixocli/`. Inside the REPL, `/providers` adds, lists, tests, and removes built-in or custom provider keys.
 
 Proxy mode is optional. `FIXO_API_URL` overrides the configured endpoint when it is set. The CLI does not read `FREELLMAPI_URL` or `FREELLMAPI_KEY` from a project `.env`.
 

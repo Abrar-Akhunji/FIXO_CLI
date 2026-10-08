@@ -4,8 +4,7 @@
  *
  * The legacy `colors` object is preserved for backward compatibility
  * with the 305+ tests that import it. The new `C` palette is the
- * canonical brand identity — the "Liquid Lava" / "Dark Void" / "Snow"
- * triad that's used across the new UI primitives in
+ * canonical cool-blue / night-surface / snow triad used across
  * `src/ui/render.ts` and friends.
  */
 
@@ -55,12 +54,16 @@ export const colors = {
       : "\x1b[48;2;251;251;251m";
   },
 
-  // Liquid Lava (#F56E0F)
+  // Historical API name retained for callers; the accent is now sky blue.
   get liquidLava() {
-    return "\x1b[38;2;245;110;15m";
+    return themeMode === "dark"
+      ? "\x1b[38;2;56;189;248m"
+      : "\x1b[38;2;3;105;161m";
   },
   get bgLiquidLava() {
-    return "\x1b[48;2;245;110;15m";
+    return themeMode === "dark"
+      ? "\x1b[48;2;11;31;51m"
+      : "\x1b[48;2;224;242;254m";
   },
 
   // Compatibility Mappings mapped to our Theme Palette
@@ -101,31 +104,30 @@ export function renderStatusLabel(text: string): string {
 /* ──────────────────────── C palette (brand identity) ──────────────────────── */
 
 /**
- * Canonical FixO brand palette. The first class — `LAVA` —
- * is the primary accent used on EVERY key highlight, the
- * ASCII logo, the prompt glyph, the status-bar pills, and the
- * top border of the AI response frame.
+ * Canonical FixO brand palette. `LAVA` is the historical token
+ * name. Its value is sky blue, used on highlights, the logo,
+ * the prompt glyph, status pills, and the response frame.
  *
  * The hex values are duplicated as comment annotations so the
  * palette can be audited without an external reference.
  */
 export const C = {
-  // Brand
-  LAVA: "\x1b[38;2;245;110;15m", // #F56E0F — primary accent
-  LAVA_BG: "\x1b[48;2;42;26;10m", // dark orange surface
-  LAVA_DIM: "\x1b[38;2;122;54;8m", // muted lava for secondary accents
+  // Brand — light blue on a deep night surface
+  get LAVA() { return themeMode === "dark" ? "\x1b[38;2;56;189;248m" : "\x1b[38;2;3;105;161m"; }, // #38BDF8 / #0369A1
+  get LAVA_BG() { return themeMode === "dark" ? "\x1b[48;2;11;31;51m" : "\x1b[48;2;224;242;254m"; },
+  get LAVA_DIM() { return themeMode === "dark" ? "\x1b[38;2;125;211;252m" : "\x1b[38;2;7;89;133m"; },
 
   // Backgrounds (used as surface layers)
-  VOID: "\x1b[48;2;21;20;25m", // #151419 — deepest bg
-  VOID2: "\x1b[48;2;28;27;33m", // slightly lifted surface
-  VOID3: "\x1b[48;2;35;34;40m", // hover / selected row bg
-  VOID4_FG: "\x1b[38;2;46;45;53m", // border color as foreground
+  get VOID() { return themeMode === "dark" ? "\x1b[48;2;11;18;32m" : "\x1b[48;2;248;250;252m"; },
+  get VOID2() { return themeMode === "dark" ? "\x1b[48;2;17;28;46m" : "\x1b[48;2;241;245;249m"; },
+  get VOID3() { return themeMode === "dark" ? "\x1b[48;2;22;36;58m" : "\x1b[48;2;226;232;240m"; },
+  get VOID4_FG() { return themeMode === "dark" ? "\x1b[38;2;50;68;93m" : "\x1b[38;2;100;116;139m"; },
 
   // Text
-  SNOW: "\x1b[38;2;251;251;251m", // #FBFBFB — primary text
-  SNOW2: "\x1b[38;2;200;200;200m", // secondary text
-  SNOW3: "\x1b[38;2;136;136;136m", // muted / hints
-  SNOW4: "\x1b[38;2;68;68;68m", // very dim / decorative
+  get SNOW() { return themeMode === "dark" ? "\x1b[38;2;251;251;251m" : "\x1b[38;2;15;23;42m"; },
+  get SNOW2() { return themeMode === "dark" ? "\x1b[38;2;203;213;225m" : "\x1b[38;2;51;65;85m"; },
+  get SNOW3() { return themeMode === "dark" ? "\x1b[38;2;148;163;184m" : "\x1b[38;2;71;85;105m"; },
+  get SNOW4() { return "\x1b[38;2;100;116;139m"; },
 
   // Semantic (tool call types)
   BLUE: "\x1b[38;2;96;165;250m", // ReadFile, info
@@ -135,7 +137,7 @@ export const C = {
   RED: "\x1b[38;2;248;113;113m", // errors
 
   // Provider colors
-  P_ANTHROPIC: "\x1b[38;2;245;110;15m",
+  P_ANTHROPIC: "\x1b[38;2;125;211;252m",
   P_GOOGLE: "\x1b[38;2;74;222;128m",
   P_GROQ: "\x1b[38;2;250;204;21m",
   P_OPENAI: "\x1b[38;2;96;165;250m",

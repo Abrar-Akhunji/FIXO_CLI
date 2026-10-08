@@ -7,7 +7,7 @@ import { loadPlan, renderPlan, savePlan } from "../../planner.js";
 import { getWorkspaceStateDir } from "../../config.js";
 
 import { colors } from "../colors.js";
-import * as p from "@clack/prompts";
+import * as p from "../prompts.js";
 
 import { type CommandHandler } from "./types.js";
 
@@ -253,4 +253,3 @@ export const viewPlanCommand: CommandHandler = async (ctx) => {
     `\n${colors.yellow}No plan found (.fixo/plan.md, plan.md, or .fixo/last-plan.json).${colors.reset}`,
   );
 };
-

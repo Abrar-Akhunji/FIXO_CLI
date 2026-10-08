@@ -51,6 +51,17 @@ export interface ProviderDefinition {
   requiresKey: boolean;
   /** Docs / sign-up URL for the provider */
   docsUrl: string;
+  /** True when the definition was created by the user. */
+  custom?: boolean;
+}
+
+export type ProviderProtocol = "openai" | "anthropic";
+
+export interface CustomProviderInput {
+  name: string;
+  displayName: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
 }
 
 export const PROVIDER_REGISTRY: ProviderDefinition[] = [
@@ -215,6 +226,11 @@ interface ProviderEntry {
   apiKey: string;
   addedAt: string;
   note?: string;
+  custom?: {
+    displayName: string;
+    baseUrl: string;
+    openAICompat: boolean;
+  };
 }
 
 type ProvidersStore = Record<string, ProviderEntry>;
@@ -323,6 +339,67 @@ function maskKey(key: string): string {
   return key.slice(0, 6) + "••••••" + key.slice(-4);
 }
 
+export function normalizeCustomProviderInput(input: CustomProviderInput): CustomProviderInput {
+  return {
+    name: input.name.trim().toLowerCase(),
+    displayName: input.displayName.trim(),
+    baseUrl: input.baseUrl.trim().replace(/\/+$/, ""),
+    protocol: input.protocol,
+  };
+}
+
+export function validateCustomProviderInput(input: CustomProviderInput): string | null {
+  const normalized = normalizeCustomProviderInput(input);
+  if (!/^[a-z0-9][a-z0-9-_]*$/.test(normalized.name)) {
+    return "Provider ID must start with a letter or number and use only lowercase letters, numbers, dash, or underscore.";
+  }
+  if (normalized.name.length > 48) return "Provider ID must be 48 characters or fewer.";
+  if (!normalized.displayName || normalized.displayName.length > 64) {
+    return "Display name must be between 1 and 64 characters.";
+  }
+  if (/[\u0000-\u001f\u007f]/.test(normalized.displayName)) {
+    return "Display name cannot contain terminal control characters.";
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized.baseUrl);
+  } catch {
+    return "Enter a complete endpoint URL, for example https://api.example.com/v1.";
+  }
+  const local = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && local)) {
+    return "Use HTTPS for remote endpoints. HTTP is allowed only for localhost.";
+  }
+  if (parsed.username || parsed.password) {
+    return "Do not put credentials in the endpoint URL. Enter the API key in the protected key field.";
+  }
+  if (parsed.search || parsed.hash) {
+    return "The API base URL cannot contain a query string or fragment.";
+  }
+  if (/\/(models|messages|chat\/completions)$/i.test(parsed.pathname.replace(/\/+$/, ""))) {
+    return "Enter the API base URL only. FIXO adds /models, /messages, or /chat/completions automatically.";
+  }
+  return null;
+}
+
+function customDefinition(name: string, entry?: ProviderEntry): ProviderDefinition | undefined {
+  if (!entry?.custom) return undefined;
+  return {
+    name,
+    displayName: entry.custom.displayName,
+    baseUrl: entry.custom.baseUrl,
+    openAICompat: entry.custom.openAICompat,
+    models: [],
+    requiresKey: true,
+    docsUrl: entry.custom.baseUrl,
+    custom: true,
+  };
+}
+
+function findProviderDefinition(name: string, store = loadStore()): ProviderDefinition | undefined {
+  return PROVIDER_REGISTRY.find((provider) => provider.name === name) ?? customDefinition(name, store[name]);
+}
+
 /* ──────────────────────── Models Cache ──────────────────────── */
 
 /**
@@ -381,12 +458,13 @@ function saveModelsCache(store: ProviderModelsCacheStore): void {
  * and the legacy test path can share one source of truth.
  */
 function buildModelsRequestHeaders(
-  name: string,
+  definition: ProviderDefinition,
   apiKey: string,
 ): Record<string, string> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiKey}`,
-  };
+  const name = definition.name;
+  const headers: Record<string, string> = definition.openAICompat
+    ? { Authorization: `Bearer ${apiKey}` }
+    : { "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
   if (name === "zen" || name === "openrouter") {
     headers["HTTP-Referer"] = "https://opencode.ai/";
     headers["X-Title"] = "opencode";
@@ -510,7 +588,7 @@ export const ProvidersManager = {
   }> {
     const store = loadStore();
     return Object.entries(store).map(([name, entry]) => {
-      const def = PROVIDER_REGISTRY.find((p) => p.name === name);
+      const def = findProviderDefinition(name, store);
       return {
         name,
         displayName: def?.displayName ?? name,
@@ -523,16 +601,18 @@ export const ProvidersManager = {
   /** Add or update a provider API key. */
   add(name: string, apiKey: string, note?: string): void {
     const store = loadStore();
+    const existingCustom = store[name]?.custom;
     store[name] = {
       apiKey: apiKey.trim(),
       addedAt: new Date().toISOString(),
       ...(note ? { note } : {}),
+      ...(existingCustom ? { custom: existingCustom } : {}),
     };
     saveStore(store);
     // Keep the vault in sync so callers using withDirectCredential
     // see the new key without having to wait for the next
     // hydration.
-    const def = PROVIDER_REGISTRY.find((p) => p.name === name);
+    const def = findProviderDefinition(name, store);
     if (def) {
       getProviderKeyVault().ingest(
         name,
@@ -541,6 +621,36 @@ export const ProvidersManager = {
         def.displayName,
       );
     }
+  },
+
+  /** Add or update a user-defined OpenAI- or Anthropic-compatible provider. */
+  addCustomProvider(input: CustomProviderInput, apiKey: string): ProviderDefinition {
+    const normalized = normalizeCustomProviderInput(input);
+    const validation = validateCustomProviderInput(normalized);
+    if (validation) throw new Error(validation);
+    if (!apiKey.trim()) throw new Error("API key is required.");
+    if (PROVIDER_REGISTRY.some((provider) => provider.name === normalized.name)) {
+      throw new Error(`Provider ID '${normalized.name}' is reserved by a built-in provider.`);
+    }
+    const store = loadStore();
+    store[normalized.name] = {
+      apiKey: apiKey.trim(),
+      addedAt: new Date().toISOString(),
+      custom: {
+        displayName: normalized.displayName,
+        baseUrl: normalized.baseUrl,
+        openAICompat: normalized.protocol === "openai",
+      },
+    };
+    saveStore(store);
+    const definition = customDefinition(normalized.name, store[normalized.name])!;
+    getProviderKeyVault().ingest(
+      definition.name,
+      apiKey.trim(),
+      definition.baseUrl,
+      definition.displayName,
+    );
+    return definition;
   },
 
   /** Remove a provider key. Returns true if removed, false if not found. */
@@ -568,7 +678,7 @@ export const ProvidersManager = {
     const store = loadStore();
     const entry = store[name];
     if (!entry) return null;
-    const def = PROVIDER_REGISTRY.find((p) => p.name === name);
+    const def = findProviderDefinition(name, store);
     if (!def) return null;
     // Re-ingest in case the on-disk key was added since the last
     // hydration. Idempotent: ingest() overwrites by name.
@@ -637,7 +747,7 @@ export const ProvidersManager = {
     }
 
     for (const [name, entry] of Object.entries(store)) {
-      const def = PROVIDER_REGISTRY.find((p) => p.name === name);
+      const def = findProviderDefinition(name, store);
       vault.ingest(
         name,
         entry.apiKey,
@@ -667,12 +777,17 @@ export const ProvidersManager = {
 
   /** Get provider definition by name. */
   getDefinition(name: string): ProviderDefinition | undefined {
-    return PROVIDER_REGISTRY.find((p) => p.name === name);
+    return findProviderDefinition(name);
   },
 
   /** Get all registered provider definitions. */
   getAllDefinitions(): ProviderDefinition[] {
-    return PROVIDER_REGISTRY;
+    const store = loadStore();
+    const custom = Object.entries(store)
+      .map(([name, entry]) => customDefinition(name, entry))
+      .filter((definition): definition is ProviderDefinition => !!definition)
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    return [...PROVIDER_REGISTRY, ...custom];
   },
 
   /**
@@ -723,7 +838,7 @@ export const ProvidersManager = {
 
     const liveResult = await this.withDirectCredential(name, async (cred) => {
       try {
-        const headers = buildModelsRequestHeaders(name, cred.apiKey);
+        const headers = buildModelsRequestHeaders(def, cred.apiKey);
         const resp = await fetch(`${cred.baseUrl}/models`, {
           headers,
           signal: AbortSignal.timeout(8000),
@@ -768,7 +883,7 @@ export const ProvidersManager = {
     if (!def) {
       throw new Error(`Unknown provider: ${name}`);
     }
-    const headers = buildModelsRequestHeaders(name, apiKey.trim());
+    const headers = buildModelsRequestHeaders(def, apiKey.trim());
     let resp;
     try {
       resp = await fetch(`${def.baseUrl}/models`, {
@@ -828,5 +943,53 @@ export const ProvidersManager = {
     }
 
     return ids;
+  },
+
+  /** Verify an unsaved custom endpoint and return its live model catalog. */
+  async verifyCustomProviderAndFetchModels(
+    input: CustomProviderInput,
+    apiKey: string,
+  ): Promise<string[]> {
+    const normalized = normalizeCustomProviderInput(input);
+    const validation = validateCustomProviderInput(normalized);
+    if (validation) throw new Error(validation);
+    if (!apiKey.trim()) throw new Error("API key is required.");
+    const definition: ProviderDefinition = {
+      name: normalized.name,
+      displayName: normalized.displayName,
+      baseUrl: normalized.baseUrl,
+      openAICompat: normalized.protocol === "openai",
+      models: [],
+      requiresKey: true,
+      docsUrl: normalized.baseUrl,
+      custom: true,
+    };
+    const headers = buildModelsRequestHeaders(definition, apiKey.trim());
+    let response: Response;
+    try {
+      response = await fetch(`${definition.baseUrl}/models`, {
+        headers,
+        signal: AbortSignal.timeout(8000),
+      });
+    } catch (error) {
+      throw new Error(`Could not connect to ${definition.displayName}: ${(error as Error).message}`);
+    }
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`Model discovery failed (${response.status})${detail ? `: ${detail.slice(0, 150)}` : ""}`);
+    }
+    const payload = await response.json().catch(() => null);
+    const models = parseModelsResponse(payload);
+    if (!models?.length) {
+      throw new Error("The endpoint returned no model IDs. Confirm that its base URL exposes GET /models.");
+    }
+    const cache = loadModelsCache();
+    cache[definition.name] = {
+      models,
+      fetchedAt: new Date().toISOString(),
+      source: "live",
+    };
+    saveModelsCache(cache);
+    return models;
   },
 };

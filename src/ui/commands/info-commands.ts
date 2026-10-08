@@ -1,4 +1,4 @@
-import * as p from "@clack/prompts";
+import * as p from "../prompts.js";
 import { saveConfig } from "../../config.js";
 import { listRuns, showRun } from "../../runtime/task-session.js";
 import {

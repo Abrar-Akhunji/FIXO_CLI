@@ -61,7 +61,7 @@ import {
 } from "../runtime/loop-mitigation.js";
 import { dashboard } from "../ui/render.js";
 import { LoadingAnimation } from "../ui/loading-animation.js";
-import * as p from "@clack/prompts";
+import * as p from "../ui/prompts.js";
 export const promptsWrapper = {
   select: p.select,
   confirm: p.confirm,
@@ -402,6 +402,13 @@ export class SingleAgent {
   /** Expose the underlying client for direct API calls (e.g. compaction). */
   getClient(): AgentClient {
     return this.client;
+  }
+
+  /** Apply an interactive provider/model change without losing session approvals. */
+  refreshConfiguration(): void {
+    const config = loadConfig();
+    this.client = new AgentClient(config.freellmapi_api_key || "", config.apiUrl,
+      this.verbose, config.provider_mode, config.preferences.modelRouting);
   }
 
   /** Abort the current task. Any in-flight LLM call or tool execution
@@ -1055,7 +1062,7 @@ export class SingleAgent {
         messages.push(assistantMsg);
 
         if (assistantText) {
-          console.log(`${colors.dim}${assistantText}${colors.reset}`);
+          renderMarkdown(assistantText);
         }
 
         for (const toolCall of result.tool_calls) {
@@ -1470,10 +1477,6 @@ export class SingleAgent {
 
     if (rl) rl.pause();
 
-    const { holdSessionScreen, releaseSessionScreen } = await import(
-      "../ui/session-screen.js"
-    );
-    holdSessionScreen();
     try {
       const message = formatPermissionPrompt(name, args);
       const options: any[] = [
@@ -1505,7 +1508,6 @@ export class SingleAgent {
       }
       return isApproved;
     } finally {
-      releaseSessionScreen();
       if (rl) rl.resume();
     }
   }
@@ -1595,9 +1597,10 @@ export class SingleAgent {
 
       if (fullText) {
         if (!fullText.endsWith("\n")) renderer.write("\n");
-        renderer.flush();
       }
     } finally {
+      // Flush partial output and release its transcript role even on cancellation.
+      renderer.flush();
       if (this.activeAnimation) {
         this.activeAnimation.stop();
         this.activeAnimation = null;

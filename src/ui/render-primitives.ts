@@ -19,7 +19,7 @@ import { C, bold, visLen, padToVisual, providerColor, pill } from "./colors.js";
 /* ──────────────────────── Public types ──────────────────────── */
 
 export interface CLIState {
-  mode: "PLAN" | "BUILD" | "REVIEW" | "ALWAYS-APPROVE";
+  mode: "PLAN" | "BUILD" | "EXPLORE" | "SCOUT" | "REVIEW" | "ALWAYS-APPROVE";
   routing: "auto" | "single" | "multi";
   model: string;
   branch: string;
@@ -106,6 +106,17 @@ export function renderStatusBar(state: CLIState): void {
   const width = cols();
   const leftLen = visLen(leftSide);
   const rightLen = visLen(rightSide);
+  if (process.stdout.isTTY && leftLen + rightLen + 2 >= width) {
+    const prefix = ` ${state.mode} · `;
+    const suffix = ` · ctx ${usedPct}%`;
+    const room = Math.max(0, width - prefix.length - suffix.length - 1);
+    const model = room > 1 && state.model.length > room
+      ? `${state.model.slice(0, room - 1)}…`
+      : state.model.slice(0, room);
+    const compact = `${prefix}${model}${suffix}`;
+    safeWrite(`\r\x1b[K${C.LAVA}${compact.slice(0, Math.max(0, width - 1))}${C.RESET}`);
+    return;
+  }
   const gap = Math.max(2, width - leftLen - rightLen);
   const line = leftSide + " ".repeat(gap) + rightSide;
   safeWrite("\r" + line);

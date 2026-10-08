@@ -14,10 +14,8 @@ import { colors } from "../ui/colors.js";
 import { workspaceLockManager } from "../workspace-lock.js";
 import { logTelemetry } from "./telemetry.js";
 import { checkPermission } from "./permissions.js";
-import {
-  holdSessionScreen,
-  releaseSessionScreen,
-} from "../ui/session-screen.js";
+import { getActiveSessionScreen } from "../ui/session-screen.js";
+import { select, isCancel } from "../ui/prompts.js";
 import {
   SemanticLoopDetector,
   SemanticLoopAbortedError,
@@ -841,7 +839,26 @@ export class WorkerAgent {
 
     if (!rl) return false; // If needs confirmation but no interactive RL, deny.
 
-    holdSessionScreen();
+    if (getActiveSessionScreen()) {
+      const answer = await select({
+        message: isOutsideWorkspace
+          ? `[Worker] Outside workspace: allow ${name} on ${resolvedOutsidePath}?`
+          : `[Worker] Allow ${name} with ${JSON.stringify(args)}?`,
+        options: [
+          { value: "yes", label: "Yes, allow" },
+          { value: "no", label: "No, deny" },
+          ...(!isOutsideWorkspace ? [{ value: "all", label: "Allow all for this session" }] : []),
+        ],
+        initialValue: "no",
+      });
+      if (isCancel(answer) || answer === "no") return false;
+      if (isOutsideWorkspace && resolvedOutsidePath && context) {
+        context.allowedOutsidePaths ??= new Set();
+        context.allowedOutsidePaths.add(resolvedOutsidePath);
+      }
+      if (answer === "all" && !isOutsideWorkspace) this.allowAll = true;
+      return true;
+    }
     return new Promise((resolve) => {
       let promptMsg = `[Worker] Allow executing tool "${name}" with args ${JSON.stringify(args)}? (y/n/all) `;
       if (isOutsideWorkspace) {
@@ -873,7 +890,6 @@ export class WorkerAgent {
           this.allowAll = true;
         }
         resolve(isApproved);
-        releaseSessionScreen();
       });
     });
   }

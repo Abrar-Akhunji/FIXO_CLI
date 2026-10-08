@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as p from "@clack/prompts";
+import * as p from "../prompts.js";
 import { loadImageAsBlock } from "../image-attach.js";
 import { undoRun } from "../../runtime/task-session.js";
 import { getHunkTracker } from "../../git/hunk-tracker.js";
@@ -258,4 +258,3 @@ export const trustCommand: CommandHandler = async (ctx) => {
     );
   }
 };
-

@@ -370,6 +370,28 @@ export class AgentClient {
     const modelLower = model.toLowerCase();
     let providerName: string | null = null;
 
+    // The selected provider is part of the active model identity. A global
+    // model-id hint is not sufficient: two connected providers can expose the
+    // same model id, and selecting one must not reroute the other.
+    const selected = loadConfig().lastSession;
+    // An explicit proxy selection must win over old model-provider hints.
+    if (selected?.model.toLowerCase() === modelLower && selected.provider === "auto") return null;
+    if (selected?.model.toLowerCase() === modelLower && selected.provider !== "auto") {
+      const direct = ProvidersManager.getDirectConfig(selected.provider);
+      if (direct) {
+        const def = ProvidersManager.getDefinition(selected.provider);
+        return {
+          baseUrl: direct.baseUrl,
+          displayName: direct.displayName,
+          providerName: selected.provider,
+          openAICompat: def ? def.openAICompat : true,
+        };
+      }
+      // Never silently send a selected provider's request elsewhere if its key
+      // was removed after selection.
+      return null;
+    }
+
     // ── Phase 1: Check explicit user-set model-provider hints ──
     // When a user picks a model from a specific provider's list via
     // the /model interactive picker, the association is stored here.
@@ -488,7 +510,7 @@ export class AgentClient {
     providerCooldown.assertAvailable(cooldownKey);
 
     const direct = this.resolveDirectConfig(model);
-    const isAnthropicDirect = direct && direct.providerName === "anthropic";
+    const isAnthropicDirect = direct && !direct.openAICompat;
 
     // Direct-mode safety: refuse to silently fall through to the
     // FreeLLMAPI proxy when the user explicitly chose direct mode at
@@ -1047,7 +1069,7 @@ export class AgentClient {
     providerCooldown.assertAvailable(cooldownKey);
 
     const direct = this.resolveDirectConfig(model);
-    const isAnthropicDirect = !!(direct && direct.providerName === "anthropic");
+    const isAnthropicDirect = !!(direct && !direct.openAICompat);
 
     // Same direct-mode safety as `chat()` — refuse to leak to proxy.
     if (this.providerMode === "direct" && !direct) {

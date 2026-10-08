@@ -48,7 +48,8 @@ import type { ConversationManager } from "./conversation.js";
 import type { AgentContext, AgentResult, ProjectConfig } from "../types.js";
 import { colors as c } from "../ui/colors.js";
 import { MODEL_DAG_VERIFIED } from "./providers-manager.js";
-import { confirm, isCancel } from "@clack/prompts";
+import { confirm, isCancel } from "../ui/prompts.js";
+import { getActiveSessionScreen } from "../ui/session-screen.js";
 
 function gitStatus(cwd: string): Map<string, string> {
   try {
@@ -266,7 +267,9 @@ async function runSimplePath(
   startTime: number,
   deps: RouteDeps,
 ): Promise<RouteResult> {
-  console.log(
+  const screen = getActiveSessionScreen();
+  if (screen && !deps.verbose) screen.setActivity("Preparing a reply…");
+  else console.log(
     `\n${c.cyan}[Routing Engine] Simple task detected (${reason}). Routing to SingleAgent...${c.reset}`,
   );
   deps.onSimplePathStart?.(deps.agent);
@@ -298,7 +301,9 @@ async function runComplexPath(
 
   const preRunStatus = gitStatus(cwd);
 
-  console.log(
+  const screen = getActiveSessionScreen();
+  if (screen && !deps.verbose) screen.setActivity("Planning the task…");
+  else console.log(
     `\n${c.cyan}[Routing Engine] Complex task detected (${reason}). Routing to Orchestrator...${c.reset}`,
   );
 

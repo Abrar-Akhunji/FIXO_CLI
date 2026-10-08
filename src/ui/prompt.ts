@@ -10,13 +10,13 @@ import readline from "readline";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import * as p from "@clack/prompts";
+import * as p from "./prompts.js";
 import { SingleAgent } from "../agent/single-agent.js";
-import { ConversationManager } from "../agent/conversation.js";
+import { ConversationManager, SessionManager, suggestSessionLabel } from "../agent/conversation.js";
 import { GitManager } from "../git/git-manager.js";
 import type { AgentContext, ProjectConfig } from "../types.js";
 import type { ChatContentBlock } from "../shared/types.js";
-import type { FreeLLMConfig } from "../config.js";
+import { getStateDir, type FreeLLMConfig } from "../config.js";
 import { WorkspaceGuard } from "../workspace-guard.js";
 import { listRuns, showRun } from "../runtime/task-session.js";
 import { checkPermission } from "../agent/permissions.js";
@@ -34,6 +34,15 @@ import { C, colors } from "./colors.js";
 import { COMMANDS_WITH_DESC, printHelp, formatInputPaths } from "./render.js";
 import { renderStatusBar, type CLIState } from "./render-primitives.js";
 import { SessionScreen } from "./session-screen.js";
+import { renderMarkdown } from "./markdown-stream.js";
+import {
+  classifyBracketedPaste,
+  completeActiveToken,
+  isSlashPrefix,
+  nextHighlight,
+  rankSlashCommands,
+  replaceComposerLine,
+} from "./composer-input.js";
 
 const c = colors;
 
@@ -90,6 +99,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let currentSessionId: string = randomUUID();
   let currentSessionLabel: string | undefined;
   let sessionModifiedFiles: string[] = [];
+  let restoredTokenUsage: { prompt: number; completion: number } | undefined;
   let currentMode: "PLAN" | "BUILD" | "EXPLORE" | "SCOUT" = "BUILD";
   let alwaysApprove = false;
 
@@ -128,6 +138,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           currentSessionId = saved.sessionId;
           currentSessionLabel = saved.label;
           sessionModifiedFiles = [...(saved.modifiedFiles || [])];
+          restoredTokenUsage = {
+            prompt: saved.tokenUsage?.prompt_tokens || 0,
+            completion: saved.tokenUsage?.completion_tokens || 0,
+          };
           console.log(
             `\n${c.green}✓ Resumed session${c.reset} ${c.dim}${saved.sessionId}${c.reset}`,
           );
@@ -179,6 +193,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         selectedFiles = [...snap.selectedFiles];
         currentSessionId = snap.id;
         currentSessionLabel = snap.label;
+        restoredTokenUsage = { prompt: snap.tokens, completion: 0 };
         console.log(
           `\n${c.green}✓ Resumed session${c.reset} ${c.dim}${snap.id}${c.reset}`,
         );
@@ -221,12 +236,14 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   let lastPromptRow = 0;
   let mouseReportingEnabled = false;
+  let lastSuggestionFrame = "";
 
+  const restoredHistory = conversation.exportHistory();
   let stats: SessionStats = {
-    totalPromptTokens: 0,
-    totalCompletionTokens: 0,
-    totalToolCalls: 0,
-    totalTasks: 0,
+    totalPromptTokens: restoredTokenUsage?.prompt ?? 0,
+    totalCompletionTokens: restoredTokenUsage?.completion ?? 0,
+    totalToolCalls: restoredHistory.filter((message) => message.role === "tool").length,
+    totalTasks: restoredHistory.filter((message) => message.role === "user").length,
     totalDurationMs: 0,
   };
 
@@ -240,26 +257,29 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let pasteIdCounter = 1;
   let isPasting = false;
   let pasteBuffer = "";
+  const screenQueue: Array<{ text: string; pastes: PasteAttachment[] }> = [];
+  let screenProcessing = false;
 
   /** Builds the inline token string that goes INTO the rl line buffer. */
   function pasteToken(id: number, lineCount: number): string {
     return `[Paste #${id} +${lineCount} lines]`;
   }
 
-  // The welcome screen (lava logo + command grid) is printed by
-  // `src/index.ts` before the REPL starts; the startREPL entry
-  // point jumps straight into the prompt loop.
+  // Inline sessions receive a compact banner from `src/index.ts`;
+  // interactive TTY sessions paint their welcome state in SessionScreen.
 
   if (projectConfig?.systemPrompt) {
     console.log(`${c.dim}📋 Project config loaded (.freellmapi.yml)${c.reset}`);
   }
 
-  const historyFile = path.join(os.homedir(), ".fixo_history");
+  const historyFile = path.join(getStateDir(), "readline-history.txt");
+  const legacyHistoryFile = path.join(os.homedir(), ".fixo_history");
   let commandHistory: string[] = [];
   try {
-    if (fs.existsSync(historyFile)) {
+    const source = fs.existsSync(historyFile) ? historyFile : legacyHistoryFile;
+    if (fs.existsSync(source)) {
       commandHistory = fs
-        .readFileSync(historyFile, "utf-8")
+        .readFileSync(source, "utf-8")
         .split("\n")
         .filter(Boolean);
     }
@@ -296,7 +316,48 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   const sessionScreen = SessionScreen.openIfEnabled({
     mode: currentMode,
     model: currentModel,
+    provider: config.provider_mode === "direct" ? config.lastSession?.provider ?? config.directProvider?.name : "FreeLLMAPI",
+    session: currentSessionLabel ?? currentSessionId.slice(0, 8),
+    contextUsed: conversation.getTotalTokens(),
+    contextLimit: conversation.getContextLimit(),
+    sessionTokens: stats.totalPromptTokens + stats.totalCompletionTokens,
+    turns: stats.totalTasks,
+    toolCalls: stats.totalToolCalls,
   });
+  if (sessionScreen) {
+    // Readline keeps its well-tested editing/history state, but the screen
+    // paints the visible composer. Its ordinary cursor-control writes would
+    // otherwise land inside the transcript and displace the bottom input.
+    (rl as any)._writeToOutput = () => {};
+    const pause = rl.pause.bind(rl);
+    const resumeInput = rl.resume.bind(rl);
+    rl.pause = (() => {
+      // In-session dialogs own input through the screen dispatcher. Pausing
+      // stdin here would starve them; only external terminal owners suspend.
+      return sessionScreen.ownsActivity() ? rl : pause();
+    }) as typeof rl.pause;
+    rl.resume = (() => {
+      const result = resumeInput();
+      return result;
+    }) as typeof rl.resume;
+    if (conversation.getMessageCount() > 0) {
+      sessionScreen.setConversationHistory(conversation.exportHistory());
+    }
+  }
+
+  const syncSessionScreen = (): void => {
+    sessionScreen?.setMeta({
+      mode: currentMode,
+      model: currentModel,
+      provider: config.provider_mode === "direct" ? config.lastSession?.provider ?? config.directProvider?.name : "FreeLLMAPI",
+      session: currentSessionLabel ?? currentSessionId.slice(0, 8),
+      contextUsed: conversation.getTotalTokens(),
+      contextLimit: conversation.getContextLimit(),
+      sessionTokens: stats.totalPromptTokens + stats.totalCompletionTokens,
+      turns: stats.totalTasks,
+      toolCalls: stats.totalToolCalls,
+    });
+  };
 
   // ──── Lava status bar ────
   // The new lava-redesign status bar lives directly above the REPL
@@ -304,18 +365,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   // change, plus whenever the user starts a new turn (via
   // `promptForInput` below).
   //
-  // We map our internal 4-mode enum onto the 3-mode `CLIState`
-  // contract that the renderer expects: EXPLORE/SCOUT collapse to
-  // BUILD (the default lava-coloured pill). This keeps the
-  // existing /mode command semantics intact while still letting
-  // the new bar visualise the live mode.
+  // Show the actual agent mode. Collapsing EXPLORE and SCOUT to BUILD
+  // made the status bar misleading after Tab or /mode.
   const buildLavaStatusState = (): CLIState => {
     const modeForState: CLIState["mode"] =
       alwaysApprove
         ? "ALWAYS-APPROVE"
-        : currentMode === "PLAN"
-          ? "PLAN"
-          : "BUILD";
+        : currentMode;
     let contextPercent = 0;
     try {
       const used = conversation.getTotalTokens();
@@ -348,6 +404,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   };
 
   const drawLavaStatusBar = (): void => {
+    if (sessionScreen) {
+      syncSessionScreen();
+      return;
+    }
     // renderStatusBar writes a single `\r` line (no newline) so the
     // REPL prompt can sit on the same row as a redo. For the
     // normal "above the prompt" layout we want a full line of its
@@ -403,14 +463,14 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   // ──── Mouse Reporting Helpers ────
   function enableMouseReporting() {
     if (process.stdout.isTTY && !mouseReportingEnabled) {
-      process.stdout.write("\x1b[?1003h\x1b[?1006h");
+      process.stdout.write("\x1b[?1000h\x1b[?1006h");
       mouseReportingEnabled = true;
     }
   }
 
   function disableMouseReporting() {
     if (process.stdout.isTTY && mouseReportingEnabled) {
-      process.stdout.write("\x1b[?1003l\x1b[?1006l");
+      process.stdout.write("\x1b[?1003l\x1b[?1000l\x1b[?1006l");
       mouseReportingEnabled = false;
     }
   }
@@ -418,7 +478,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   function disableMouseReportingSync() {
     try {
       if (process.stdout.isTTY && mouseReportingEnabled) {
-        fs.writeSync(1, "\x1b[?1003l\x1b[?1006l");
+        fs.writeSync(1, "\x1b[?1003l\x1b[?1000l\x1b[?1006l");
         mouseReportingEnabled = false;
       }
     } catch (e: any) {
@@ -453,6 +513,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     try {
       const hist = (rl as any).history;
       if (Array.isArray(hist)) {
+        fs.mkdirSync(path.dirname(historyFile), { recursive: true });
         fs.writeFileSync(historyFile, hist.join("\n"), "utf-8");
       }
     } catch (error: unknown) {
@@ -492,6 +553,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   let sigintResetTimer: NodeJS.Timeout | null = null;
   // Dedup guard: prevents double-firing when both `rl` and `process` SIGINT listeners fire.
   let sigintHandling = false;
+  const cancelRunningTurn = () => {
+    screenQueue.length = 0;
+    sessionScreen?.setQueuedCount(0);
+    sessionScreen?.setActivity("Cancelling current turn…");
+    currentRunningAgent?.abort();
+  };
 
   const sigintHandler = () => {
     if (sigintHandling) return;
@@ -499,7 +566,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     try {
       if (isTaskRunning && currentRunningAgent) {
         // A task is running — cancel it instead of exiting
-        currentRunningAgent.abort();
+        cancelRunningTurn();
         return;
       }
 
@@ -508,16 +575,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         // First press (or after reset window)
 
         lastSigintTime = now;
-        // Write hint and redraw the prompt
-        const promptStr = `> `;
+        // Write the hint and ask readline to redraw its actual composer.
+        clearSuggestions(true);
         process.stdout.write(
           `\n${c.yellow}⚠ Press Ctrl+C again to exit${c.reset}\n`,
         );
         drawLavaStatusBar();
-        process.stdout.write(
-          `${c.dim}─────────────────────────────────────────────────────────────────${c.reset}\n`,
-        );
-        process.stdout.write(promptStr);
+        if (isPrompting) rl.prompt(true);
         // Auto-reset after the window expires
         if (sigintResetTimer) clearTimeout(sigintResetTimer);
         sigintResetTimer = setTimeout(() => {
@@ -557,6 +621,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
   // ──── Suggestion Box Helpers ────
   function clearSuggestions(afterNewline = false) {
+    if (sessionScreen) {
+      sessionScreen.setSuggestions([]);
+      activeSuggestionsCount = 0;
+      lastSuggestionFrame = "";
+      return;
+    }
     if (activeSuggestionsCount > 0) {
       disableMouseReporting();
       if (afterNewline) {
@@ -568,47 +638,79 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         readline.cursorTo(process.stdout, 0);
         process.stdout.write("\x1b[J");
         readline.moveCursor(process.stdout, 0, -1);
-        readline.cursorTo(process.stdout, 2 + currentCursor);
+        readline.cursorTo(process.stdout, 4 + currentCursor);
       }
       activeSuggestionsCount = 0;
     }
+    lastSuggestionFrame = "";
   }
 
   async function promptSuspension<T>(fn: () => Promise<T>): Promise<T> {
     clearSuggestions(true);
+    if (sessionScreen?.ownsActivity()) return fn();
     rl.pause();
-    try {
-      while (process.stdin.read() !== null) {
-        /* flush buffered input */
-      }
-    } catch {
-      /* ignore error */
+    // readline remains subscribed to `keypress` even while paused. If left
+    // attached, it echoes each character of a Clack password prompt and can
+    // handle Ctrl+C behind Clack's back. Give the modal exclusive key input.
+    const readlineKeyListeners = process.stdin.rawListeners("keypress");
+    for (const listener of readlineKeyListeners) {
+      process.stdin.off("keypress", listener as (...args: any[]) => void);
     }
-    process.stdin.off("keypress", keypressHandler);
+    passthroughStdin = true;
+    // Clack owns its input while this prompt is open. Leaving bracketed paste
+    // enabled sends its escape delimiters to Clack, which does not share our
+    // composer parser and can make pasted API keys appear to be rejected.
+    if (process.stdout.isTTY) process.stdout.write("\x1b[?2004l");
     try {
       return await fn();
     } finally {
+      passthroughStdin = false;
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
         process.stdout.write("\x1b[?2004h");
       }
-      process.stdin.on("keypress", keypressHandler);
+      for (const listener of readlineKeyListeners) {
+        process.stdin.on("keypress", listener as (...args: any[]) => void);
+      }
       process.stdin.resume();
       rl.resume();
     }
   }
 
   function drawSuggestions(matches: AutocompleteOption[]) {
+    const frameKey = `${rl.line}\0${rl.cursor}\0${highlightedIndex}\0${matches.map((item) => item.value).join("\0")}`;
+    if (activeSuggestionsCount > 0 && frameKey === lastSuggestionFrame) return;
     clearSuggestions();
     if (matches.length === 0) return;
+    if (sessionScreen) {
+      const start = Math.max(0, highlightedIndex - 5);
+      const visible = matches.slice(start, start + 6);
+      sessionScreen.setSuggestions(
+        visible.map((item) => `${item.display}  ${item.desc}`),
+        highlightedIndex - start,
+      );
+      activeSuggestionsCount = visible.length;
+      lastSuggestionFrame = frameKey;
+      return;
+    }
 
-    enableMouseReporting();
+    // Mouse capture prevents the terminal's native wheel scrollback. Keep
+    // suggestions keyboard-first by default; explicit opt-in is available
+    // for terminals where clicking the popup matters more than scrollback.
+    if (process.env.FIXO_MOUSE_SUGGESTIONS === "1") enableMouseReporting();
 
     const currentCursor = rl.cursor;
     let output = "\n";
-
-    const borderTop = `${c.snow}┌────────────────────────────────────────────────────────┐${c.reset}\n`;
-    const borderBottom = `${c.snow}└────────────────────────────────────────────────────────┘${c.reset}`;
+    const cols = process.stdout.columns || 80;
+    const innerWidth = Math.max(6, Math.min(56, cols - 2));
+    const displayLimit = Math.min(25, innerWidth - 5);
+    const descLimit = Math.max(0, innerWidth - displayLimit - 5);
+    const fit = (value: string, width: number) =>
+      width === 0 ? "" : (value.length > width
+        ? `${value.slice(0, Math.max(0, width - 1))}…`
+        : value).padEnd(width);
+    const borderTop = `${c.snow}┌${"─".repeat(innerWidth)}┐${c.reset}\n`;
+    const borderBottom = `${c.snow}└${"─".repeat(innerWidth)}┘${c.reset}`;
     output += borderTop;
 
     let startIndex = 0;
@@ -625,23 +727,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       const displayStr = item.display;
       const descStr = item.desc || "";
 
-      const displayLimit = 25;
-      const descLimit = 28;
-
-      let dispText = displayStr;
-      if (dispText.length > displayLimit) {
-        dispText = dispText.slice(0, displayLimit - 3) + "...";
-      }
-      dispText = dispText.padEnd(displayLimit);
-
-      let descText = descStr;
-      if (descText.length > descLimit) {
-        descText = descText.slice(0, descLimit - 3) + "...";
-      }
-      descText = descText.padEnd(descLimit);
+      const dispText = fit(displayStr, displayLimit);
+      const descText = fit(descStr, descLimit);
 
       if (isHighlighted) {
-        output += `${c.snow}│${c.reset} \x1b[48;5;236m\x1b[38;5;208m${prefix}${dispText} ${c.dim}${descText}\x1b[0m ${c.snow}│${c.reset}\n`;
+        output += `${c.snow}│${c.reset} ${C.VOID3}${C.LAVA}${prefix}${dispText} ${C.SNOW2}${descText}${C.RESET} ${c.snow}│${c.reset}\n`;
       } else {
         output += `${c.snow}│${c.reset} ${prefix}${dispText} ${c.dim}${descText}${c.reset} ${c.snow}│${c.reset}\n`;
       }
@@ -649,44 +739,35 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
     if (matches.length > 8) {
       const remaining = matches.length - 8;
-      const moreStr = `... and ${remaining} more matches`.padEnd(54);
+      const moreStr = fit(`… and ${remaining} more matches`, innerWidth - 2);
       output += `${c.snow}│${c.reset} ${c.dim}${moreStr}${c.reset} ${c.snow}│${c.reset}\n`;
     }
     output += borderBottom;
 
     activeSuggestionsCount =
       visibleMatches.length + (matches.length > 8 ? 1 : 0) + 2;
+    lastSuggestionFrame = frameKey;
     process.stdout.write(output);
 
     readline.moveCursor(process.stdout, 0, -activeSuggestionsCount);
-    readline.cursorTo(process.stdout, 2 + currentCursor);
+    readline.cursorTo(process.stdout, 4 + currentCursor);
 
     // Request cursor position asynchronously
-    process.stdout.write("\x1b[6n");
+    if (mouseReportingEnabled) process.stdout.write("\x1b[6n");
   }
 
   function getActiveToken(lineStr: string, cursorOffset: number) {
     const beforeCursor = lineStr.slice(0, cursorOffset);
-    const lastSlash = beforeCursor.lastIndexOf("/");
-    const lastAt = beforeCursor.lastIndexOf("@");
-
-    const lastTriggerIdx = Math.max(lastSlash, lastAt);
-    if (lastTriggerIdx === -1) {
+    const tokenStart = Math.max(
+      beforeCursor.lastIndexOf(" "),
+      beforeCursor.lastIndexOf("\t"),
+      beforeCursor.lastIndexOf("\n"),
+    ) + 1;
+    const trigger = beforeCursor[tokenStart];
+    if (trigger !== "/" && trigger !== "@") {
       return { trigger: null, query: "", index: -1 };
     }
-
-    if (lastTriggerIdx > 0 && !/\s/.test(beforeCursor[lastTriggerIdx - 1])) {
-      return { trigger: null, query: "", index: -1 };
-    }
-
-    const trigger = lastTriggerIdx === lastSlash ? "/" : "@";
-    const query = beforeCursor.slice(lastTriggerIdx + 1);
-
-    if (/\s/.test(query)) {
-      return { trigger: null, query: "", index: -1 };
-    }
-
-    return { trigger, query, index: lastTriggerIdx };
+    return { trigger, query: beforeCursor.slice(tokenStart + 1), index: tokenStart };
   }
 
   function getSuggestions(
@@ -706,13 +787,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     const q = active.query.toLowerCase();
 
     if (active.trigger === "/") {
-      const matches = COMMANDS_WITH_DESC.filter((c) =>
-        c.cmd
-          .toLowerCase()
-          .startsWith(
-            active.query.toLowerCase() ? "/" + active.query.toLowerCase() : "/",
-          ),
+      const ranked = rankSlashCommands(
+        `/${active.query}`,
+        COMMANDS_WITH_DESC.map((item) => item.cmd),
       );
+      const matches = ranked
+        .map((command) => COMMANDS_WITH_DESC.find((item) => item.cmd === command))
+        .filter((item): item is (typeof COMMANDS_WITH_DESC)[number] => item !== undefined);
       const options = matches.map((m) => ({
         display: m.cmd,
         value: m.cmd + " ",
@@ -814,6 +895,9 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   }
 
   const keypressHandler = (_char: any, key: any) => {
+    if (sessionScreen && sessionScreen.ownsActivity()) {
+      process.nextTick(() => sessionScreen.setComposer(rl.line, rl.cursor));
+    }
     // Intercept Ctrl+B to detach running foreground command to background pool
     if (key && key.name === "b" && key.ctrl) {
       const detached = detachCurrentForegroundCommand();
@@ -832,7 +916,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // Intercept Escape to cancel a running task even when readline is in a question state
     if (key && key.name === "escape") {
       if (isTaskRunning && currentRunningAgent) {
-        currentRunningAgent.abort();
+        cancelRunningTurn();
         return;
       }
       return;
@@ -869,6 +953,24 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   process.stdin.on("keypress", keypressHandler);
 
   let mouseBuffer = "";
+  let passthroughStdin = false;
+
+  function replacePromptLine(value: string, cursor = value.length): void {
+    // rl.write(Ctrl-U) is cursor-relative and can leave the old slash prefix
+    // in readline's hidden buffer even when the screen looks correct.
+    replaceComposerLine(rl as any, value, cursor);
+    sessionScreen?.setComposer(value, cursor);
+  }
+
+  function applyHighlightedSuggestion(): void {
+    const selected = currentMatches[highlightedIndex];
+    const active = getActiveToken(rl.line, rl.cursor);
+    const next = completeActiveToken(rl.line, rl.cursor, active.index, selected?.value ?? "");
+    if (!next) return;
+    clearSuggestions();
+    replacePromptLine(next.line, next.cursor);
+    currentMatches = [];
+  }
 
   function getPasteTokenAtCursorForBackspace(line: string, cursor: number) {
     const regex = /\[Paste #(\d+) \+\d+ lines\]/g;
@@ -900,10 +1002,47 @@ export async function startREPL(options: PromptOptions): Promise<void> {
   const originalEmit = process.stdin.emit as any;
   (process.stdin as any).emit = function (event: string, ...args: any[]) {
     if (event === "data") {
+      if (sessionScreen?.inputDialog(args[0]?.toString() ?? "")) return true;
+      if (passthroughStdin || (sessionScreen && !sessionScreen.ownsActivity())) {
+        return originalEmit.apply(this, [event, ...args]);
+      }
       const rawData = args[0];
       if (rawData) {
         let str = mouseBuffer + rawData.toString();
         mouseBuffer = "";
+
+        if (!isPasting && isPrompting) {
+          if (str === "\r" || str === "\n" || str === "\r\n") {
+            const active = getActiveToken(rl.line, rl.cursor);
+            const suggestions = getSuggestions(rl.line, rl.cursor).options;
+            if (suggestions.length > 0 &&
+                (active.trigger === "@" ||
+                 (isSlashPrefix(rl.line) && suggestions[0].value.trim() !== rl.line))) {
+              currentMatches = suggestions;
+              highlightedIndex = Math.min(highlightedIndex, suggestions.length - 1);
+              applyHighlightedSuggestion();
+              return true;
+            }
+          }
+          if (str === "\t" && currentMatches.length > 0) {
+            applyHighlightedSuggestion();
+            return true;
+          }
+          if (currentMatches.length > 0 && (str === "\x1b[A" || str === "\x1b[B")) {
+            highlightedIndex = nextHighlight(
+              highlightedIndex,
+              currentMatches.length,
+              str === "\x1b[A" ? -1 : 1,
+            );
+            drawSuggestions(currentMatches);
+            return true;
+          }
+          if (currentMatches.length > 0 && str === "\x1b") {
+            clearSuggestions();
+            currentMatches = [];
+            return true;
+          }
+        }
 
         // ── Bracketed Paste Interception ──────────────────────────────
         // This fires when the terminal supports bracketed paste mode
@@ -920,9 +1059,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         }
 
         if (isPasting) {
-          if (str.includes("\x1b[201~")) {
-            const parts = str.split("\x1b[201~");
-            pasteBuffer += parts[0];
+          // The terminator may arrive in a later stdin chunk. Search the
+          // accumulated bytes, not only the most recent data event.
+          const accumulated = pasteBuffer + str;
+          if (accumulated.includes("\x1b[201~")) {
+            const parts = accumulated.split("\x1b[201~");
+            pasteBuffer = parts[0];
             isPasting = false;
 
             const rawLines = pasteBuffer.split(/\r\n|\r|\n/);
@@ -931,18 +1073,18 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               rawLines.pop();
             }
 
-            if (rawLines.length > 1) {
-              // Multi-line paste → attachment
+            const pasted = classifyBracketedPaste(pasteBuffer);
+            if (pasted.kind === "block") {
               const id = pasteIdCounter++;
               pendingPastes.push({
                 id,
-                content: pasteBuffer.replace(/\r\n/g, "\n"),
-                lines: rawLines.length,
+                content: pasted.text,
+                lines: pasted.lines,
               });
-              injectTokenIntoPrompt(pasteToken(id, rawLines.length));
-            } else {
-              // Single line → let it flow into rl normally
-              rl.write(pasteBuffer);
+              injectTokenIntoPrompt(pasteToken(id, pasted.lines));
+            } else if (pasted.text) {
+              rl.write(pasted.text);
+              sessionScreen?.setComposer(rl.line, rl.cursor);
             }
 
             pasteBuffer = "";
@@ -950,7 +1092,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             if (str.length === 0) return true;
           } else {
             // Still accumulating paste data
-            pasteBuffer += str;
+            pasteBuffer = accumulated;
             return true;
           }
         }
@@ -1018,25 +1160,28 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           for (const rawMatch of mouseMatches) {
             const m = rawMatch.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
             if (m) {
-              const [_, buttonStr, _colStr, rowStr, action] = m;
+              const [_, buttonStr, colStr, rowStr, action] = m;
               const button = parseInt(buttonStr, 10);
+              const clickColumn = parseInt(colStr, 10);
               const clickRow = parseInt(rowStr, 10);
               const isPressed = action === "M";
 
-              if (activeSuggestionsCount > 0 && lastPromptRow > 0) {
-                // Mouse Scroll UP
-                if (button === 64) {
-                  highlightedIndex =
-                    (highlightedIndex - 1 + currentMatches.length) %
-                    currentMatches.length;
-                  drawSuggestions(currentMatches);
-                }
-                // Mouse Scroll DOWN
-                else if (button === 65) {
-                  highlightedIndex =
-                    (highlightedIndex + 1) % currentMatches.length;
+              if (button === 64 || button === 65) {
+                const overSuggestions =
+                  activeSuggestionsCount > 0 && lastPromptRow > 0;
+                if (overSuggestions) {
+                  highlightedIndex = nextHighlight(
+                    highlightedIndex,
+                    currentMatches.length,
+                    button === 64 ? -1 : 1,
+                  );
                   drawSuggestions(currentMatches);
                 } else {
+                  sessionScreen?.handleMouse(button, clickColumn, clickRow, action as "M" | "m");
+                }
+              } else if (sessionScreen?.handleMouse(button, clickColumn, clickRow, action as "M" | "m")) {
+                return true;
+              } else if (activeSuggestionsCount > 0 && lastPromptRow > 0) {
                   const boxStartRow = lastPromptRow + 1;
                   let startIndex = 0;
                   if (highlightedIndex >= 8) {
@@ -1071,21 +1216,16 @@ export async function startREPL(options: PromptOptions): Promise<void> {
                           const newLine =
                             beforeTrigger + selected.value + afterCursor;
 
-                          rl.write(null, { ctrl: true, name: "u" });
-                          rl.write(newLine);
-                          const moveCount =
-                            newLine.length -
-                            (beforeTrigger.length + selected.value.length);
-                          for (let i = 0; i < moveCount; i++) {
-                            rl.write(null, { name: "left" });
-                          }
+                          replacePromptLine(
+                            newLine,
+                            beforeTrigger.length + selected.value.length,
+                          );
                         }
                         clearSuggestions();
                       }
                       return true;
                     }
                   }
-                }
               }
             }
           }
@@ -1097,7 +1237,20 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     }
 
     if (event === "keypress") {
+      if (sessionScreen?.hasDialog()) return true;
+      if (sessionScreen && !sessionScreen.ownsActivity()) {
+        return originalEmit.apply(this, [event, ...args]);
+      }
       const [_char, key] = args;
+
+      if (sessionScreen && isPrompting && key?.name === "pageup") {
+        sessionScreen.scrollPage(1);
+        return true;
+      }
+      if (sessionScreen && isPrompting && key?.name === "pagedown") {
+        sessionScreen.scrollPage(-1);
+        return true;
+      }
 
       if (key && key.name === "b" && key.ctrl) {
         const detached = detachCurrentForegroundCommand();
@@ -1153,7 +1306,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         isTaskRunning &&
         currentRunningAgent
       ) {
-        currentRunningAgent.abort();
+        cancelRunningTurn();
         return true;
       }
       if (
@@ -1163,7 +1316,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         isTaskRunning &&
         currentRunningAgent
       ) {
-        currentRunningAgent.abort();
+        cancelRunningTurn();
         return true;
       }
 
@@ -1192,17 +1345,14 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           modeLabel = "PLAN";
         }
 
-        sessionScreen?.setMeta({ mode: currentMode, model: currentModel });
+        syncSessionScreen();
 
-        const savedLine = rl.line;
         process.stdout.write("\r\x1b[K");
         process.stdout.write(
           `  ${c.cyan}⚡ Mode switched: ${c.bold}${modeLabel}${c.reset}\n`,
         );
         drawLavaStatusBar();
-        process.stdout.write(
-          `${c.dim}─────────────────────────────────────────────────────────────────${c.reset}\n> ${savedLine}`,
-        );
+        rl.prompt(true);
         return true; // swallow keypress
       }
 
@@ -1228,9 +1378,8 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         // legacy dirLabel/branchLabel/modelLabel/modeLabel row
         // is gone — the new bar carries all of that information.
         drawLavaStatusBar();
-        process.stdout.write(
-          `${c.dim}─────────────────────────────────────────────────────────────────${c.reset}\n> `,
-        );
+        syncSessionScreen();
+        rl.prompt(true);
         return true; // swallow keypress
       }
     }
@@ -1249,25 +1398,14 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // 1. Capture whatever the user had typed before pasting
     const preTyped = (rl.line ?? "").trimEnd();
 
-    // 2. Clear the entire current line visually
-    readline.clearLine(process.stdout, 0);
-    readline.cursorTo(process.stdout, 0);
-
-    // 3. Wipe rl's internal buffer with Ctrl-U so readline tracks zero length
-    rl.write(null, { ctrl: true, name: "u" });
-
-    // 4. Write the token (+ pre-typed text if any) back into rl
+    // Replace the display and readline's buffer together.
     const newLine = preTyped.length > 0 ? `${token} ${preTyped}` : token;
-    rl.write(newLine);
-    // rl.write() both updates rl.line and echoes the characters to stdout,
-    // so the user sees:   > [Paste #1 +45 lines] Refactor th
-    // with the cursor positioned after the last character.
+    replacePromptLine(newLine);
   }
 
   // ──── REPL loop ────
   const promptForInput = (): void => {
-    sessionScreen?.setMeta({ mode: currentMode, model: currentModel });
-    sessionScreen?.resume();
+    if (sessionScreen) return;
     // Restore raw mode and resume streams to recover from any clack/spinner interactions
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
@@ -1376,7 +1514,6 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
     // ─── Slash commands ───
     if (input.startsWith("/")) {
-      sessionScreen?.suspend();
       const parts = input.split(/\s+/).filter(Boolean);
       const cmd = parts[0];
       const args = parts.slice(1);
@@ -1384,6 +1521,9 @@ export async function startREPL(options: PromptOptions): Promise<void> {
       switch (cmd) {
         case "/exit":
         case "/quit":
+          // /exit unregisters the process hook below, so it must perform the
+          // same restoration now (alternate buffer, paste mode, history, jobs).
+          exitCleanup();
           disableMouseReporting();
           console.log(`\n${c.dim}👋 Goodbye!${c.reset}`);
           process.stdin.off("keypress", keypressHandler);
@@ -1403,7 +1543,6 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           const id = parseInt(args[0] ?? "", 10);
           if (isNaN(id)) {
             console.log(`\n${c.yellow}⚠ Usage: /view <paste-id>${c.reset}`);
-            promptForInput();
             return;
           }
           const paste = pendingPastes.find((p) => p.id === id);
@@ -1415,7 +1554,6 @@ export async function startREPL(options: PromptOptions): Promise<void> {
                   : "none"
               }${c.reset}`,
             );
-            promptForInput();
             return;
           }
           const border = `${c.dim}${"─".repeat(60)}${c.reset}`;
@@ -1426,7 +1564,6 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           console.log(border);
           console.log(paste.content);
           console.log(border);
-          promptForInput();
           return;
         }
 
@@ -1434,13 +1571,11 @@ export async function startREPL(options: PromptOptions): Promise<void> {
           const id = parseInt(args[0] ?? "", 10);
           if (isNaN(id)) {
             console.log(`\n${c.yellow}⚠ Usage: /edit <paste-id>${c.reset}`);
-            promptForInput();
             return;
           }
           const paste = pendingPastes.find((p) => p.id === id);
           if (!paste) {
             console.log(`\n${c.yellow}⚠ Paste #${id} not found.${c.reset}`);
-            promptForInput();
             return;
           }
           const tmpFile = path.join(
@@ -1451,6 +1586,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             fs.writeFileSync(tmpFile, paste.content, "utf-8");
 
             // Release the terminal before handing it to the external editor
+            sessionScreen?.suspend();
             if (process.stdin.isTTY) process.stdin.setRawMode(false);
             process.stdout.write("\x1b[?2004l"); // disable bracketed paste while editor is open
 
@@ -1486,10 +1622,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             }
           } finally {
             // Reclaim raw mode and bracketed paste before returning to REPL
+            sessionScreen?.resume();
             if (process.stdin.isTTY) process.stdin.setRawMode(true);
             process.stdout.write("\x1b[?2004h");
           }
-          promptForInput();
           return;
         }
 
@@ -1504,13 +1640,13 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               );
             }
           }
-          promptForInput();
           return;
         }
 
         default: {
           const handler = commandRegistry[cmd];
           if (handler) {
+            const previousSessionId = currentSessionId;
             const ctx: CommandContext = {
               state: {
                 currentModel,
@@ -1547,6 +1683,9 @@ export async function startREPL(options: PromptOptions): Promise<void> {
               explainIndexedTarget,
             };
             await handler(ctx);
+            if (["/model", "/providers", "/provider", "/model-routing"].includes(cmd)) {
+              agent.refreshConfiguration();
+            }
 
             // Sync state back
             currentModel = ctx.state.currentModel;
@@ -1561,6 +1700,10 @@ export async function startREPL(options: PromptOptions): Promise<void> {
             stats = ctx.state.stats;
             isTaskRunning = ctx.state.isTaskRunning;
             currentRunningAgent = ctx.state.currentRunningAgent;
+            if (currentSessionId !== previousSessionId) {
+              sessionScreen?.setConversationHistory(conversation.exportHistory());
+            }
+            syncSessionScreen();
 
             if (ctx.workspaceFiles) {
               workspaceFiles = ctx.workspaceFiles;
@@ -1633,7 +1776,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // readline-echoed `> [Paste #N +M lines]` line with a proper
     // conversation block so the user can see what they sent.
     // Mirrors the Claude Code / Antigravity transcript pattern.
-    if (pendingPastes.length > 0) {
+    if (pendingPastes.length > 0 && !sessionScreen) {
       // Step 1: reconstruct the original input as it would have looked without folding
       let unfoldedInput = rawInput;
       for (const paste of pendingPastes) {
@@ -1662,7 +1805,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // ─── Agent task ───
     // Format any paths in the input for display
     const displayInput = formatInputPaths(input, cwd);
-    if (displayInput !== input) {
+    if (displayInput !== input && !sessionScreen) {
       // Re-display with highlighted paths
       process.stdout.write(`\x1b[1A\x1b[2K`); // Move up and clear line
       console.log(`> ${displayInput}`);
@@ -1697,28 +1840,40 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     // web backend, IDE extension). Console output is byte-identical
     // to the pre-extraction inline path. The rollback inside the
     // complex path uses git.discardChangesIn() (Phase 0.0 — scoped).
-    const { routeAndExecute } = await import("../agent/task-router.js");
     sessionScreen?.beginTask();
-    const routed = await routeAndExecute(input, context, {
-      agent,
-      conversation,
-      rl,
-      projectConfig,
-      verbose,
-      onSimplePathStart: (a) => {
-        isTaskRunning = true;
-        currentRunningAgent = a;
-      },
-      onSimplePathEnd: () => {
+    if (sessionScreen) {
+      isTaskRunning = true;
+      currentRunningAgent = agent;
+    }
+    const routed = await (async () => {
+      const { routeAndExecute } = await import("../agent/task-router.js");
+      return routeAndExecute(input, context, {
+        agent,
+        conversation,
+        rl,
+        projectConfig,
+        verbose,
+        onSimplePathStart: (a) => {
+          isTaskRunning = true;
+          currentRunningAgent = a;
+        },
+        onSimplePathEnd: () => {
+          isTaskRunning = false;
+          currentRunningAgent = null;
+        },
+      });
+    })().finally(() => {
+      if (sessionScreen) {
         isTaskRunning = false;
         currentRunningAgent = null;
-      },
+      }
     });
     if (routed.route === "plan-mode-deferred") {
       pendingPastes = [];
       return;
     }
     const result = routed.result;
+    if (sessionScreen && routed.route === "complex" && result.response) renderMarkdown(result.response);
 
     pendingPastes = [];
 
@@ -1801,12 +1956,14 @@ export async function startREPL(options: PromptOptions): Promise<void> {
 
     // Save stateful session persistence
     try {
-      const { SessionManager } = await import("../agent/conversation.js");
       // Merge modified files from this run
       for (const file of result.modifiedFiles) {
         if (!sessionModifiedFiles.includes(file)) {
           sessionModifiedFiles.push(file);
         }
+      }
+      if (!currentSessionLabel) {
+        currentSessionLabel = suggestSessionLabel(conversation.exportHistory());
       }
       SessionManager.saveSession(
         conversation,
@@ -1839,13 +1996,54 @@ export async function startREPL(options: PromptOptions): Promise<void> {
         id: currentSessionId,
         fixedInstructions: projectConfig?.systemPrompt,
       });
+      syncSessionScreen();
     } catch (err) {
       // Ignore session save errors
     }
   }
 
   // Start the loop
-  promptForInput();
+  if (sessionScreen) {
+    isPrompting = true;
+    sessionScreen.setComposer("");
+    rl.on("line", (line) => {
+      const text = line.trim();
+      sessionScreen.setComposer("");
+      clearSuggestions(true);
+      currentMatches = [];
+      if (!text) return;
+      screenQueue.push({ text, pastes: [...pendingPastes] });
+      sessionScreen.setQueuedCount(screenProcessing ? screenQueue.length : 0);
+      pendingPastes = [];
+      if (screenProcessing) {
+        sessionScreen.setActivity(`${screenQueue.length} follow-up${screenQueue.length === 1 ? "" : "s"} queued`);
+        return;
+      }
+      void drainQueue();
+    });
+    async function drainQueue(): Promise<void> {
+      if (screenProcessing) return;
+      screenProcessing = true;
+      while (screenQueue.length > 0) {
+        const next = screenQueue.shift()!;
+        sessionScreen!.setQueuedCount(screenQueue.length);
+        sessionScreen!.appendUserMessage(next.text);
+        pendingPastes = next.pastes;
+        try {
+          await handleInput(next.text);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.log(`${C.RED}✗ ${message}${C.RESET}`);
+        } finally {
+          sessionScreen!.endTask();
+          syncSessionScreen();
+        }
+      }
+      screenProcessing = false;
+    }
+  } else {
+    promptForInput();
+  }
 }
 
 /* ──────────────────────── Helpers ──────────────────────── */

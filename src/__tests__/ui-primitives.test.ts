@@ -27,6 +27,7 @@ import {
   purple,
   red,
   bold,
+  setThemeMode,
 } from "../ui/colors.js";
 import { getLavaLogo, getTagline, renderLogo } from "../ui/ascii.js";
 import {
@@ -72,10 +73,21 @@ test.afterEach(() => {
 /* ──────────────────────── Color helpers ──────────────────────── */
 
 test("C palette exposes the canonical brand colours", () => {
-  assert.equal(C.LAVA, "\x1b[38;2;245;110;15m");
+  assert.equal(C.LAVA, "\x1b[38;2;56;189;248m");
   assert.equal(C.SNOW, "\x1b[38;2;251;251;251m");
-  assert.equal(C.VOID, "\x1b[48;2;21;20;25m");
+  assert.equal(C.VOID, "\x1b[48;2;11;18;32m");
   assert.equal(C.RESET, "\x1b[0m");
+});
+
+test("inverted theme switches the canonical surfaces and text together", () => {
+  setThemeMode("inverted");
+  try {
+    assert.equal(C.VOID, "\x1b[48;2;248;250;252m");
+    assert.equal(C.SNOW, "\x1b[38;2;15;23;42m");
+    assert.equal(C.LAVA, "\x1b[38;2;3;105;161m");
+  } finally {
+    setThemeMode("dark");
+  }
 });
 
 test("lava/snow/dim/green/blue/yellow/purple/red/bold wrap with RESET", () => {
@@ -119,24 +131,22 @@ test("providerColor maps common names to brand colours", () => {
 
 /* ──────────────────────── Logo ──────────────────────── */
 
-test("getLavaLogo returns 6 lines, each coloured in LAVA", () => {
+test("getLavaLogo returns a compact three-line signal mark", () => {
   const lines = getLavaLogo().split("\n");
-  assert.equal(lines.length, 6);
+  assert.equal(lines.length, 3);
   for (const line of lines) {
     assert.ok(line.startsWith(C.LAVA));
     assert.ok(line.endsWith(C.RESET));
   }
+  assert.ok(lines.join("").includes("FIXO"));
 });
 
-test("getTagline includes version + 4 keywords in SNOW4", () => {
+test("getTagline keeps version and concise product description", () => {
   const t = getTagline();
   assert.ok(t.startsWith(C.SNOW4));
   assert.ok(t.endsWith(C.RESET));
   assert.match(t, /v\d+\.\d+\.\d+/);
-  assert.ok(t.includes("autonomous"));
-  assert.ok(t.includes("free"));
-  assert.ok(t.includes("multi-provider"));
-  assert.ok(t.includes("freellmapi"));
+  assert.ok(t.includes("your coding workspace"));
 });
 
 test("renderLogo writes logo + tagline + blank line to stdout", () => {
@@ -218,6 +228,18 @@ test("renderStatusBar clamps contextPercent above 100 and below 0", () => {
   renderStatusBar({ ...baseState, contextPercent: -5 });
   assert.ok(captured.includes("0% used"));
   assert.ok(captured.includes("100% remaining"));
+});
+
+test("renderStatusBar shows distinct EXPLORE and SCOUT modes", () => {
+  const state: CLIState = {
+    mode: "EXPLORE", routing: "auto", model: "auto", branch: "main",
+    contextPercent: 0, providersCount: 0, transport: "direct",
+  };
+  renderStatusBar(state);
+  assert.ok(captured.includes("EXPLORE"));
+  captured = "";
+  renderStatusBar({ ...state, mode: "SCOUT" });
+  assert.ok(captured.includes("SCOUT"));
 });
 
 /* ──────────────────────── Provider list ──────────────────────── */
@@ -450,6 +472,29 @@ test("renderSessionHeader shows the human-readable started-at", () => {
   assert.ok(captured.includes("New session"));
   // The toLocaleString output should appear (en-US format).
   assert.ok(captured.match(/[A-Z][a-z]{2} \d+, \d{4}/));
+});
+
+test("renderSessionHeader never wraps a narrow terminal", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+  Object.defineProperty(process.stdout, "columns", { configurable: true, value: 40 });
+  try {
+    renderSessionHeader({
+      status: "new",
+      startedAt: "2026-06-06T14:42:00Z",
+      provider: "An extraordinarily long provider name",
+      model: "an-extraordinarily-long-model-name",
+      mode: "BUILD",
+      routing: "auto",
+      contextWindow: "200k",
+      endpoint: "https://an-extraordinarily-long-provider.example/v1",
+    });
+    for (const line of captured.split("\n").filter(Boolean)) {
+      assert.ok(visLen(line) <= 40, `header line exceeded 40 columns: ${visLen(line)}`);
+    }
+  } finally {
+    if (descriptor) Object.defineProperty(process.stdout, "columns", descriptor);
+    else Reflect.deleteProperty(process.stdout, "columns");
+  }
 });
 
 /* ──────────────────────── Plan renderer ──────────────────────── */

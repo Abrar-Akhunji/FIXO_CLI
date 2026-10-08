@@ -1,16 +1,4 @@
-/**
- * ascii.ts — The FixO ASCII logo + `renderLogo()` entry point.
- *
- * The logo is six rows of block-letter `█` characters, rendered
- * entirely in `C.LAVA` so it pops against the dark void
- * background. Below it sits a single tagline line in `C.SNOW4`
- * (very dim) with the version + three brand keywords.
- *
- * The block characters are intentional — they render the same
- * width in every monospace font and don't trigger the
- * "double-wide emoji" behaviour that some terminals apply to
- * glyphs in the supplementary plane.
- */
+/** Compact FIXO identity for terminals that do not use the full-screen UI. */
 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -28,13 +16,11 @@ try {
   // fallback if package.json is missing or malformed
 }
 
+// A nine-cell, dotted F monogram: compact enough for every terminal width.
 const LOGO_LINES: ReadonlyArray<string> = [
-  " ███████╗██╗██╗  ██╗ ██████╗      ██████╗██╗     ██╗",
-  " ██╔════╝██║╚██╗██╔╝██╔═══██╗    ██╔════╝██║     ██║",
-  " █████╗  ██║ ╚███╔╝ ██║   ██║    ██║     ██║     ██║",
-  " ██╔══╝  ██║ ██╔██╗ ██║   ██║    ██║     ██║     ██║",
-  " ██║     ██║██╔╝ ██╗╚██████╔╝    ╚██████╗███████╗██║",
-  " ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝      ╚═════╝╚══════╝╚═╝",
+  "  ● ● ●",
+  "  ● ● ·  FIXO",
+  "  ● · ·  CLI",
 ];
 
 /** Returns the logo lines, each pre-coloured in LAVA. */
@@ -44,7 +30,7 @@ export function getLavaLogo(): string {
 
 /** Returns just the tagline (used by tests and by `renderLogo`). */
 export function getTagline(): string {
-  const TAGLINE = ` v${cliVersion}  ·  autonomous  ·  free  ·  multi-provider  ·  freellmapi`;
+  const TAGLINE = `  v${cliVersion}  ·  your coding workspace`;
   return `${C.SNOW4}${TAGLINE}${C.RESET}`;
 }
 

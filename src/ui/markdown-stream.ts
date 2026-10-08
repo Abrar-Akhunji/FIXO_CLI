@@ -23,18 +23,23 @@
  * then rendered with Unicode box drawing.
  */
 import { C, visLen, padToVisual } from "./colors.js";
+import { beginAssistantMessage, endAssistantMessage, getActiveSessionScreen, sessionScreenOwnsActivity } from "./session-screen.js";
+import { cellWidth, clipStyledText, wrapStyledText } from "./terminal-text.js";
 
 /* ──────────────────────── width helpers ──────────────────────── */
 
 const FRAME_FALLBACK = 76;
 
 function frameWidth(): number {
+  const screen = getActiveSessionScreen();
+  if (screen) return Math.max(4, Math.min(100, screen.transcriptWidth() - 4));
   const cols = process.stdout.columns ?? FRAME_FALLBACK + 4;
   return Math.max(20, Math.min(100, cols - 4));
 }
 
 function isTTY(): boolean {
-  return process.stdout.isTTY === true;
+  // Alternate-screen output is append-only; cursor-up previews duplicate code.
+  return process.stdout.isTTY === true && !sessionScreenOwnsActivity();
 }
 
 function safeWrite(s: string): void {
@@ -413,6 +418,7 @@ export class MarkdownStreamRenderer {
    */
   write(chunk: string): void {
     if (this.firstWrite) {
+      beginAssistantMessage();
       // Match the leading newline the legacy console.log path used,
       // so the rendered block lifts off the prompt cleanly.
       safeWrite("\n");
@@ -440,6 +446,7 @@ export class MarkdownStreamRenderer {
     }
     if (this.state === "code-fence") this.closeCodeFence();
     if (this.state === "table") this.flushTable();
+    if (!this.firstWrite) endAssistantMessage();
   }
 
   /* ────────── line dispatch ────────── */
@@ -568,12 +575,14 @@ export class MarkdownStreamRenderer {
     const w = frameWidth();
     const inner = w - 2;
     for (const raw of this.codeLines) {
-      const truncated = raw.length > inner ? raw.slice(0, inner) : raw;
-      const highlighted = highlightCodeLine(truncated, this.codeLang);
-      const pad = Math.max(0, inner - visLen(highlighted));
-      safeWriteLine(
-        `  ${C.LAVA}│${C.RESET} ${highlighted}${" ".repeat(pad)} ${C.LAVA}│${C.RESET}`,
-      );
+      // Long lines remain readable instead of silently losing their tail.
+      for (const line of wrapStyledText(raw.replace(/\t/g, "  "), Math.max(1, inner))) {
+        const highlighted = highlightCodeLine(line, this.codeLang);
+        const pad = Math.max(0, inner - cellWidth(highlighted));
+        safeWriteLine(
+          `  ${C.LAVA}│${C.RESET} ${highlighted}${" ".repeat(pad)} ${C.LAVA}│${C.RESET}`,
+        );
+      }
     }
     safeWriteLine(`  ${C.LAVA}└${"─".repeat(frameWidth())}┘${C.RESET}`);
     this.state = "text";
@@ -584,8 +593,8 @@ export class MarkdownStreamRenderer {
 
   private codeTopBorder(label: string): string {
     const w = frameWidth();
-    const tag = ` ${label} `;
-    const fillLen = Math.max(0, w - tag.length - 1);
+    const tag = clipStyledText(` ${label} `, w);
+    const fillLen = Math.max(0, w - cellWidth(tag));
     return `  ${C.LAVA}┌${C.RESET}${C.LAVA}${tag}${C.RESET}${C.LAVA}${"─".repeat(fillLen)}┐${C.RESET}`;
   }
 

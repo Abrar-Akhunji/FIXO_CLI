@@ -11,7 +11,8 @@ process.on("warning", (warning) => {
  * FixO CLI — Entry Point
  *
  * Boot sequence:
- * 1. Print the lava logo + command grid (new UI is the only UI).
+ * 1. Start the full-screen interactive session on a TTY; keep a compact
+ *    inline banner for one-shot and non-interactive commands.
  * 2. Load global config (~/.fixocli/config.json)
  * 3. If first run → run setup wizard
  * 4. Load project config (.freellmapi.yml) if present
@@ -171,7 +172,7 @@ ${C.BOLD}OPTIONS${C.RESET}
 ${C.BOLD}INTERACTIVE COMMANDS${C.RESET}
   /help               Show all commands
   /model [name|list]  Set model or list available models
-  /providers          Manage AI provider API keys
+  /providers          Connect built-in or custom AI providers
   /mode [mode]        Set PLAN/BUILD/EXPLORE/SCOUT mode
   /select [file]      Pin a file for agent context
   /unselect           Clear all pinned files
@@ -280,9 +281,6 @@ function loadProjectConfig(cwd: string): ProjectConfig | undefined {
 /* ──────────────────────── Main ──────────────────────── */
 
 async function main(): Promise<void> {
-  // ──── Step 0: Print the lava logo (the new UI is the only UI) ────
-  renderLogo();
-
   // Node version check (major >= 20)
   const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
   if (nodeMajor < 20) {
@@ -293,6 +291,13 @@ async function main(): Promise<void> {
   }
 
   const args = parseArgs();
+  const fullScreenSession = process.env.NODE_ENV !== "test" &&
+    process.env.FIXO_UI !== "inline" &&
+    process.stdin.isTTY === true && process.stdout.isTTY === true &&
+    !args.task && !args.help && !args.version && !args.diagnose;
+  if (!fullScreenSession && !args.help && !args.version && !args.diagnose) {
+    renderLogo();
+  }
 
   if (args.help) {
     printHelpMessage();
@@ -609,11 +614,11 @@ async function main(): Promise<void> {
   let resolvedEndpoint: string;
   let providerLabel: string;
   if (config.provider_mode === "direct") {
-    const { PROVIDER_REGISTRY } = await import("./agent/providers-manager.js");
+    const { ProvidersManager } = await import("./agent/providers-manager.js");
     const providerName =
       config.lastSession?.provider ?? config.directProvider?.name;
     const def = providerName
-      ? PROVIDER_REGISTRY.find((d) => d.name === providerName)
+      ? ProvidersManager.getDefinition(providerName)
       : undefined;
     resolvedEndpoint = envEndpoint || def?.baseUrl || "direct";
     providerLabel = providerName ?? "auto";
@@ -621,7 +626,7 @@ async function main(): Promise<void> {
     resolvedEndpoint = envEndpoint || config.apiUrl || DEFAULT_API_URL;
     providerLabel = "auto";
   }
-  renderSessionHeader({
+  if (!fullScreenSession) renderSessionHeader({
     status: "new",
     startedAt: new Date().toISOString(),
     provider: providerLabel,

@@ -5,7 +5,7 @@
  * readline return an error the model can read and then continue.
  */
 import type readline from "node:readline";
-import * as p from "@clack/prompts";
+import * as p from "../ui/prompts.js";
 
 export interface AskUserArgs {
   question?: string;
@@ -51,10 +51,6 @@ export async function answerAskUserQuestion(
   }
 
   if (rl) rl.pause();
-  const { holdSessionScreen, releaseSessionScreen } = await import(
-    "../ui/session-screen.js"
-  );
-  holdSessionScreen();
   try {
     const choice = await p.select({
       message: question,
@@ -66,7 +62,6 @@ export async function answerAskUserQuestion(
     }
     return choice;
   } finally {
-    releaseSessionScreen();
     rl.resume();
   }
 }

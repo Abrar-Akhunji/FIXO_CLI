@@ -1,13 +1,16 @@
-import * as p from "@clack/prompts";
+import * as p from "../prompts.js";
 import type { FreeLLMConfig } from "../../config.js";
 import { saveConfig } from "../../config.js";
 import {
   ProvidersManager,
-  PROVIDER_REGISTRY,
   fetchProxyCatalog,
+  validateCustomProviderInput,
+  type CustomProviderInput,
+  type ProviderProtocol,
 } from "../../agent/providers-manager.js";
 
 import { C, colors } from "../colors.js";
+import { getActiveSessionScreen } from "../session-screen.js";
 
 import { type CommandHandler } from "./types.js";
 
@@ -26,7 +29,28 @@ function persistModelSelection(
     updatedAt: new Date().toISOString(),
   };
   config.defaultModel = model;
+  if (provider && provider !== "auto") {
+    config.provider_mode = "direct";
+    config.directProvider = { name: provider, defaultModel: model };
+  } else if (provider === "auto") {
+    config.provider_mode = "proxy";
+    delete config.directProvider;
+  }
   saveConfig(config);
+}
+
+function clearRemovedProviderSelection(
+  ctx: Parameters<CommandHandler>[0],
+  providerName: string,
+): void {
+  if (ctx.config.lastSession?.provider !== providerName) return;
+  ctx.state.currentModel = "auto";
+  ctx.config.defaultModel = "auto";
+  delete ctx.config.lastSession;
+  delete ctx.config.directProvider;
+  ctx.config.provider_mode = ctx.config.freellmapi_api_key ? "proxy" : "direct";
+  saveConfig(ctx.config);
+  console.log(`${colors.yellow}The selected model belonged to ${providerName}; choose another with /model.${colors.reset}`);
 }
 
 const PROXY_CATALOG_UNREACHABLE =
@@ -40,20 +64,19 @@ async function askPrompt<T>(
   return run();
 }
 
-async function ownerOfConnectedModel(modelId: string): Promise<string | null> {
-  for (const def of PROVIDER_REGISTRY) {
-    if (!ProvidersManager.has(def.name)) continue;
-    const fetched = await ProvidersManager.fetchRemoteModels(def.name);
-    if (fetched.models.includes(modelId)) return def.name;
-  }
-  return null;
+async function ownersOfConnectedModel(modelId: string): Promise<string[]> {
+  const connected = ProvidersManager.getAllDefinitions().filter((def) => ProvidersManager.has(def.name));
+  const catalogs = await Promise.all(connected.map((def) => ProvidersManager.fetchRemoteModels(def.name)));
+  return connected
+    .filter((_, index) => catalogs[index]!.models.includes(modelId))
+    .map((def) => def.name);
 }
 
 async function acceptDirectModel(
   ctx: Parameters<CommandHandler>[0],
   modelId: string,
 ): Promise<boolean> {
-  const connected = PROVIDER_REGISTRY.some((def) =>
+  const connected = ProvidersManager.getAllDefinitions().some((def) =>
     ProvidersManager.has(def.name),
   );
   if (!connected) {
@@ -62,12 +85,24 @@ async function acceptDirectModel(
     );
     return false;
   }
-  const owner = await ownerOfConnectedModel(modelId);
-  if (!owner) {
+  const owners = await ownersOfConnectedModel(modelId);
+  if (owners.length === 0) {
     console.log(
       `\n${colors.yellow}'${modelId}' is not in a connected provider catalog. Run /providers add, then choose a model that provider returns.${colors.reset}`,
     );
     return false;
+  }
+  let owner = owners[0];
+  if (owners.length > 1) {
+    const picked = await askPrompt(ctx, () => p.select({
+      message: `${modelId} exists at multiple providers — choose one:`,
+      options: owners.map((name) => ({
+        value: name,
+        label: ProvidersManager.getDefinition(name)?.displayName ?? name,
+      })),
+    }));
+    if (p.isCancel(picked)) return false;
+    owner = picked as string;
   }
   ctx.state.currentModel = modelId;
   ProvidersManager.setModelProviderHint(modelId, owner);
@@ -106,7 +141,7 @@ function acceptProxyModel(
 
 async function proxyModelCommand(
   ctx: Parameters<CommandHandler>[0],
-): Promise<void> {
+): Promise<"back" | void> {
   if (ctx.args.length > 0 && ctx.args[0] !== "list") {
     let ids: string[] = [];
     let failed = true;
@@ -161,7 +196,7 @@ async function proxyModelCommand(
       message: `Current model: ${colors.cyan}${ctx.state.currentModel}${colors.reset} — proxy catalog:`,
       options: [
         { value: "auto", label: "auto", hint: "proxy routes the request" },
-        ...ids.map((id) => ({ value: id, label: id, hint: "" })),
+        ...[...new Set(ids)].filter((id) => id !== "auto").map((id) => ({ value: id, label: id, hint: "" })),
         ...(failed
           ? []
           : [
@@ -183,7 +218,7 @@ async function proxyModelCommand(
     console.log(
       `\n${colors.dim}Model unchanged: ${colors.cyan}${ctx.state.currentModel}${colors.reset}`,
     );
-    return;
+    return "back";
   }
 
   if (picked === "__manual__") {
@@ -203,18 +238,149 @@ async function proxyModelCommand(
   acceptProxyModel(ctx, picked as string, ids, failed);
 }
 
-export const modelCommand: CommandHandler = async (ctx) => {
-  if (ctx.config.provider_mode !== "direct") {
-    await proxyModelCommand(ctx);
-    return;
+async function pickModelFromProvider(
+  ctx: Parameters<CommandHandler>[0],
+  providerName: string,
+  prefetchedModels?: readonly string[],
+): Promise<boolean> {
+  const def = ProvidersManager.getDefinition(providerName);
+  if (!def || !ProvidersManager.has(providerName)) {
+    console.log(`\n${colors.yellow}Connect ${providerName} with /providers add ${providerName} first.${colors.reset}`);
+    return false;
   }
+  const screen = getActiveSessionScreen();
+  if (!prefetchedModels) {
+    screen?.setActivity(`Loading ${def.displayName} models…`);
+  }
+  const fetched = prefetchedModels
+    ? {
+        models: [...prefetchedModels],
+        source: "live" as const,
+        fetchedAt: new Date().toISOString(),
+      }
+    : await ProvidersManager.fetchRemoteModels(providerName);
+  if (!prefetchedModels) screen?.setActivity("Ready");
+  if (fetched.models.length === 0) {
+    console.log(`\n${colors.yellow}Could not load ${def.displayName} models. Check the key or network, then run /providers test ${providerName} and retry /model.${colors.reset}`);
+    return false;
+  }
+  const picked = await askPrompt(ctx, () => p.select({
+    message: `${def.displayName} / ${fetched.models.length} models${fetched.source === "cache" ? " (cached)" : ""}`,
+    options: fetched.models.map((model) => ({
+      value: model,
+      label: model,
+      hint: model === ctx.state.currentModel && ctx.config.lastSession?.provider === providerName
+        ? "currently selected" : "",
+    })),
+    initialValue: fetched.models.includes(ctx.state.currentModel)
+      ? ctx.state.currentModel : undefined,
+  }));
+  if (p.isCancel(picked)) return false;
+  ctx.state.currentModel = picked as string;
+  ProvidersManager.setModelProviderHint(ctx.state.currentModel, providerName);
+  persistModelSelection(ctx.config, ctx.state.currentModel, providerName);
+  ctx.conversation.setContextLimit(ctx.state.currentModel);
+  console.log(`\n${colors.green}✓ ${def.displayName} / ${ctx.state.currentModel}${colors.reset}`);
+  return true;
+}
+
+async function addCustomProviderFlow(
+  ctx: Parameters<CommandHandler>[0],
+): Promise<void> {
+  const providerId = await askPrompt(ctx, () => p.text({
+    message: "Provider ID — lowercase name used in commands",
+    placeholder: "my-provider",
+    validate: (value) => {
+      const id = value.trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9-_]*$/.test(id)) {
+        return "Use lowercase letters, numbers, dash, or underscore; start with a letter or number.";
+      }
+      if (id.length > 48) return "Use 48 characters or fewer.";
+      if (ProvidersManager.getDefinition(id)) return `Provider ID '${id}' is already in use.`;
+      return undefined;
+    },
+  }));
+  if (p.isCancel(providerId)) return;
+
+  const displayName = await askPrompt(ctx, () => p.text({
+    message: "Display name — shown in provider and model menus",
+    placeholder: "My AI Gateway",
+    validate: (value) => !value.trim() ? "Display name is required." : value.trim().length > 64 ? "Use 64 characters or fewer." : undefined,
+  }));
+  if (p.isCancel(displayName)) return;
+
+  const protocol = await askPrompt(ctx, () => p.select<ProviderProtocol>({
+    message: "Which API protocol does this endpoint implement?",
+    options: [
+      {
+        value: "openai",
+        label: "OpenAI-compatible",
+        hint: "Bearer key · FIXO adds /models and /chat/completions",
+      },
+      {
+        value: "anthropic",
+        label: "Anthropic-compatible",
+        hint: "x-api-key · FIXO adds /models and /messages",
+      },
+    ],
+  }));
+  if (p.isCancel(protocol)) return;
+
+  const endpointExample = protocol === "anthropic"
+    ? "https://api.anthropic.com/v1"
+    : "https://api.example.com/v1";
+  const base: Omit<CustomProviderInput, "baseUrl"> = {
+    name: String(providerId).trim().toLowerCase(),
+    displayName: String(displayName).trim(),
+    protocol,
+  };
+  const endpoint = await askPrompt(ctx, () => p.text({
+    message: "API base URL — include documented /v1; omit model and message paths",
+    placeholder: endpointExample,
+    validate: (value) => validateCustomProviderInput({ ...base, baseUrl: value }) ?? undefined,
+  }));
+  if (p.isCancel(endpoint)) return;
+
+  const apiKey = await askPrompt(ctx, () => p.password({
+    message: `${String(displayName).trim()} API key — masked and excluded from chat history`,
+    placeholder: protocol === "anthropic" ? "sk-ant-api03-…" : "sk-…",
+    validate: (value) => !value.trim() ? "API key is required." : undefined,
+  }));
+  if (p.isCancel(apiKey)) return;
+
+  const input: CustomProviderInput = { ...base, baseUrl: String(endpoint) };
+  const screen = getActiveSessionScreen();
+  screen?.setActivity(`Checking ${input.displayName} and loading models…`);
+  try {
+    const models = await ProvidersManager.verifyCustomProviderAndFetchModels(input, String(apiKey));
+    const definition = ProvidersManager.addCustomProvider(input, String(apiKey));
+    console.log(
+      `\n${colors.green}✓ Connected ${definition.displayName}.${colors.reset} ${colors.dim}${models.length} models loaded from ${definition.baseUrl}/models.${colors.reset}`,
+    );
+    await pickModelFromProvider(ctx, definition.name, models);
+  } catch (error) {
+    console.log(
+      `\n${colors.red}✗ Custom provider was not saved: ${(error as Error).message}${colors.reset}`,
+    );
+  } finally {
+    screen?.setActivity("Ready");
+  }
+}
+
+export const modelCommand: CommandHandler = async (ctx) => {
   if (ctx.args[0] === "list") {
     // Connected providers only. Unkeyed providers show the add-key line.
+    const definitions = ProvidersManager.getAllDefinitions();
+    const connected = definitions.filter((def) => ProvidersManager.has(def.name));
+    const catalogs = new Map(await Promise.all(connected.map(async (def) => [
+      def.name,
+      await ProvidersManager.fetchRemoteModels(def.name),
+    ] as const)));
     console.log(
       `\n${colors.bold}${colors.cyan}Available Models by Provider${colors.reset}`,
     );
     console.log(`${colors.dim}${"─".repeat(60)}${colors.reset}`);
-    for (const def of PROVIDER_REGISTRY) {
+    for (const def of definitions) {
       const hasKey = ProvidersManager.has(def.name);
       if (!hasKey) {
         console.log(
@@ -225,13 +391,13 @@ export const modelCommand: CommandHandler = async (ctx) => {
         );
         continue;
       }
-      const fetched = await ProvidersManager.fetchRemoteModels(def.name);
+      const fetched = catalogs.get(def.name)!;
       console.log(
         `\n  ${C.SNOW}${colors.bold}${def.displayName}${colors.reset} ${colors.green}[key ✓]${colors.reset}`,
       );
       if (fetched.models.length === 0) {
         console.log(
-          `    ${colors.yellow}${def.displayName} did not return models.${colors.reset}`,
+          `    ${colors.yellow}Models unavailable — check the key or network; retry /providers test ${def.name}.${colors.reset}`,
         );
         continue;
       }
@@ -248,44 +414,33 @@ export const modelCommand: CommandHandler = async (ctx) => {
     return;
   }
   if (ctx.args.length === 0) {
-    const connectedDefs = PROVIDER_REGISTRY.filter((def) =>
+    // Provider scope is explicit, independent of the previous transport mode.
+    // A connected key must not disappear just because the last turn used proxy.
+    while (true) {
+    const connectedDefs = ProvidersManager.getAllDefinitions().filter((def) =>
       ProvidersManager.has(def.name),
     );
-    if (connectedDefs.length === 0) {
-      console.log(
-        `\n${colors.yellow}No direct AI providers connected. Run /providers add <name> to attach an API key.${colors.reset}`,
-      );
-      console.log(
-        `${colors.dim}  Available providers: ${PROVIDER_REGISTRY.map((p) => p.name).join(", ")}${colors.reset}\n`,
-      );
-      return;
-    }
 
     // Redesigned interactive model picker grouped by connected provider
+    const initialProvider =
+      connectedDefs.find((def) => def.name === ctx.config.lastSession?.provider)?.name ??
+      connectedDefs.find((def) =>
+        ProvidersManager.getCachedModels(def.name)?.models?.includes(
+          ctx.state.currentModel,
+        ),
+      )?.name ?? connectedDefs[0]?.name;
     const pickedProvider = await askPrompt(ctx, () => p.select({
-      message: `Current model: ${colors.cyan}${ctx.state.currentModel}${colors.reset} — Select AI Provider:`,
+      message: "Choose a provider, then a model",
       options: [
-        {
-          value: "all",
-          label: "Show all models (flat list)",
-          hint: `${connectedDefs.length} provider${connectedDefs.length > 1 ? "s" : ""}`,
-        },
         ...connectedDefs.map((def) => ({
           value: def.name,
           label: def.displayName,
-          hint: " [key ✓]",
+          hint: `${ctx.config.provider_mode === "direct" && ctx.config.lastSession?.provider === def.name ? "current • " : ""}connected${ProvidersManager.getCachedModels(def.name)?.models.length ? ` • ${ProvidersManager.getCachedModels(def.name)!.models.length} models` : ""}`,
         })),
-        {
-          value: "__add__",
-          label: "➕ Connect another provider (/providers add)…",
-          hint: "",
-        },
-        { value: "__manual__", label: "Enter model ID manually…", hint: "" },
+        { value: "__proxy__", label: "FreeLLMAPI proxy", hint: "aggregated catalog • auto routing" },
+        { value: "__add__", label: "Connect a provider…", hint: "add an API key" },
       ],
-      initialValue:
-        connectedDefs.find((def) =>
-          def.models.includes(ctx.state.currentModel),
-        )?.name || "all",
+      initialValue: initialProvider,
     }));
 
     if (p.isCancel(pickedProvider)) {
@@ -299,127 +454,20 @@ export const modelCommand: CommandHandler = async (ctx) => {
       await providersCommand({ ...ctx, args: [] });
       return;
     }
-
-    if (pickedProvider === "__manual__") {
-      const manual = await askPrompt(ctx, () =>
-        p.text({
-          message: "Enter model ID:",
-          placeholder: "a model id returned by a connected provider",
-          validate: (v) => (!v.trim() ? "Model ID is required" : undefined),
-        }),
-      );
-      if (!p.isCancel(manual) && manual) {
-        await acceptDirectModel(ctx, manual.trim());
-      }
+    if (pickedProvider === "__proxy__") {
+      if (await proxyModelCommand(ctx) === "back") continue;
       return;
     }
-
-    if (pickedProvider === "all") {
-      const allOptions: Array<{ value: string; label: string; hint: string }> =
-        [];
-      for (const def of PROVIDER_REGISTRY) {
-        if (!ProvidersManager.has(def.name)) continue;
-        const fetched = await ProvidersManager.fetchRemoteModels(def.name);
-        for (const model of fetched.models) {
-          allOptions.push({
-            value: model,
-            label: model,
-            hint: def.displayName,
-          });
-        }
-      }
-      if (allOptions.length === 0) {
-        console.log(
-          `\n${colors.yellow}No connected provider returned models. Add a key with /providers add <name>.${colors.reset}`,
-        );
-        return;
-      }
-      const known = new Set(allOptions.map((option) => option.value));
-      const picked = await askPrompt(ctx, () =>
-        p.select({
-          message: "Select a model from the flat list:",
-          options: [
-            ...(known.has(ctx.state.currentModel)
-              ? [
-                  {
-                    value: ctx.state.currentModel,
-                    label: `Keep current: ${ctx.state.currentModel}`,
-                    hint: "no change",
-                  },
-                ]
-              : []),
-            ...allOptions,
-          ],
-          initialValue: known.has(ctx.state.currentModel)
-            ? ctx.state.currentModel
-            : allOptions[0]?.value,
-        }),
-      );
-      if (p.isCancel(picked)) {
-        console.log(
-          `\n${colors.dim}Model unchanged: ${colors.cyan}${ctx.state.currentModel}${colors.reset}`,
-        );
-        return;
-      }
-      await acceptDirectModel(ctx, picked as string);
-      return;
+    if (await pickModelFromProvider(ctx, pickedProvider as string)) return;
     }
-
-    const def = PROVIDER_REGISTRY.find((p) => p.name === pickedProvider)!;
-    const hasKey = ProvidersManager.has(def.name);
-    if (!hasKey) {
-      console.log(
-        `\n${colors.yellow}No API key for ${def.displayName}. Run /providers add ${def.name}.${colors.reset}`,
-      );
-      return;
-    }
-
-    const fetched = await ProvidersManager.fetchRemoteModels(def.name);
-    if (fetched.models.length === 0) {
-      console.log(
-        `\n${colors.yellow}${def.displayName} did not return models.${colors.reset}`,
-      );
-      return;
-    }
-    const modelList = fetched.models;
-    const keyStatus = `${colors.green}[key ✓]${colors.reset}`;
-    const sourceSuffix =
-      fetched.source === "cache"
-        ? ` ${colors.dim}[cached]${colors.reset}`
-        : "";
-
-    const picked = await askPrompt(ctx, () => p.select({
-      message: `Select a model from ${colors.bold}${def.displayName}${colors.reset} ${keyStatus}${sourceSuffix}:`,
-      options: modelList.map((m) => {
-        return {
-          value: m,
-          label: m,
-          hint: m === ctx.state.currentModel ? "currently selected" : "",
-        };
-      }),
-      initialValue: modelList.includes(ctx.state.currentModel)
-        ? ctx.state.currentModel
-        : undefined,
-    }));
-
-    if (p.isCancel(picked)) {
-      console.log(
-        `\n${colors.dim}Model unchanged: ${colors.cyan}${ctx.state.currentModel}${colors.reset}`,
-      );
-      return;
-    }
-
-    ctx.state.currentModel = picked as string;
-    // Store explicit model-provider association so
-    // resolveDirectConfig can route this model directly
-    // to this provider (critical for live-fetched models
-    // that don't appear in the static registry).
-    ProvidersManager.setModelProviderHint(ctx.state.currentModel, def.name);
-    persistModelSelection(ctx.config, ctx.state.currentModel, def.name);
-    ctx.conversation.setContextLimit(ctx.state.currentModel);
-    console.log(
-      `\n${colors.green}✓ Model set to: ${colors.bold}${ctx.state.currentModel}${colors.reset}`,
-    );
+  }
+  // /model zen is a shortcut to that provider's own catalog.
+  if (ctx.args.length === 1 && ProvidersManager.getDefinition(ctx.args[0])) {
+    await pickModelFromProvider(ctx, ctx.args[0]);
+    return;
+  }
+  if (ctx.config.provider_mode !== "direct") {
+    await proxyModelCommand(ctx);
     return;
   }
   await acceptDirectModel(ctx, ctx.args.join(" ").trim());
@@ -435,18 +483,31 @@ export const providersCommand: CommandHandler = async (ctx) => {
   // when the action is add/update. The legacy text routes
   // below remain unchanged for muscle-memory + scripting.
   if (!sub) {
+    const definitions = ProvidersManager.getAllDefinitions();
     const pickedProvider = await askPrompt(ctx, () =>
       p.select({
         message: "Select an AI provider:",
-        options: PROVIDER_REGISTRY.map((def) => ({
-          value: def.name,
-          label: def.displayName,
-          hint: ProvidersManager.has(def.name) ? "[key ✓]" : "[no key]",
-        })),
+        options: [
+          ...definitions.map((def) => ({
+            value: def.name,
+            label: def.displayName,
+            hint: `${def.custom ? "custom · " : ""}${ProvidersManager.has(def.name) ? "[key ✓]" : "[no key]"}`,
+          })),
+          {
+            value: "__custom__",
+            label: "Add custom provider…",
+            hint: "OpenAI- or Anthropic-compatible endpoint",
+          },
+        ],
       }),
     );
     if (p.isCancel(pickedProvider)) {
       console.log(`\n${colors.dim}/providers cancelled.${colors.reset}`);
+      return;
+    }
+
+    if (pickedProvider === "__custom__") {
+      await addCustomProviderFlow(ctx);
       return;
     }
 
@@ -462,6 +523,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
     const action = await askPrompt(ctx, () => p.select({
       message: `${def.displayName} — choose an action:`,
       options: [
+        ...(hasKey ? [{ value: "model", label: "Choose a model", hint: "browse only this provider's models" }] : []),
         { value: "add", label: hasKey ? "Update API key" : "Add API key" },
         {
           value: "test",
@@ -480,6 +542,10 @@ export const providersCommand: CommandHandler = async (ctx) => {
       console.log(`\n${colors.dim}/providers cancelled.${colors.reset}`);
       return;
     }
+    if (action === "model") {
+      await pickModelFromProvider(ctx, def.name);
+      return;
+    }
 
     if (action === "add") {
       console.log(
@@ -496,11 +562,10 @@ export const providersCommand: CommandHandler = async (ctx) => {
         return;
       }
       ProvidersManager.add(def.name, key as string);
-      persistModelSelection(ctx.config, ctx.state.currentModel, def.name);
       console.log(
         `\n${colors.green}✓ ${def.displayName} API key saved securely to ~/.fixocli/providers.json${colors.reset}`,
       );
-      await ctx.refreshModelsForProvider(def.name);
+      await pickModelFromProvider(ctx, def.name);
       return;
     }
 
@@ -519,6 +584,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
       );
       if (!p.isCancel(confirmed) && confirmed) {
         const removed = ProvidersManager.remove(def.name);
+        if (removed) clearRemovedProviderSelection(ctx, def.name);
         console.log(
           removed
             ? `\n${colors.green}✓ Removed API key for ${def.displayName}.${colors.reset}`
@@ -553,7 +619,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
         `${colors.dim}  Use /providers add <name> to connect a provider (e.g. /providers add groq)${colors.reset}`,
       );
       console.log(
-        `${colors.dim}  Available: ${PROVIDER_REGISTRY.map((p) => p.name).join(", ")}${colors.reset}`,
+        `${colors.dim}  Available: ${ProvidersManager.getAllDefinitions().map((p) => p.name).join(", ")}; or choose Add custom provider.${colors.reset}`,
       );
     } else {
       console.log(
@@ -576,6 +642,11 @@ export const providersCommand: CommandHandler = async (ctx) => {
     return;
   }
 
+  if (sub === "custom" || sub === "add-custom") {
+    await addCustomProviderFlow(ctx);
+    return;
+  }
+
   if (sub === "add") {
     const name = ctx.args[1]?.toLowerCase();
     if (!name) {
@@ -583,7 +654,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
         `\n${colors.yellow}Usage: /providers add <provider-name>${colors.reset}`,
       );
       console.log(
-        `${colors.dim}  Available: ${PROVIDER_REGISTRY.map((p) => p.name).join(", ")}${colors.reset}`,
+        `${colors.dim}  Available: ${ProvidersManager.getAllDefinitions().map((p) => p.name).join(", ")}; custom: /providers add-custom${colors.reset}`,
       );
       return;
     }
@@ -591,7 +662,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
     if (!def) {
       console.log(`\n${colors.red}✗ Unknown provider: ${name}${colors.reset}`);
       console.log(
-        `${colors.dim}  Available: ${PROVIDER_REGISTRY.map((p) => p.name).join(", ")}${colors.reset}`,
+        `${colors.dim}  Available: ${ProvidersManager.getAllDefinitions().map((p) => p.name).join(", ")}; custom: /providers add-custom${colors.reset}`,
       );
       return;
     }
@@ -602,10 +673,9 @@ export const providersCommand: CommandHandler = async (ctx) => {
       `${colors.dim}  Get your API key at: ${def.docsUrl}${colors.reset}`,
     );
     const apiKeyInput = await askPrompt(ctx, () =>
-      p.text({
+      p.password({
         message: `Enter your ${def.displayName} API key:`,
-        placeholder: "sk-... or gsk_...",
-        validate: (v) => (!v.trim() ? "API key is required" : undefined),
+        validate: (v) => (!v?.trim() ? "API key is required" : undefined),
       }),
     );
     if (p.isCancel(apiKeyInput)) {
@@ -613,14 +683,13 @@ export const providersCommand: CommandHandler = async (ctx) => {
       return;
     }
     ProvidersManager.add(name, apiKeyInput as string);
-    persistModelSelection(ctx.config, ctx.state.currentModel, def.name);
     console.log(
       `\n${colors.green}✓ ${def.displayName} API key saved securely to ~/.fixocli/providers.json${colors.reset}`,
     );
     console.log(
-      `${colors.dim}  FixO will now route ${def.displayName} requests directly (bypassing the SaaS proxy).${colors.reset}`,
+      `${colors.dim}  Choose a model to use ${def.displayName} directly.${colors.reset}`,
     );
-    await ctx.refreshModelsForProvider(name);
+    await pickModelFromProvider(ctx, name);
     return;
   }
 
@@ -640,6 +709,7 @@ export const providersCommand: CommandHandler = async (ctx) => {
     );
     if (!p.isCancel(confirmed) && confirmed) {
       const removed = ProvidersManager.remove(name);
+      if (removed) clearRemovedProviderSelection(ctx, name);
       console.log(
         removed
           ? `\n${colors.green}✓ Removed API key for ${name}.${colors.reset}`
@@ -668,34 +738,18 @@ export const providersCommand: CommandHandler = async (ctx) => {
       `\n${colors.dim}Testing connection to ${directConf.displayName} (${directConf.baseUrl})...${colors.reset}`,
     );
     try {
-      const testHeaders: Record<string, string> = {
-        Authorization: `Bearer ${directConf.apiKey}`,
-      };
-      if (name === "zen" || name === "openrouter") {
-        testHeaders["HTTP-Referer"] = "https://opencode.ai/";
-        testHeaders["X-Title"] = "opencode";
-      } else if (name === "nvidia") {
-        testHeaders["HTTP-Referer"] = "https://opencode.ai/";
-        testHeaders["X-Title"] = "opencode";
-        testHeaders["X-BILLING-INVOKE-ORIGIN"] = "OpenCode";
-      } else if (name === "cerebras") {
-        testHeaders["X-Cerebras-3rd-Party-Integration"] = "opencode";
-      }
-
-      const resp = await fetch(`${directConf.baseUrl}/models`, {
-        headers: testHeaders,
-        signal: AbortSignal.timeout(8000),
-      });
-      if (resp.ok) {
+      const result = await ProvidersManager.fetchRemoteModels(name);
+      if (result.source === "live" && result.models.length > 0) {
         console.log(
-          `${colors.green}✓ Connection to ${directConf.displayName} successful! (HTTP ${resp.status})${colors.reset}`,
+          `${colors.green}✓ Connection to ${directConf.displayName} successful — ${result.models.length} models loaded.${colors.reset}`,
         );
-        // Warm the cache so /model picker shows live IDs.
-        await ctx.refreshModelsForProvider(name);
-      } else {
-        const text = await resp.text().catch(() => "");
+      } else if (result.source === "cache" && result.models.length > 0) {
         console.log(
-          `${colors.red}✗ ${directConf.displayName} returned HTTP ${resp.status}${text ? ": " + text.slice(0, 100) : ""}${colors.reset}`,
+          `${colors.yellow}⚠ Live connection to ${directConf.displayName} failed. ${result.models.length} cached models remain available; check the key, network, protocol, and base URL.${colors.reset}`,
+        );
+      } else {
+        console.log(
+          `${colors.red}✗ ${directConf.displayName} did not return a model catalog. Check its key, protocol, and base URL.${colors.reset}`,
         );
       }
     } catch (err: any) {
@@ -707,10 +761,10 @@ export const providersCommand: CommandHandler = async (ctx) => {
   }
 
   console.log(
-    `\n${colors.yellow}Usage: /providers [list | add <name> | remove <name> | test <name>]${colors.reset}`,
+    `\n${colors.yellow}Usage: /providers [list | add <name> | add-custom | remove <name> | test <name>]${colors.reset}`,
   );
   console.log(
-    `${colors.dim}  Available providers: ${PROVIDER_REGISTRY.map((p) => p.name).join(", ")}${colors.reset}`,
+    `${colors.dim}  Available providers: ${ProvidersManager.getAllDefinitions().map((p) => p.name).join(", ")}${colors.reset}`,
   );
   return;
 };

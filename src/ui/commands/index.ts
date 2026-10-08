@@ -10,7 +10,10 @@ import * as usageCmds from "./usage-commands.js";
 
 export const commandRegistry: Record<string, CommandHandler> = {
   "/session": sessionCmds.sessionCommand,
+  "/sessions": sessionCmds.sessionCommand,
   "/resume": sessionCmds.resumeCommand,
+  "/continue": sessionCmds.resumeCommand,
+  "/new": async (ctx) => sessionCmds.sessionCommand({ ...ctx, args: ["new"] }),
   "/rewind": sessionCmds.rewindCommand,
   "/rename": sessionCmds.renameCommand,
   "/snapshot": sessionCmds.snapshotCommand,

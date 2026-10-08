@@ -26,6 +26,7 @@ import {
   DirectModelUnresolvedError,
 } from "../agent/agent-client.js";
 import { ProvidersManager } from "../agent/providers-manager.js";
+import { getDefaultConfig, saveConfig } from "../config.js";
 
 type FetchFn = typeof globalThis.fetch;
 
@@ -210,6 +211,90 @@ test("proxy mode (back-compat default) — unknown model still routes to the pro
       seenUrls[0],
       "https://example-proxy.local/v1/chat/completions",
     );
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("custom OpenAI-compatible provider routes chat through its configured base URL", async () => {
+  const ctx = mkHome();
+  try {
+    ProvidersManager.addCustomProvider({
+      name: "acme-openai",
+      displayName: "Acme OpenAI",
+      baseUrl: "https://acme.example.test/v1",
+      protocol: "openai",
+    }, "sk-acme");
+    const config = getDefaultConfig();
+    config._firstRunComplete = true;
+    config.provider_mode = "direct";
+    config.defaultModel = "acme-code";
+    config.directProvider = { name: "acme-openai", defaultModel: "acme-code" };
+    config.lastSession = { provider: "acme-openai", model: "acme-code", updatedAt: new Date().toISOString() };
+    saveConfig(config);
+    let seenUrl = "";
+    let seenHeaders: Record<string, string> = {};
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      seenUrl = String(input);
+      seenHeaders = init?.headers as Record<string, string>;
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "custom ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        model: "acme-code",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as FetchFn;
+    const result = await new AgentClient("", undefined, false, "direct").chat(
+      [{ role: "user", content: "hi" }],
+      "acme-code",
+    );
+    assert.equal(result.content, "custom ok");
+    assert.equal(seenUrl, "https://acme.example.test/v1/chat/completions");
+    assert.equal(seenHeaders.Authorization, "Bearer sk-acme");
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("custom Anthropic-compatible provider uses /messages and Anthropic headers", async () => {
+  const ctx = mkHome();
+  try {
+    ProvidersManager.addCustomProvider({
+      name: "acme-claude",
+      displayName: "Acme Claude",
+      baseUrl: "https://claude.example.test/v1",
+      protocol: "anthropic",
+    }, "sk-ant-acme");
+    const config = getDefaultConfig();
+    config._firstRunComplete = true;
+    config.provider_mode = "direct";
+    config.defaultModel = "claude-acme";
+    config.directProvider = { name: "acme-claude", defaultModel: "claude-acme" };
+    config.lastSession = { provider: "acme-claude", model: "claude-acme", updatedAt: new Date().toISOString() };
+    saveConfig(config);
+    let seenUrl = "";
+    let seenHeaders: Record<string, string> = {};
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      seenUrl = String(input);
+      seenHeaders = init?.headers as Record<string, string>;
+      return new Response(JSON.stringify({
+        id: "msg_custom",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "claude custom ok" }],
+        model: "claude-acme",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 2 },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as FetchFn;
+    const result = await new AgentClient("", undefined, false, "direct").chat(
+      [{ role: "user", content: "hi" }],
+      "claude-acme",
+    );
+    assert.equal(result.content, "claude custom ok");
+    assert.equal(seenUrl, "https://claude.example.test/v1/messages");
+    assert.equal(seenHeaders["x-api-key"], "sk-ant-acme");
+    assert.equal(seenHeaders["anthropic-version"], "2023-06-01");
+    assert.equal(seenHeaders.Authorization, undefined);
   } finally {
     ctx.restore();
   }

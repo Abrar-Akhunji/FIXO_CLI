@@ -27,11 +27,12 @@ import {
   SNAPSHOT_VERSION,
   isValidSessionLabel,
   renameSnapshot,
+  deleteSnapshot,
   type SaveInput,
   type SessionMessage,
 } from "../runtime/session-snapshots.js";
 import { emptyTodoList, addItem } from "../context/todo.js";
-import { ConversationManager, SessionManager } from "../agent/conversation.js";
+import { ConversationManager, SessionManager, suggestSessionLabel } from "../agent/conversation.js";
 
 const originalFixoHome = process.env.FIXO_HOME;
 const testFixoHome = fs.mkdtempSync(path.join(os.tmpdir(), "fixo-snapshots-"));
@@ -267,6 +268,25 @@ test("renameSnapshot atomically updates session label on disk", () => {
   }
 });
 
+test("deleteSnapshot removes only the exact workspace snapshot", () => {
+  const cwd = mkTmp("snap-test-");
+  try {
+    const result = saveSnapshot(buildSampleInput(cwd));
+    assert.equal(result.ok, true);
+    assert.equal(deleteSnapshot(cwd, "../outside").ok, false);
+    assert.equal(deleteSnapshot(cwd, result.id).ok, true);
+    assert.equal(loadSnapshot(cwd, result.id).ok, false);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("suggestSessionLabel creates a safe human name from the first request", () => {
+  assert.equal(suggestSessionLabel([{ role: "user", content: "Fix the provider/model picker!" }]), "Fix the provider model picker");
+  assert.equal(suggestSessionLabel([]), "Untitled session");
+  assert.ok(suggestSessionLabel([{ role: "user", content: "x".repeat(100) }]).length <= 64);
+});
+
 test("SessionManager.renameSession atomically updates global session label", () => {
   // Mock the sessions directory to avoid writing to ~/.fixocli/sessions
   const tmpDir = mkTmp("sessions-test-");
@@ -303,6 +323,10 @@ test("SessionManager.renameSession atomically updates global session label", () 
     // Rename non-existent session
     const ok2 = SessionManager.renameSession("non-existent-uuid", "label");
     assert.equal(ok2, false);
+
+    assert.equal(SessionManager.deleteSession("../escape"), false);
+    assert.equal(SessionManager.deleteSession(sessionId), true);
+    assert.equal(SessionManager.listSessions().some((s) => s.sessionId === sessionId), false);
   } finally {
     SessionManager.getSessionsDir = originalGetSessionsDir;
     fs.rmSync(tmpDir, { recursive: true, force: true });

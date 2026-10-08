@@ -538,7 +538,7 @@ export const COMMANDS_WITH_DESC = [
   { cmd: "/model", desc: "Interactive model picker or set model" },
   {
     cmd: "/providers",
-    desc: "Manage AI provider API keys (add/list/remove/test)",
+    desc: "Connect built-in or custom AI providers",
   },
   // Files & Context
   { cmd: "/select", desc: "Pin a file for agent context" },
@@ -554,11 +554,15 @@ export const COMMANDS_WITH_DESC = [
     desc: "Summarise & compress conversation (frees context tokens)",
   },
   { cmd: "/stats", desc: "Show session token usage statistics" },
-  { cmd: "/session", desc: "Manage sessions: list | load <uuid> | new" },
+  { cmd: "/session", desc: "Search, resume, rename, create, or delete sessions" },
+  { cmd: "/sessions", desc: "Open session manager (alias: /session)" },
+  { cmd: "/new", desc: "Save this chat and start a new session" },
+  { cmd: "/rename", desc: "Rename the active session" },
   {
     cmd: "/resume",
-    desc: "List or reload a saved session for this workspace",
+    desc: "Search or reload a saved session for this workspace",
   },
+  { cmd: "/continue", desc: "Resume a saved session (alias: /resume)" },
   {
     cmd: "/rewind",
     desc: "Drop later conversation turns. Does not change files",
@@ -661,13 +665,15 @@ export function printHelp(): void {
   line("/loop", "<interval> <prompt>", "Run prompt on a recurring schedule (e.g. /loop 30s npm test)");
   line(
     "/session",
-    "<sub-command>",
-    "Manage sessions: list | load <uuid> | new",
+    "[sub-command]",
+    "Search, resume, rename, create, or delete sessions",
   );
+  line("/new", "", "Save this chat and start a new session");
+  line("/rename", "[name]", "Rename the active session");
   line(
     "/resume",
     "[id]",
-    "List or reload a saved session for this workspace, in BUILD",
+    "Search or reload a saved session for this workspace, in BUILD",
   );
   line(
     "/rewind",

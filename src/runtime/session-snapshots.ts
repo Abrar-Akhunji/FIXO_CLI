@@ -375,3 +375,24 @@ export function renameSnapshot(
   }
   return { ok: true, id, label: updated.label };
 }
+
+export interface DeleteSnapshotResult {
+  ok: boolean;
+  id: string;
+  error?: string;
+}
+
+/** Delete one workspace snapshot by exact id. */
+export function deleteSnapshot(cwd: string, id: string): DeleteSnapshotResult {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    return { ok: false, id, error: "invalid snapshot id" };
+  }
+  const file = snapshotPath(cwd, id);
+  if (!fs.existsSync(file)) return { ok: false, id, error: "snapshot not found" };
+  try {
+    fs.unlinkSync(file);
+    return { ok: true, id };
+  } catch (err) {
+    return { ok: false, id, error: (err as Error).message };
+  }
+}

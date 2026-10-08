@@ -16,7 +16,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ProvidersManager } from "../agent/providers-manager.js";
+import {
+  ProvidersManager,
+  validateCustomProviderInput,
+} from "../agent/providers-manager.js";
 
 type FetchFn = typeof globalThis.fetch;
 
@@ -317,6 +320,101 @@ test("verifyKeyAndFetchModels — network error throws descriptive error", async
         return true;
       },
     );
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("custom provider validation explains base URL and transport requirements", () => {
+  assert.match(validateCustomProviderInput({
+    name: "My Provider",
+    displayName: "My Provider",
+    baseUrl: "https://api.example.com/v1",
+    protocol: "openai",
+  }) ?? "", /Provider ID/);
+  assert.match(validateCustomProviderInput({
+    name: "local",
+    displayName: "Local",
+    baseUrl: "http://api.example.com/v1",
+    protocol: "openai",
+  }) ?? "", /HTTPS/);
+  assert.match(validateCustomProviderInput({
+    name: "custom",
+    displayName: "Custom",
+    baseUrl: "https://api.example.com/v1/chat/completions",
+    protocol: "openai",
+  }) ?? "", /base URL only/);
+  assert.match(validateCustomProviderInput({
+    name: "custom",
+    displayName: "Custom",
+    baseUrl: "https://user:secret@api.example.com/v1",
+    protocol: "openai",
+  }) ?? "", /credentials/);
+  assert.match(validateCustomProviderInput({
+    name: "custom",
+    displayName: "Custom",
+    baseUrl: "https://api.example.com/v1?token=secret",
+    protocol: "openai",
+  }) ?? "", /query string/);
+  assert.match(validateCustomProviderInput({
+    name: "custom",
+    displayName: "Unsafe\u001b[31m",
+    baseUrl: "https://api.example.com/v1",
+    protocol: "openai",
+  }) ?? "", /control characters/);
+  assert.equal(validateCustomProviderInput({
+    name: "local-ai",
+    displayName: "Local AI",
+    baseUrl: "http://localhost:11434/v1/",
+    protocol: "openai",
+  }), null);
+});
+
+test("custom OpenAI provider is encrypted, discoverable, and uses Bearer model discovery", async () => {
+  const ctx = mkHome();
+  try {
+    const input = {
+      name: "acme-ai",
+      displayName: "Acme AI",
+      baseUrl: "https://gateway.acme.test/v1/",
+      protocol: "openai" as const,
+    };
+    const capture: { url?: string; headers?: Record<string, string> } = {};
+    globalThis.fetch = mockFetchOk({ data: [{ id: "acme-code" }] }, capture);
+    const models = await ProvidersManager.verifyCustomProviderAndFetchModels(input, "sk-acme-secret");
+    assert.deepEqual(models, ["acme-code"]);
+    const definition = ProvidersManager.addCustomProvider(input, "sk-acme-secret");
+    assert.equal(definition.baseUrl, "https://gateway.acme.test/v1");
+    assert.equal(ProvidersManager.getDefinition("acme-ai")?.custom, true);
+    assert.equal(ProvidersManager.getAllDefinitions().some((item) => item.name === "acme-ai"), true);
+    assert.equal(capture.url, "https://gateway.acme.test/v1/models");
+    assert.equal(capture.headers?.Authorization, "Bearer sk-acme-secret");
+    const stored = fs.readFileSync(path.join(ctx.home, "providers.json"), "utf-8");
+    assert.equal(stored.includes("sk-acme-secret"), false);
+  } finally {
+    ctx.restore();
+  }
+});
+
+test("custom Anthropic provider uses x-api-key for discovery and survives key updates", async () => {
+  const ctx = mkHome();
+  try {
+    const input = {
+      name: "claude-gateway",
+      displayName: "Claude Gateway",
+      baseUrl: "https://claude.example.test/v1",
+      protocol: "anthropic" as const,
+    };
+    ProvidersManager.addCustomProvider(input, "sk-ant-first");
+    ProvidersManager.add("claude-gateway", "sk-ant-second");
+    const capture: { url?: string; headers?: Record<string, string> } = {};
+    globalThis.fetch = mockFetchOk({ data: [{ id: "claude-custom" }] }, capture);
+    const result = await ProvidersManager.fetchRemoteModels("claude-gateway");
+    assert.deepEqual(result.models, ["claude-custom"]);
+    assert.equal(capture.headers?.["x-api-key"], "sk-ant-second");
+    assert.equal(capture.headers?.["anthropic-version"], "2023-06-01");
+    assert.equal(capture.headers?.Authorization, undefined);
+    assert.equal(ProvidersManager.getDefinition("claude-gateway")?.openAICompat, false);
   } finally {
     ctx.restore();
   }
